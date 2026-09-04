@@ -24,7 +24,8 @@ use crate::format::demux::DemuxOptions;
 use crate::format::{InputFormatContext, OutputFormatContext, Stream};
 use crate::log_error;
 use crate::log_info;
-use crate::swscale::ScaleContext;
+use crate::swscale::{ScaleContext, ScaleOptions};
+use crate::log_verbose;
 use crate::util::error::{Error, Result};
 use crate::util::frame::Frame;
 use crate::util::imgutils;
@@ -99,11 +100,16 @@ fn transcode(cli: &Cli) -> Result<Stats> {
 
     // ---- output stream construction (ffmpeg_mux_init.c) -------------------
     let out_pix_fmt = cli.output_pix_fmt.unwrap_or(in_st.codecpar.format);
+    // `-s` overrides the output geometry (what the auto-inserted scale
+    // filter would negotiate in ffmpeg).
+    let (out_w, out_h) = cli
+        .output_size
+        .unwrap_or((in_st.codecpar.width, in_st.codecpar.height));
     let mut out_par = CodecParameters {
         codec_id: CodecId::Rawvideo,
         format: out_pix_fmt,
-        width: in_st.codecpar.width,
-        height: in_st.codecpar.height,
+        width: out_w,
+        height: out_h,
         sample_aspect_ratio: in_st.sample_aspect_ratio,
         framerate: in_st.avg_frame_rate,
         field_order: in_st.codecpar.field_order,
@@ -151,14 +157,28 @@ fn transcode(cli: &Cli) -> Result<Stats> {
     let mut encoder = RawVideoEncoder::new();
     encoder.init(&out_st.codecpar)?;
 
-    let scaler = if in_st.codecpar.format != out_pix_fmt {
+    // ffmpeg inserts a scale filter when format OR size differs.
+    let needs_scale = in_st.codecpar.format != out_pix_fmt
+        || (in_st.codecpar.width, in_st.codecpar.height) != (out_w, out_h);
+    let mut scaler = if needs_scale {
         Some(ScaleContext::new(
             (in_st.codecpar.format, in_st.codecpar.width, in_st.codecpar.height),
-            (out_pix_fmt, out_st.codecpar.width, out_st.codecpar.height),
+            (out_pix_fmt, out_w, out_h),
+            ScaleOptions {
+                algorithm: cli.scale_algorithm,
+                engine: cli.scale_engine,
+            },
         )?)
     } else {
-        None // no auto-inserted scale filter — like ffmpeg when formats match
+        None
     };
+    if let Some(scaler) = scaler.as_ref() {
+        log_verbose!(None, "auto-inserted scale filter: {}x{} {} -> {}x{} {} ({}, {} engine)",
+            in_st.codecpar.width, in_st.codecpar.height, in_st.codecpar.format.name(),
+            out_w, out_h, out_pix_fmt.name(),
+            cli.scale_algorithm.name(),
+            match scaler_engine_used(scaler) { true => "vulkan", false => "cpu" });
+    }
 
     // ---- the loop ----------------------------------------------------------
     let mut stats = Stats {
@@ -185,7 +205,7 @@ fn transcode(cli: &Cli) -> Result<Stats> {
         loop {
             match decoder.receive_frame() {
                 Ok(frame) => {
-                    let out_frame = convert_frame(&frame, scaler.as_ref(), &out_st)?;
+                    let out_frame = convert_frame(&frame, &mut scaler, &out_st)?;
                     encoder.send_frame(Some(&out_frame))?;
                     loop {
                         match encoder.receive_packet() {
@@ -218,9 +238,14 @@ fn transcode(cli: &Cli) -> Result<Stats> {
     Ok(stats)
 }
 
-/// The filter-graph stand-in: insert the scale filter only when the formats
-/// differ, else pass the frame through untouched (Arc-shared planes).
-fn convert_frame(frame: &Frame, scaler: Option<&ScaleContext>, out_st: &Stream) -> Result<Frame> {
+/// Whether the scale context ended up on the GPU (for the verbose banner).
+fn scaler_engine_used(scaler: &ScaleContext) -> bool {
+    scaler.uses_gpu()
+}
+
+/// The filter-graph stand-in: insert the scale filter only when format or
+/// size differs, else pass the frame through untouched (Arc-shared planes).
+fn convert_frame(frame: &Frame, scaler: &mut Option<ScaleContext>, out_st: &Stream) -> Result<Frame> {
     match scaler {
         None => Ok(frame.clone()),
         Some(ctx) => {

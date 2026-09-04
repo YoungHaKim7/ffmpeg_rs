@@ -86,6 +86,8 @@
 pub mod codec;
 pub mod fftools;
 pub mod format;
+pub mod gpu;
+pub mod shaders;
 pub mod swscale;
 pub mod util;
 

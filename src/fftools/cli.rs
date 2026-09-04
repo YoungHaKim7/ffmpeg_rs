@@ -8,13 +8,17 @@
 //!
 //! global:         -y | -n | -v LEVEL | -loglevel LEVEL | -h | --help
 //! input opts:     -f FMT | -pixel_format FMT | -video_size WxH | -framerate R
-//! output opts:    -f FMT | -pix_fmt FMT
+//! output opts:    -f FMT | -pix_fmt FMT | -s WxH
+//!                  | -scale_algo nearest|bilinear|bicubic
+//!                  | -scale_engine auto|vulkan|cpu
 //! ```
 //!
-//! Deliberately absent (each arrives with a later phase): `-s` (Vulkan
-//! swscale), `-r`/`-vf` (filtergraph), `-ss` (seeking), `-t`, `-an/-vn`,
-//! multiple inputs/outputs.
+//! `-s` resamples through swscale — on the GPU (`vf_scale_vulkan` port)
+//! when a Vulkan device is available. Deliberately absent (later phases):
+//! `-r`/`-vf` (filtergraph), `-ss` (seeking), `-t`, `-an/-vn`, multiple
+//! inputs/outputs.
 
+use crate::swscale::{ScaleAlgorithm, ScaleEngine};
 use crate::util::error::{Error, Result};
 use crate::util::log::Level;
 use crate::util::pixfmt::PixelFormat;
@@ -52,6 +56,12 @@ pub struct Cli {
     pub output_format: Option<String>,
     /// `-pix_fmt`.
     pub output_pix_fmt: Option<PixelFormat>,
+    /// `-s WxH` — resample through swscale (Phase 2).
+    pub output_size: Option<(u32, u32)>,
+    /// `-scale_algo` (default bicubic, ffmpeg's default).
+    pub scale_algorithm: ScaleAlgorithm,
+    /// `-scale_engine` (default auto: GPU when possible).
+    pub scale_engine: ScaleEngine,
 }
 
 const USAGE: &str = "\
@@ -71,11 +81,14 @@ input options (before -i):
 
 output options (after -i):
   -f FMT          force output format (yuv4mpegpipe|rawvideo)
-  -pix_fmt F      output pixel format (converted on the CPU in phase 1)
+  -pix_fmt F      output pixel format
+  -s WXH          rescale, e.g. 320x240 (Vulkan compute when available)
+  -scale_algo A   nearest | bilinear | bicubic (default)
+  -scale_engine E auto (default) | vulkan | cpu
 
-Phase 1 pipeline: demux (y4m|rawvideo) -> decode (rawvideo) -> convert ->
-encode (rawvideo) -> mux (y4m|rawvideo). Scaling (-s) arrives with the
-Vulkan swscale phase.";
+Pipeline: demux (y4m|rawvideo) -> decode (rawvideo) -> swscale -> encode
+(rawvideo) -> mux (y4m|rawvideo). Resampling runs the libswscale kernels on
+a Vulkan compute device when one is available, else on the CPU.";
 
 /// `av_parse_video_rate` subset: `n` or `n:d`.
 fn parse_rate(s: &str) -> Result<Rational> {
@@ -132,6 +145,9 @@ pub fn parse(args: &[String]) -> Result<Cli> {
         output_url: String::new(),
         output_format: None,
         output_pix_fmt: None,
+        output_size: None,
+        scale_algorithm: ScaleAlgorithm::Bicubic,
+        scale_engine: ScaleEngine::Auto,
     };
 
     let mut i = 0usize;
@@ -215,9 +231,39 @@ pub fn parse(args: &[String]) -> Result<Cli> {
                 let v = next(arg)?;
                 cli.output_pix_fmt = Some(parse_pixfmt(arg, &v)?);
             }
-            "-s" | "-r" | "-vf" | "-ss" => {
+            "-s" => {
+                if !have_input {
+                    return Err(Error::InvalidArgument(
+                        "-s is an output option; put it after -i".into(),
+                    ));
+                }
+                let v = next(arg)?;
+                cli.output_size = Some(parse_size(&v)?);
+            }
+            "-scale_algo" => {
+                let v = next(arg)?;
+                cli.scale_algorithm = ScaleAlgorithm::from_name(&v).ok_or_else(|| {
+                    Error::InvalidArgument(format!(
+                        "Unknown scaling algorithm '{v}' (nearest|bilinear|bicubic)"
+                    ))
+                })?;
+            }
+            "-scale_engine" => {
+                let v = next(arg)?;
+                cli.scale_engine = match v.as_str() {
+                    "auto" => ScaleEngine::Auto,
+                    "vulkan" => ScaleEngine::Vulkan,
+                    "cpu" => ScaleEngine::Cpu,
+                    other => {
+                        return Err(Error::InvalidArgument(format!(
+                            "Unknown scaling engine '{other}' (auto|vulkan|cpu)"
+                        )))
+                    }
+                };
+            }
+            "-r" | "-vf" | "-ss" => {
                 return Err(Error::Unsupported(format!(
-                    "option {arg} arrives with a later phase (Vulkan swscale / filtergraph / seeking)"
+                    "option {arg} arrives with a later phase (filtergraph / seeking)"
                 )));
             }
             s if s.starts_with('-') => {
@@ -292,11 +338,28 @@ mod tests {
     }
 
     #[test]
+    fn scale_options_parse() {
+        let cli = parse(&args(&[
+            "-i", "in.y4m", "-s", "320x240",
+            "-scale_algo", "bilinear", "-scale_engine", "cpu", "out.raw",
+        ]))
+        .unwrap();
+        assert_eq!(cli.output_size, Some((320, 240)));
+        assert_eq!(cli.scale_algorithm, ScaleAlgorithm::Bilinear);
+        assert_eq!(cli.scale_engine, ScaleEngine::Cpu);
+        // Defaults: bicubic (ffmpeg's default) on the best engine.
+        let cli = parse(&args(&["-i", "in.y4m", "out.raw"])).unwrap();
+        assert_eq!(cli.scale_algorithm, ScaleAlgorithm::Bicubic);
+        assert_eq!(cli.scale_engine, ScaleEngine::Auto);
+        assert!(parse(&args(&["-i", "a", "-s", "320", "b"])).is_err());
+        assert!(parse(&args(&["-i", "a", "-scale_algo", "fast", "b"])).is_err());
+    }
+
+    #[test]
     fn rejects_bad_input() {
         assert!(parse(&args(&["out.y4m"])).is_err()); // no -i
         assert!(parse(&args(&["-i", "in.y4m"])).is_err()); // no output
         assert!(parse(&args(&["-i", "a.y4m", "-x", "b.raw"])).is_err()); // unknown flag
-        assert!(parse(&args(&["-i", "a.y4m", "-s", "320x240", "b.raw"])).is_err()); // phase 2
         assert!(parse(&args(&["-i", "a.y4m", "-pix_fmt", "nope", "b.raw"])).is_err());
         assert!(parse(&args(&["-v", "loud", "-i", "a.y4m", "b.raw"])).is_err());
     }

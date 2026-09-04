@@ -1,0 +1,176 @@
+#version 450
+
+// Port of libswscale's resampling + YUV→RGB conversion to a Vulkan compute
+// shader — the vf_scale_vulkan.c / libswscale/vulkan/ shape. The math
+// mirrors src/swscale/mod.rs (the CPU reference) tap for tap:
+//
+//   * coordinate mapping  (dst + 0.5)·src/dst − 0.5     (filters.c:78)
+//   * kernels             box / triangle / cubic(B=0, C=0.6)  (filters.c)
+//   * chroma siting       CENTER (p−0.5)/2  else  p/2
+//   * BT.601 range-aware  YUV→RGB, R8G8B8A8_UNORM output
+//
+// Planes come in as (unfiltered) texture2D R8 images and leave either as an
+// RGBA8 storage image (packed-RGB modes) or as R8 storage planes (planar
+// resampling). texelFetch keeps the sampling exact — no hardware filtering
+// so CPU and GPU agree bit-for-bit up to float rounding.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform texture2D plane_y;
+layout(set = 0, binding = 1) uniform texture2D plane_u;
+layout(set = 0, binding = 2) uniform texture2D plane_v;
+layout(set = 0, binding = 3, r8) uniform writeonly image2D out_y;
+layout(set = 0, binding = 4, r8) uniform writeonly image2D out_u;
+layout(set = 0, binding = 5, r8) uniform writeonly image2D out_v;
+layout(set = 0, binding = 6, rgba8) uniform writeonly image2D out_rgb;
+layout(set = 0, binding = 7) uniform sampler nearest_sampler;
+
+// mode 0: yuv420p → packed rgb   (scales + converts)
+// mode 1: gray8   → packed rgb
+// mode 2: yuv420p → yuv420p      (planar resample)
+// mode 3: gray8   → gray8
+layout(push_constant) uniform Push {
+    ivec2 src_size;    // source luma size
+    ivec2 dst_size;    // output size
+    ivec2 chroma_size; // source chroma size (ceil/2)
+    int mode;
+    int algorithm;     // 0 nearest, 1 bilinear, 2 bicubic
+    int full_range;
+    int center_siting;
+} push;
+
+float kernel_weight(int algorithm, float x)
+{
+    x = abs(x);
+    if (algorithm == 0) {
+        return x < 0.5 ? 1.0 : 0.0;                  // box
+    } else if (algorithm == 1) {
+        return max(1.0 - x, 0.0);                    // triangle
+    }
+    // cubic with b=0, c=0.6 (filters.c:423), support radius 2.
+    const float p0 = 6.0;
+    const float p2 = -18.0 + 6.0 * 0.6;
+    const float p3 = 12.0 - 6.0 * 0.6;
+    const float q0 = 24.0 * 0.6;
+    const float q1 = -48.0 * 0.6;
+    const float q2 = 30.0 * 0.6;
+    const float q3 = -6.0 * 0.6;
+    if (x < 1.0) return (p0 + x * x * (p2 + x * p3)) / p0;
+    if (x < 2.0) return (q0 + x * (q1 + x * (q2 + x * q3))) / p0;
+    return 0.0;
+}
+
+float map(float d, int src_n, int dst_n)
+{
+    return (d + 0.5) * float(src_n) / float(dst_n) - 0.5;
+}
+
+float sample_plane(texture2D tex, sampler samp, vec2 pos, int algorithm, ivec2 n)
+{
+    if (algorithm == 0) {
+        ivec2 c = clamp(ivec2(round(pos)), ivec2(0), n - ivec2(1));
+        return texelFetch(sampler2D(tex, samp), c, 0).r * 255.0;
+    }
+    int taps = algorithm == 1 ? 2 : 4;
+    ivec2 base = ivec2(floor(pos)) - ivec2(taps / 2 - 1);
+
+    float wx[4];
+    float wy[4];
+    float sx = 0.0;
+    float sy = 0.0;
+    for (int i = 0; i < taps; i++) {
+        wx[i] = kernel_weight(algorithm, float(base.x + i) - pos.x);
+        wy[i] = kernel_weight(algorithm, float(base.y + i) - pos.y);
+        sx += abs(wx[i]);
+        sy += abs(wy[i]);
+    }
+    if (sx <= 1e-8 || sy <= 1e-8) {
+        ivec2 c = clamp(ivec2(round(pos)), ivec2(0), n - ivec2(1));
+        return texelFetch(sampler2D(tex, samp), c, 0).r * 255.0;
+    }
+    for (int i = 0; i < taps; i++) {
+        wx[i] /= sx;
+        wy[i] /= sy;
+    }
+
+    float acc = 0.0;
+    for (int j = 0; j < taps; j++) {
+        int yy = clamp(base.y + j, 0, n.y - 1);
+        float row = 0.0;
+        for (int i = 0; i < taps; i++) {
+            int xx = clamp(base.x + i, 0, n.x - 1);
+            row += texelFetch(sampler2D(tex, samp), ivec2(xx, yy), 0).r * 255.0 * wx[i];
+        }
+        acc += row * wy[j];
+    }
+    return acc;
+}
+
+void main()
+{
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (pos.x >= push.dst_size.x || pos.y >= push.dst_size.y) {
+        return;
+    }
+
+    if (push.mode == 0) {
+        // yuv420p → packed rgb at dst size.
+        vec2 sp = vec2(map(pos.x, push.src_size.x, push.dst_size.x),
+                       map(pos.y, push.src_size.y, push.dst_size.y));
+        float y = sample_plane(plane_y, nearest_sampler, sp, push.algorithm, push.src_size);
+        vec2 cp = push.center_siting == 1 ? (sp - 0.5) / 2.0 : sp / 2.0;
+        float u = sample_plane(plane_u, nearest_sampler, cp, push.algorithm, push.chroma_size) - 128.0;
+        float v = sample_plane(plane_v, nearest_sampler, cp, push.algorithm, push.chroma_size) - 128.0;
+
+        float fy = push.full_range == 1
+            ? y
+            : (y - 16.0) * (255.0 / 219.0);
+        float r = clamp(fy + 1.59603 * v, 0.0, 255.0);
+        float g = clamp(fy - 0.39176 * u - 0.81297 * v, 0.0, 255.0);
+        float b = clamp(fy + 2.01723 * u, 0.0, 255.0);
+        // Unorm stores round to nearest, matching the CPU's round().
+        imageStore(out_rgb, pos, vec4(r / 255.0, g / 255.0, b / 255.0, 1.0));
+        return;
+    }
+
+    if (push.mode == 1) {
+        vec2 sp = vec2(map(pos.x, push.src_size.x, push.dst_size.x),
+                       map(pos.y, push.src_size.y, push.dst_size.y));
+        float y = sample_plane(plane_y, nearest_sampler, sp, push.algorithm, push.src_size);
+        float fy = push.full_range == 1
+            ? y
+            : (y - 16.0) * (255.0 / 219.0);
+        float c = clamp(fy, 0.0, 255.0);
+        imageStore(out_rgb, pos, vec4(c / 255.0, c / 255.0, c / 255.0, 1.0));
+        return;
+    }
+
+    if (push.mode == 2) {
+        // Planar resample: dispatch covers the dst luma grid; chroma writes
+        // land in their (smaller) images guarded by size.
+        vec2 sp = vec2(map(pos.x, push.src_size.x, push.dst_size.x),
+                       map(pos.y, push.src_size.y, push.dst_size.y));
+        float y = sample_plane(plane_y, nearest_sampler, sp, push.algorithm, push.src_size);
+        imageStore(out_y, pos, vec4(clamp(y, 0.0, 255.0) / 255.0, 0.0, 0.0, 0.0));
+
+        ivec2 cd = imageSize(out_u);
+        if (pos.x < cd.x && pos.y < cd.y) {
+            // Plane-to-plane: chroma keeps the CENTER-siting half-chroma-pixel
+            // shift so values land where they came from.
+            float shift = push.center_siting == 1 ? -0.25 : 0.0;
+            vec2 cp = vec2(map(pos.x, push.chroma_size.x, cd.x) + shift,
+                           map(pos.y, push.chroma_size.y, cd.y) + shift);
+            float u = sample_plane(plane_u, nearest_sampler, cp, push.algorithm, push.chroma_size);
+            float v = sample_plane(plane_v, nearest_sampler, cp, push.algorithm, push.chroma_size);
+            imageStore(out_u, pos, vec4(clamp(u, 0.0, 255.0) / 255.0, 0.0, 0.0, 0.0));
+            imageStore(out_v, pos, vec4(clamp(v, 0.0, 255.0) / 255.0, 0.0, 0.0, 0.0));
+        }
+        return;
+    }
+
+    // mode 3: gray → gray.
+    vec2 sp = vec2(map(pos.x, push.src_size.x, push.dst_size.x),
+                   map(pos.y, push.src_size.y, push.dst_size.y));
+    float y = sample_plane(plane_y, nearest_sampler, sp, push.algorithm, push.src_size);
+    imageStore(out_y, pos, vec4(clamp(y, 0.0, 255.0) / 255.0, 0.0, 0.0, 0.0));
+}

@@ -121,6 +121,12 @@ macro_rules! log_info {
     ($ctx:expr, $($arg:tt)*) => { $crate::util::log::log($ctx, $crate::util::log::Level::Info, format_args!($($arg)*)) };
 }
 
+/// `av_log(ctx, AV_LOG_VERBOSE, …)`.
+#[macro_export]
+macro_rules! log_verbose {
+    ($ctx:expr, $($arg:tt)*) => { $crate::util::log::log($ctx, $crate::util::log::Level::Verbose, format_args!($($arg)*)) };
+}
+
 /// `av_log(ctx, AV_LOG_DEBUG, …)`.
 #[macro_export]
 macro_rules! log_debug {
