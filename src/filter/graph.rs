@@ -486,7 +486,9 @@ impl FilterGraph {
 
     /// `filter_query_formats` (avfiltergraph.c:336-410): the filter's own
     /// query, then the always-run default fill. `Err(Again)` from the impl
-    /// short-circuits BEFORE the fill (C returns early at 395).
+    /// short-circuits BEFORE the fill (C returns early at 395). After a
+    /// successful own query, declared lists are checked for redundancy
+    /// (`filter_check_formats`, avfiltergraph.c:329-345).
     fn query_formats_filter(&mut self, node: NodeId) -> Result<()> {
         let mut imp = self.nodes[node.0]
             .imp
@@ -495,7 +497,49 @@ impl FilterGraph {
         let ret = imp.query_formats(self, node);
         self.nodes[node.0].imp = Some(imp);
         ret?;
+        self.filter_check_formats(node)?;
         self.default_query_formats(node)
+    }
+
+    /// `filter_check_formats` + `check_list` (avfiltergraph.c:296-345,
+    /// formats.c:1236-1252): every list the filter declared (inputs'
+    /// `outcfg` + outputs' `incfg`) must be duplicate-free — "Duplicated
+    /// pixel format\n" & friends.
+    fn filter_check_formats(&self, node: NodeId) -> Result<()> {
+        let mut halves = Vec::new();
+        for l in self.nodes[node.0].inputs.iter().flatten() {
+            halves.push((*l, false)); // false = outcfg side
+        }
+        for l in self.nodes[node.0].outputs.iter().flatten() {
+            halves.push((*l, true)); // true = incfg side
+        }
+        for (l, incfg) in halves {
+            let cfg = if incfg {
+                &self.links[l.0].incfg
+            } else {
+                &self.links[l.0].outcfg
+            };
+            if let Some(idx) = cfg.formats {
+                self.check_list("pixel format", &self.fmt_lists[idx as usize])?;
+            }
+            if let Some(idx) = cfg.color_spaces {
+                self.check_list("color space", &self.csp_lists[idx as usize])?;
+            }
+            if let Some(idx) = cfg.color_ranges {
+                self.check_list("color range", &self.rng_lists[idx as usize])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_list<T: PartialEq>(&self, name: &str, list: &[T]) -> Result<()> {
+        for i in 0..list.len() {
+            if list[i + 1..].contains(&list[i]) {
+                log_error!(None, "Duplicated {name}\n");
+                return Err(Error::InvalidArgument(format!("Duplicated {name}")));
+            }
+        }
+        Ok(())
     }
 
     /// `formats_declared` (avfiltergraph.c:413-449) — video halves only
