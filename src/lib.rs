@@ -1,17 +1,20 @@
 //! # ffmpeg_rs — FFmpeg, ported to Rust one phase at a time
 //!
 //! A pipeline-faithful Rust port of [FFmpeg](https://github.com/ffmpeg/ffmpeg)
-//! 8.0.git (the `./FFmpeg` tree in this repo), with Vulkan compute planned to
-//! power the swscale/filter stages. The port proceeds in bounded phases; the
-//! work is tracked in the repo plan file.
+//! 8.0.git (the sibling `FFmpeg` tree), with Vulkan compute powering the
+//! swscale stage. The port proceeds in bounded phases; the work is tracked in
+//! the repo plan file.
 //!
-//! * **Phase 1 (this)** — CPU foundation: the full
+//! * **Phase 1** — CPU foundation: the full
 //!   demux → decode → convert → encode → mux pipeline for rawvideo and Y4M,
 //!   driven by an ffmpeg-style CLI. Byte-exact with real ffmpeg on the raw
 //!   paths (pinned by `tests/golden.rs`).
-//! * **Phase 2 (next)** — Vulkan `swscale`: headless compute context running
-//!   a port of `libavfilter/vulkan/scale.comp.glsl` + `vf_scale_vulkan.c`,
-//!   real resampling (bilinear/bicubic) and `-s`.
+//! * **Phase 2 (this)** — Vulkan `swscale`: a headless compute context
+//!   (`src/gpu.rs`) running `assets/scale.comp` — the `vf_scale_vulkan.c` /
+//!   `libswscale/vulkan/` shape — with real resampling
+//!   (nearest/bilinear/bicubic + chroma siting), `-s`, and an engine picker
+//!   (`-scale_engine auto|vulkan|cpu`). The GPU shader mirrors the CPU
+//!   kernels tap for tap; `tests/golden.rs` pins the two engines to ≤1 byte.
 //! * Later — filtergraph (`libavfilter` buffersrc/sink + `scale`/`format`
 //!   filters), `swresample`, image2/NUT containers, a winit player.
 //!
@@ -22,7 +25,9 @@
 //! | [`util`] | `libavutil` | Rational, errors, logging, `PixelFormat` + descriptors, plane geometry, `Frame` |
 //! | [`codec`] | `libavcodec` | `Packet`, `CodecParameters`, Decoder/Encoder traits, rawvideo codec |
 //! | [`format`] | `libavformat` | `IoContext` (avio), demuxer/muxer registries, Y4M + rawvideo, format contexts |
-//! | [`swscale`] | `libswscale` | `ScaleContext`: identity + BT.601 YUV/gray → RGB kernels |
+//! | [`swscale`] | `libswscale` | `ScaleContext`: unscaled converters + resampling (nearest/bilinear/bicubic), CPU kernels and the Vulkan engine |
+//! | [`gpu`] | `libavutil/vulkan` | `ComputeGpu`: headless device + queue, one-shot command buffers, staging |
+//! | [`shaders`] | `libavfilter/vulkan` | GLSL compute modules (`scale.comp`) |
 //! | [`fftools`] | `fftools` | CLI parsing, `av_dump_format`-style output, the transcode loop |
 //!
 //! ## Data flow (Phase 1, single video stream, zero-copy where marked)
@@ -73,6 +78,12 @@
 //! rawvideo → y4m         : byte-exact (header writer pinned)
 //! y4m → rawvideo rgb24   : max byte diff ≤ 3 (measured max 3, mean 0.66;
 //!                          swscale's integer tables vs our float BT.601)
+//! cpu ↔ vulkan, all 4 conversion modes × 3 algorithms, ½ downscale:
+//!                          max byte diff ≤ 1 (unorm store vs round())
+//! y4m → ½-scale yuv420p  : max 89 documented divergence — swscale widens
+//!                          the filter in source space on downscale
+//!                          (utils.c:287-293); our fixed 4-tap window
+//!                          under-blurs (Phase 3 port candidate)
 //! ```
 //!
 //! ## Example

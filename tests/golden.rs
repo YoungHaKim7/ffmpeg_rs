@@ -7,6 +7,10 @@
 //! kernel (measured: max 3, mean 0.66 on testsrc2 — see the swscale module
 //! docs).
 //!
+//! Tolerance-bearing tests pin `-scale_engine cpu` so results do not depend
+//! on the host's GPU; the engine-consistency test exercises the Vulkan path
+//! explicitly and skips politely when no device is available.
+//!
 //! Skips (with a notice, exit 0) when `ffmpeg` is not installed — CI boxes
 //! without it should not fail on missing tooling.
 
@@ -179,6 +183,7 @@ fn golden_y4m_to_rgb24_within_tolerance() {
     ]);
     let (ok, _, stderr) = fx.run_ours(&[
         "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-scale_engine", "cpu",
         "-f", "rawvideo", "-pix_fmt", "rgb24",
         fx.path("out.raw").to_str().unwrap(), "-y",
     ]);
@@ -200,6 +205,141 @@ fn golden_y4m_to_rgb24_within_tolerance() {
     }
     assert_eq!(over, 0, "rgb24 conversion exceeds ±3 tolerance (max {max_diff})");
     eprintln!("rgb24 max byte diff vs swscale: {max_diff}");
+}
+
+/// Both engines must agree tap-for-tap (`scale.comp` mirrors the CPU
+/// kernels): every conversion mode × algorithm at ½ downscale, Vulkan output
+/// vs CPU output within the unorm-store-vs-round() slack (≤2; measured ≤1).
+/// Skips politely when no Vulkan device is available.
+#[test]
+fn golden_engine_consistency_cpu_vs_vulkan() {
+    let Some(fx) = Fixture::new("engine") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+    fx.run_ffmpeg(&[
+        "-f", "lavfi",
+        "-i", &format!("testsrc2=duration=1:size={W}x{H}:rate={FPS}"),
+        "-pix_fmt", "gray8",
+        "-f", "rawvideo",
+        fx.path("in.gray").to_str().unwrap(), "-y",
+    ]);
+
+    let y4m_path = fx.path("in.y4m");
+    let gray_path = fx.path("in.gray");
+    let y4m = y4m_path.to_str().unwrap();
+    let gray = gray_path.to_str().unwrap();
+    let size = format!("{}x{}", W / 2, H / 2);
+    let vsize = format!("{W}x{H}");
+    let fps = FPS.to_string();
+    // (label, common args incl. input, output pix_fmt) — one per shader mode.
+    let cases: &[(&str, Vec<&str>, &str)] = &[
+        ("yuv420p→rgb24 (mode 0)", vec!["-i", y4m], "rgb24"),
+        ("yuv420p→yuv420p (mode 2)", vec!["-i", y4m], "yuv420p"),
+        (
+            "gray8→rgb24 (mode 1)",
+            vec![
+                "-f", "rawvideo", "-pixel_format", "gray8",
+                "-video_size", &vsize, "-framerate", &fps,
+                "-i", gray,
+            ],
+            "rgb24",
+        ),
+        (
+            "gray8→gray8 (mode 3)",
+            vec![
+                "-f", "rawvideo", "-pixel_format", "gray8",
+                "-video_size", &vsize, "-framerate", &fps,
+                "-i", gray,
+            ],
+            "gray8",
+        ),
+    ];
+
+    for (label, input_args, pix_fmt) in cases {
+        for algo in ["nearest", "bilinear", "bicubic"] {
+            let run = |engine: &str, out: &str| -> (bool, String) {
+                let (ok, _, stderr) = fx.run_ours(&[
+                    input_args.as_slice(),
+                    &["-s", &size, "-scale_algo", algo, "-scale_engine", engine],
+                    &["-f", "rawvideo", "-pix_fmt", pix_fmt, out, "-y"],
+                ]
+                .concat());
+                (ok, stderr)
+            };
+            let (ok_cpu, err_cpu) = run("cpu", fx.path("cpu.out").to_str().unwrap());
+            assert!(ok_cpu, "cpu engine failed ({label}/{algo}):\n{err_cpu}");
+            let (ok_gpu, err_gpu) = run("vulkan", fx.path("gpu.out").to_str().unwrap());
+            if !ok_gpu {
+                eprintln!("skipping: vulkan engine unavailable ({err_gpu})");
+                return;
+            }
+
+            let cpu = std::fs::read(fx.path("cpu.out")).unwrap();
+            let gpu = std::fs::read(fx.path("gpu.out")).unwrap();
+            assert_eq!(cpu.len(), gpu.len(), "{label}/{algo}: output sizes differ");
+            let mut max_diff = 0usize;
+            for (a, b) in cpu.iter().zip(gpu.iter()) {
+                max_diff = max_diff.max(a.abs_diff(*b) as usize);
+            }
+            assert!(
+                max_diff <= 2,
+                "{label}/{algo}: engines diverge (max {max_diff}, unorm-vs-round slack is ≤2)"
+            );
+            eprintln!("{label}/{algo}: cpu↔vulkan max byte diff {max_diff}");
+        }
+    }
+}
+
+/// Downscaled output vs system ffmpeg, within the documented fixed-tap
+/// divergence: swscale widens the kernel in source space on downscale
+/// (`utils.c:287-293`), our fixed 4-tap window under-blurs (measured max 89
+/// on testsrc2 at ½ scale — see the swscale module docs). Catches gross
+/// breakage while the divergence is documented.
+#[test]
+fn golden_scaled_y4m_vs_system_ffmpeg_tolerance() {
+    let Some(fx) = Fixture::new("scaled") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+    let size = &format!("{}x{}", W / 2, H / 2);
+
+    fx.run_ffmpeg(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-s", size,
+        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        fx.path("ref.raw").to_str().unwrap(), "-y",
+    ]);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-s", size, "-scale_engine", "cpu",
+        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        fx.path("out.raw").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+
+    let ours = std::fs::read(fx.path("out.raw")).unwrap();
+    let theirs = std::fs::read(fx.path("ref.raw")).unwrap();
+    assert_eq!(ours.len(), theirs.len());
+
+    let mut max_diff = 0usize;
+    let mut over = 0usize;
+    for (a, b) in ours.iter().zip(theirs.iter()) {
+        let d = a.abs_diff(*b);
+        max_diff = max_diff.max(d as usize);
+        if d > 3 {
+            over += 1;
+        }
+    }
+    assert!(max_diff <= 96, "downscale diverges beyond the documented fixed-tap slack (max {max_diff})");
+    assert!(
+        (over as f64 / ours.len() as f64) < 0.45,
+        "too many bytes outside ±3 ({over}/{})",
+        ours.len()
+    );
+    eprintln!("scaled yuv420p max byte diff vs swscale: {max_diff} ({over}/{} over ±3)", ours.len());
 }
 
 #[test]

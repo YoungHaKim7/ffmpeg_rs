@@ -22,7 +22,10 @@
 //!
 //! Chroma siting: `ChromaLocation::Center` (Y4M `C420jpeg`) samples chroma
 //! at the half-pixel-offset `(p−0.5)/2` position, everything else uses LEFT
-//! `p/2`.
+//! `p/2`. One exception, matching C: identity-geometry yuv420p→RGB takes
+//! `ff_get_unscaled_swscale`'s table converter (`swscale_unscaled.c:2425`),
+//! which reads chroma cosited with no interpolation and ignores the siting
+//! tag — see [`ScaleContext::scale_cpu_unscaled_yuv_rgb`].
 //!
 //! ## Engines
 //!
@@ -236,10 +239,54 @@ impl ScaleContext {
             return Ok(());
         }
 
+        // `ff_get_unscaled_swscale` (`swscale_unscaled.c:2425-2431`):
+        // identity-geometry yuv420p→RGB dispatches to the `yuv2rgb` table
+        // converter, which reads each chroma sample for its whole 2×2 luma
+        // block — no interpolation, siting tag ignored (`yuv2rgb.c:154-155`).
+        // Running the generic resampler instead would bicubic-filter the
+        // chroma at fractional siting positions and blur transitions real
+        // ffmpeg keeps sharp (measured max 154 vs the ±3 golden). Routed
+        // before the engine dispatch so both engines agree here.
+        if src.width == dst.width
+            && src.height == dst.height
+            && self.mode == ConversionMode::Yuv420pToRgb
+        {
+            return self.scale_cpu_unscaled_yuv_rgb(src, dst);
+        }
+
         if let Some(gpu) = self.gpu.as_mut() {
             return gpu.scale(src, dst, self.mode, self.options.algorithm);
         }
         self.scale_cpu(src, dst)
+    }
+
+    /// The unscaled `yuv2rgb` table converter (see `scale`): luma read
+    /// directly, chroma at `(xx >> 1, yy >> 1)` — 2×2 replication.
+    fn scale_cpu_unscaled_yuv_rgb(&self, src: &Frame, dst: &mut Frame) -> Result<()> {
+        let full = src.color_range == ColorRange::Jpeg;
+        let (rv, gu, gv, bu) = bt601_coeffs(full);
+        let out_ls = dst.linesize(0);
+        let (r_off, g_off, b_off) = rgb_offsets(dst.format);
+        let step = pixdesc::descriptor(dst.format).comp[0].step as usize;
+        let (dw, dh) = (dst.width as usize, dst.height as usize);
+        let (y_ls, u_ls, v_ls) = (src.linesize(0), src.linesize(1), src.linesize(2));
+        let out = dst.plane_mut(0);
+        for yy in 0..dh {
+            let out_row = &mut out[yy * out_ls..];
+            let y_row = &src.plane(0)[yy * y_ls..];
+            let u_row = &src.plane(1)[(yy >> 1) * u_ls..];
+            let v_row = &src.plane(2)[(yy >> 1) * v_ls..];
+            for xx in 0..dw {
+                let fy = range_expand(y_row[xx] as f32, full);
+                let u = u_row[xx >> 1] as f32 - 128.0;
+                let v = v_row[xx >> 1] as f32 - 128.0;
+                let px = xx * step;
+                out_row[px + r_off] = (fy + rv * v).round().clamp(0.0, 255.0) as u8;
+                out_row[px + g_off] = (fy - gu * u - gv * v).round().clamp(0.0, 255.0) as u8;
+                out_row[px + b_off] = (fy + bu * u).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        Ok(())
     }
 
     /// Unscaled same-format copy (`swscale_unscaled.c`).
@@ -386,10 +433,24 @@ impl ScaleContext {
         let v = sample_plane(src.plane(2), src.linesize(2), (cw, ch), (cx, cy), alg) - 128.0;
 
         let fy = range_expand(y, full);
-        let r = (fy + 1.59603 * v).round().clamp(0.0, 255.0) as u8;
-        let g = (fy - 0.39176 * u - 0.81297 * v).round().clamp(0.0, 255.0) as u8;
-        let b = (fy + 2.01723 * u).round().clamp(0.0, 255.0) as u8;
+        let (rv, gu, gv, bu) = bt601_coeffs(full);
+        let r = (fy + rv * v).round().clamp(0.0, 255.0) as u8;
+        let g = (fy - gu * u - gv * v).round().clamp(0.0, 255.0) as u8;
+        let b = (fy + bu * u).round().clamp(0.0, 255.0) as u8;
         (r, g, b)
+    }
+}
+
+/// BT.601 YUV→RGB chroma gains `(rv, gu, gv, bu)` — `ff_yuv2rgb_coeffs`
+/// (`yuv2rgb.c`): the limited-range set carries the 255/224 scaling; the
+/// JPEG/full-range set is the classic 1.402/-0.344136/-0.714136/1.772.
+/// Shared by both engines (the shader hardcodes the same two tuples).
+#[inline]
+pub(crate) fn bt601_coeffs(full: bool) -> (f32, f32, f32, f32) {
+    if full {
+        (1.402, 0.344136, 0.714136, 1.772)
+    } else {
+        (1.59603, 0.39176, 0.81297, 2.01723)
     }
 }
 
@@ -531,6 +592,63 @@ mod tests {
         let out = dst.plane(0);
         assert_eq!(&out[..3], &[0, 0, 0]);
         assert_eq!(&out[3..6], &[255, 255, 255]);
+    }
+
+    /// Full-range chroma gains are the JPEG set (1.402/-0.344136/-0.714136/
+    /// 1.772), not the limited-range 255/224-scaled one — Y=90, U=240, V=90
+    /// (full range) must land at (37, 79, 255), hand-computed.
+    #[test]
+    fn bt601_full_range_chroma_gains() {
+        let mut src = Frame::alloc(PixelFormat::Yuv420p, 2, 2).unwrap();
+        src.color_range = ColorRange::Jpeg;
+        for row in src.plane_mut(0).chunks_exact_mut(2) {
+            row.copy_from_slice(&[90, 90]);
+        }
+        src.plane_mut(1)[..1].copy_from_slice(&[240]);
+        src.plane_mut(2)[..1].copy_from_slice(&[90]);
+
+        let mut dst = Frame::alloc(PixelFormat::Rgb24, 2, 2).unwrap();
+        ScaleContext::new((PixelFormat::Yuv420p, 2, 2), (PixelFormat::Rgb24, 2, 2), cpu_opts(ScaleAlgorithm::Bicubic))
+            .unwrap()
+            .scale(&src, &mut dst)
+            .unwrap();
+        let out = dst.plane(0);
+        for px in out.chunks_exact(3) {
+            assert_eq!(px, &[37, 79, 255]);
+        }
+    }
+
+    /// The identity-geometry unscaled path: chroma transitions stay sharp
+    /// (2×2 replication, `swscale_unscaled.c`'s table converter) regardless
+    /// of the requested algorithm — bicubic must NOT blur across the edge.
+    #[test]
+    fn unscaled_yuv420p_to_rgb_replicates_chroma() {
+        let mut src = Frame::alloc(PixelFormat::Yuv420p, 4, 2).unwrap();
+        src.color_range = ColorRange::Jpeg;
+        src.plane_mut(0).copy_from_slice(&[100; 8]);
+        // One chroma column flips: U = 80 | 200 on the 2-wide chroma grid.
+        src.plane_mut(1).copy_from_slice(&[80, 200]);
+        src.plane_mut(2).copy_from_slice(&[128, 128]);
+
+        let mut dst = Frame::alloc(PixelFormat::Rgb24, 4, 2).unwrap();
+        ScaleContext::new((PixelFormat::Yuv420p, 4, 2), (PixelFormat::Rgb24, 4, 2), cpu_opts(ScaleAlgorithm::Bicubic))
+            .unwrap()
+            .scale(&src, &mut dst)
+            .unwrap();
+        // Both luma columns of a chroma column see the SAME U (replication):
+        // pixel 0 and 1 identical, 2 and 3 identical, no intermediate value.
+        let out = dst.plane(0);
+        let px = |i: usize| &out[i * 3..i * 3 + 3];
+        assert_eq!(px(0), px(1));
+        assert_eq!(px(2), px(3));
+        assert_ne!(px(1), px(2), "chroma columns differ");
+        // And the replicated U is the raw sample, not an interpolated blend:
+        // pixels 0-1 ← chroma col 0 (U=80), pixels 2-3 ← chroma col 1 (U=200).
+        let b_col0 = out[2] as i32; // pixel 0 blue — tracks U
+        let b_col1 = out[8] as i32; // pixel 2 blue
+        let expected_col0 = (100.0f32 + 1.772 * (80.0 - 128.0)).round().clamp(0.0, 255.0) as i32;
+        let expected_col1 = (100.0f32 + 1.772 * (200.0 - 128.0)).round().clamp(0.0, 255.0) as i32;
+        assert_eq!((b_col0, b_col1), (expected_col0, expected_col1));
     }
 
     /// Hand-computed mid-gray + colored chroma (limited range):

@@ -99,7 +99,7 @@ impl GpuScaler {
         )
         .map_err(|e| Error::Unsupported(format!("sampler: {e}")))?;
 
-        let dummy = plane_image(&gpu.memory_allocator, Format::R8_UNORM, 1, 1, gpu::usage::PLANE_OUT)?;
+        let dummy = plane_image(&gpu.memory_allocator, Format::R8_UNORM, 1, 1, gpu::usage::DUMMY)?;
 
         let device_name = gpu.device_name.clone();
         crate::log_verbose!(None, "swscale: using Vulkan device '{device_name}'");
@@ -157,13 +157,13 @@ impl GpuScaler {
         let set = self.descriptor_set(images, mode)?;
         builder
             .bind_pipeline_compute(self.pipeline.clone())
-            .map_err(|e| Error::Unsupported(format!("bind pipeline: {e}")))?
+            .map_err(|e| Error::Unsupported(format!("bind pipeline: {e:?}")))?
             .bind_descriptor_sets(PipelineBindPoint::Compute, self.layout.clone(), 0, set)
-            .map_err(|e| Error::Unsupported(format!("bind descriptor set: {e}")))?
+            .map_err(|e| Error::Unsupported(format!("bind descriptor set: {e:?}")))?
             .push_constants(self.layout.clone(), 0, push)
-            .map_err(|e| Error::Unsupported(format!("push constants: {e}")))?;
+            .map_err(|e| Error::Unsupported(format!("push constants: {e:?}")))?;
         let groups = [dst.width.div_ceil(8), dst.height.div_ceil(8), 1];
-        unsafe { builder.dispatch(groups) }.map_err(|e| Error::Unsupported(format!("dispatch: {e}")))?;
+        unsafe { builder.dispatch(groups) }.map_err(|e| Error::Unsupported(format!("dispatch: {e:?}")))?;
 
         // ---- download ---------------------------------------------------------
         match mode {
@@ -172,7 +172,7 @@ impl GpuScaler {
                 let buf = gpu::readback_buffer(&self.gpu.memory_allocator, w4 * dst.height as usize)?;
                 builder
                     .copy_image_to_buffer(CopyImageToBufferInfo::new(images.out_rgb.image().clone(), buf.clone()))
-                    .map_err(|e| Error::Unsupported(format!("copy to buffer: {e}")))?;
+                    .map_err(|e| Error::Unsupported(format!("copy to buffer: {e:?}")))?;
                 self.gpu.submit_wait(builder)?;
                 pack_rgba_to_dst(&buf, dst)
             }
@@ -186,12 +186,12 @@ impl GpuScaler {
                     let buf = gpu::readback_buffer(&self.gpu.memory_allocator, w * h)?;
                     builder
                         .copy_image_to_buffer(CopyImageToBufferInfo::new(view.image().clone(), buf.clone()))
-                        .map_err(|e| Error::Unsupported(format!("copy to buffer: {e}")))?;
+                        .map_err(|e| Error::Unsupported(format!("copy to buffer: {e:?}")))?;
                     bufs.push((buf, w, h));
                 }
                 self.gpu.submit_wait(builder)?;
                 for (p, (buf, w, h)) in bufs.iter().enumerate() {
-                    let data = buf.read().map_err(|e| Error::Unsupported(format!("readback: {e}")))?;
+                    let data = buf.read().map_err(|e| Error::Unsupported(format!("readback: {e:?}")))?;
                     let data: &[u8] = &data[..];
                     let ls = dst.linesize(p);
                     let out = dst.plane_mut(p);
@@ -216,7 +216,10 @@ impl GpuScaler {
         let out_y = if planar_out { &images.out_y } else { dummy };
         let out_u = if planar_out { &images.out_u } else { dummy };
         let out_v = if planar_out { &images.out_v } else { dummy };
-        let out_rgb = if planar_out { dummy } else { &images.out_rgb };
+        // binding 6 is declared rgba8: the R8 dummy would fail the dispatch-
+        // time format check in planar modes. out_rgb is allocated for every
+        // geometry anyway — bind the real view.
+        let out_rgb = &images.out_rgb;
 
         // This vulkano rev writes every image-ish descriptor (sampled,
         // storage, or plain sampler) through DescriptorImageInfo.
@@ -241,7 +244,7 @@ impl GpuScaler {
             &writes,
             &[],
         )
-        .map_err(|e| Error::Unsupported(format!("descriptor set: {e}")))
+        .map_err(|e| Error::Unsupported(format!("descriptor set: {e:?}")))
     }
 
     fn ensure_images(&mut self, src: &Frame, dst: &Frame, _mode: ConversionMode) -> Result<()> {
@@ -300,13 +303,13 @@ fn copy_plane_to_image(
     let staging = gpu::upload_buffer(&gpu.memory_allocator, src.plane(p))?;
     builder
         .copy_buffer_to_image(CopyBufferToImageInfo::new(staging, view.image().clone()))
-        .map_err(|e| Error::Unsupported(format!("copy to image: {e}")))?;
+        .map_err(|e| Error::Unsupported(format!("copy to image: {e:?}")))?;
     Ok(())
 }
 
 /// RGBA8 readback → the caller's packed-RGB frame layout (rgb24/bgr24/…).
 fn pack_rgba_to_dst(buf: &Subbuffer<[u8]>, dst: &mut Frame) -> Result<()> {
-    let data = buf.read().map_err(|e| Error::Unsupported(format!("readback: {e}")))?;
+    let data = buf.read().map_err(|e| Error::Unsupported(format!("readback: {e:?}")))?;
     let data: &[u8] = &data[..];
     let w4 = dst.width as usize * 4;
     let (r_off, g_off, b_off) = rgb_offsets(dst.format);

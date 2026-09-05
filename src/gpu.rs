@@ -199,4 +199,9 @@ pub mod usage {
     /// Storage output planes (r8, read back by transfer).
     pub const PLANE_OUT: ImageUsage =
         ImageUsage::STORAGE.union(ImageUsage::TRANSFER_SRC).union(ImageUsage::TRANSFER_DST);
+    /// The 1×1 stand-in bound to slots the current mode does not use. It can
+    /// land on sampled OR storage bindings, so it needs both usages (a view
+    /// without the descriptor's usage violates VUID-VkDescriptorImageInfo-
+    /// imageView-00343).
+    pub const DUMMY: ImageUsage = PLANE_IN.union(ImageUsage::STORAGE);
 }

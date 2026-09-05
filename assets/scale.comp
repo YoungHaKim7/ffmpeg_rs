@@ -6,8 +6,11 @@
 //
 //   * coordinate mapping  (dst + 0.5)·src/dst − 0.5     (filters.c:78)
 //   * kernels             box / triangle / cubic(B=0, C=0.6)  (filters.c)
+//   * normalization       signed Σw = 1 (bicubic's negative lobes make
+//                         Σ|w| ≠ Σw; abs-normalization attenuates constants)
 //   * chroma siting       CENTER (p−0.5)/2  else  p/2
-//   * BT.601 range-aware  YUV→RGB, R8G8B8A8_UNORM output
+//   * BT.601 range-aware  YUV→RGB (gains selected by full_range),
+//                         R8G8B8A8_UNORM output
 //
 // Planes come in as (unfiltered) texture2D R8 images and leave either as an
 // RGBA8 storage image (packed-RGB modes) or as R8 storage planes (planar
@@ -68,7 +71,10 @@ float map(float d, int src_n, int dst_n)
 float sample_plane(texture2D tex, sampler samp, vec2 pos, int algorithm, ivec2 n)
 {
     if (algorithm == 0) {
-        ivec2 c = clamp(ivec2(round(pos)), ivec2(0), n - ivec2(1));
+        // floor(p + 0.5): the CPU's round-half-away-from-zero, not GLSL's
+        // round() (half-to-even) — exact .5 positions must pick the same
+        // tap on both engines.
+        ivec2 c = clamp(ivec2(floor(pos + 0.5)), ivec2(0), n - ivec2(1));
         return texelFetch(sampler2D(tex, samp), c, 0).r * 255.0;
     }
     int taps = algorithm == 1 ? 2 : 4;
@@ -76,16 +82,20 @@ float sample_plane(texture2D tex, sampler samp, vec2 pos, int algorithm, ivec2 n
 
     float wx[4];
     float wy[4];
+    // Signed sums, like compute_row's wsum_pos + wsum_neg (filters.c:104)
+    // and the CPU twin: bicubic's negative lobes make Σ|w| > Σw, and
+    // normalizing by Σ|w| would attenuate constant input instead of
+    // preserving it.
     float sx = 0.0;
     float sy = 0.0;
     for (int i = 0; i < taps; i++) {
         wx[i] = kernel_weight(algorithm, float(base.x + i) - pos.x);
         wy[i] = kernel_weight(algorithm, float(base.y + i) - pos.y);
-        sx += abs(wx[i]);
-        sy += abs(wy[i]);
+        sx += wx[i];
+        sy += wy[i];
     }
-    if (sx <= 1e-8 || sy <= 1e-8) {
-        ivec2 c = clamp(ivec2(round(pos)), ivec2(0), n - ivec2(1));
+    if (abs(sx) <= 1e-8 || abs(sy) <= 1e-8) {
+        ivec2 c = clamp(ivec2(floor(pos + 0.5)), ivec2(0), n - ivec2(1));
         return texelFetch(sampler2D(tex, samp), c, 0).r * 255.0;
     }
     for (int i = 0; i < taps; i++) {
@@ -125,9 +135,15 @@ void main()
         float fy = push.full_range == 1
             ? y
             : (y - 16.0) * (255.0 / 219.0);
-        float r = clamp(fy + 1.59603 * v, 0.0, 255.0);
-        float g = clamp(fy - 0.39176 * u - 0.81297 * v, 0.0, 255.0);
-        float b = clamp(fy + 2.01723 * u, 0.0, 255.0);
+        // BT.601 gains: limited-range carries 255/224, full/JPEG range is the
+        // classic 1.402/-0.344136/-0.714136/1.772 (bt601_coeffs in mod.rs).
+        float rv = push.full_range == 1 ? 1.402    : 1.59603;
+        float gu = push.full_range == 1 ? 0.344136 : 0.39176;
+        float gv = push.full_range == 1 ? 0.714136 : 0.81297;
+        float bu = push.full_range == 1 ? 1.772    : 2.01723;
+        float r = clamp(fy + rv * v, 0.0, 255.0);
+        float g = clamp(fy - gu * u - gv * v, 0.0, 255.0);
+        float b = clamp(fy + bu * u, 0.0, 255.0);
         // Unorm stores round to nearest, matching the CPU's round().
         imageStore(out_rgb, pos, vec4(r / 255.0, g / 255.0, b / 255.0, 1.0));
         return;
