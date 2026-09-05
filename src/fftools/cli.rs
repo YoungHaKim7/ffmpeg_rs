@@ -9,7 +9,7 @@
 //! global:         -y | -n | -v LEVEL | -loglevel LEVEL | -h | --help
 //! input opts:     -f FMT | -pixel_format FMT | -video_size WxH | -framerate R
 //! output opts:    -f FMT | -pix_fmt FMT | -s WxH
-//!                  | -scale_algo nearest|bilinear|bicubic
+//!                  | -scale_algo nearest|bilinear|bicubic|area|gauss|sinc|lanczos|spline
 //!                  | -scale_engine auto|vulkan|cpu
 //! ```
 //!
@@ -83,7 +83,9 @@ output options (after -i):
   -f FMT          force output format (yuv4mpegpipe|rawvideo)
   -pix_fmt F      output pixel format
   -s WXH          rescale, e.g. 320x240 (Vulkan compute when available)
-  -scale_algo A   nearest | bilinear | bicubic (default)
+  -scale_algo A   nearest | bilinear | bicubic (default) | area | gauss |
+                  sinc | lanczos | spline (the latter five are CPU-only,
+                  auto-falling back from the Vulkan engine)
   -scale_engine E auto (default) | vulkan | cpu
 
 Pipeline: demux (y4m|rawvideo) -> decode (rawvideo) -> swscale -> encode
@@ -244,7 +246,7 @@ pub fn parse(args: &[String]) -> Result<Cli> {
                 let v = next(arg)?;
                 cli.scale_algorithm = ScaleAlgorithm::from_name(&v).ok_or_else(|| {
                     Error::InvalidArgument(format!(
-                        "Unknown scaling algorithm '{v}' (nearest|bilinear|bicubic)"
+                        "Unknown scaling algorithm '{v}' (nearest|bilinear|bicubic|area|gauss|sinc|lanczos|spline)"
                     ))
                 })?;
             }
@@ -353,6 +355,28 @@ mod tests {
         assert_eq!(cli.scale_engine, ScaleEngine::Auto);
         assert!(parse(&args(&["-i", "a", "-s", "320", "b"])).is_err());
         assert!(parse(&args(&["-i", "a", "-scale_algo", "fast", "b"])).is_err());
+    }
+
+    /// All eight `-scale_algo` names parse (the accepted-value list exists in
+    /// 4 places — from_name, the error string, USAGE, the module doc — this
+    /// pins the parsing side of the sync).
+    #[test]
+    fn scale_algo_new_values_parse() {
+        for (name, alg) in [
+            ("nearest", ScaleAlgorithm::Nearest),
+            ("bilinear", ScaleAlgorithm::Bilinear),
+            ("bicubic", ScaleAlgorithm::Bicubic),
+            ("area", ScaleAlgorithm::Area),
+            ("gauss", ScaleAlgorithm::Gauss),
+            ("sinc", ScaleAlgorithm::Sinc),
+            ("lanczos", ScaleAlgorithm::Lanczos),
+            ("spline", ScaleAlgorithm::Spline),
+        ] {
+            let cli = parse(&args(&["-i", "in.y4m", "-s", "8x8", "-scale_algo", name, "out.raw"]))
+                .unwrap_or_else(|_| panic!("{name} should parse"));
+            assert_eq!(cli.scale_algorithm, alg);
+        }
+        assert!(parse(&args(&["-i", "a", "-scale_algo", "bicublin", "b"])).is_err());
     }
 
     #[test]

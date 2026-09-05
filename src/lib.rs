@@ -9,12 +9,17 @@
 //!   demux → decode → convert → encode → mux pipeline for rawvideo and Y4M,
 //!   driven by an ffmpeg-style CLI. Byte-exact with real ffmpeg on the raw
 //!   paths (pinned by `tests/golden.rs`).
-//! * **Phase 2 (this)** — Vulkan `swscale`: a headless compute context
+//! * **Phase 2** — Vulkan `swscale`: a headless compute context
 //!   (`src/gpu.rs`) running `assets/scale.comp` — the `vf_scale_vulkan.c` /
 //!   `libswscale/vulkan/` shape — with real resampling
 //!   (nearest/bilinear/bicubic + chroma siting), `-s`, and an engine picker
 //!   (`-scale_engine auto|vulkan|cpu`). The GPU shader mirrors the CPU
 //!   kernels tap for tap; `tests/golden.rs` pins the two engines to ≤1 byte.
+//! * **Phase 3a (this)** — libswscale's variable-width scaling filters:
+//!   `area`/`gauss`/`sinc`/`lanczos`/`spline` via a bit-faithful port of
+//!   `initFilter` (`utils.c:197-612`, see [`swscale::filter`]) with
+//!   C's filter-width widening on downscale, exposed as `-scale_algo`
+//!   values (CPU-only; `-scale_engine auto` falls back, `vulkan` rejects).
 //! * Later — filtergraph (`libavfilter` buffersrc/sink + `scale`/`format`
 //!   filters), `swresample`, image2/NUT containers, a winit player.
 //!
@@ -25,7 +30,7 @@
 //! | [`util`] | `libavutil` | Rational, errors, logging, `PixelFormat` + descriptors, plane geometry, `Frame` |
 //! | [`codec`] | `libavcodec` | `Packet`, `CodecParameters`, Decoder/Encoder traits, rawvideo codec |
 //! | [`format`] | `libavformat` | `IoContext` (avio), demuxer/muxer registries, Y4M + rawvideo, format contexts |
-//! | [`swscale`] | `libswscale` | `ScaleContext`: unscaled converters + resampling (nearest/bilinear/bicubic), CPU kernels and the Vulkan engine |
+//! | [`swscale`] | `libswscale` | `ScaleContext`: unscaled converters + resampling (nearest/bilinear/bicubic + the table-driven area/gauss/sinc/lanczos/spline), CPU kernels and the Vulkan engine |
 //! | [`gpu`] | `libavutil/vulkan` | `ComputeGpu`: headless device + queue, one-shot command buffers, staging |
 //! | [`shaders`] | `libavfilter/vulkan` | GLSL compute modules (`scale.comp`) |
 //! | [`fftools`] | `fftools` | CLI parsing, `av_dump_format`-style output, the transcode loop |
@@ -78,12 +83,20 @@
 //! rawvideo → y4m         : byte-exact (header writer pinned)
 //! y4m → rawvideo rgb24   : max byte diff ≤ 3 (measured max 3, mean 0.66;
 //!                          swscale's integer tables vs our float BT.601)
-//! cpu ↔ vulkan, all 4 conversion modes × 3 algorithms, ½ downscale:
+//! cpu ↔ vulkan, all 4 conversion modes × the 3 shader algorithms
+//!                          (nearest, bilinear, bicubic), ½ downscale:
 //!                          max byte diff ≤ 1 (unorm store vs round())
-//! y4m → ½-scale yuv420p  : max 89 documented divergence — swscale widens
-//!                          the filter in source space on downscale
-//!                          (utils.c:287-293); our fixed 4-tap window
-//!                          under-blurs (Phase 3 port candidate)
+//! y4m → ½-scale yuv420p  : max 89 documented divergence — applies ONLY to
+//!                          the fixed-tap float/GPU algorithms (swscale
+//!                          widens the filter in source space on downscale,
+//!                          utils.c:287-293; our 4-tap window under-blurs).
+//!                          The table-driven kernels widen like swscale:
+//! y4m → ½-scale yuv420p, area/gauss/sinc/lanczos/spline
+//!                        : max ≤ 2, 0 bytes outside ±3 (measured 0/1/2/1/1
+//!                          — entirely system ffmpeg's SIMD apply path
+//!                          sitting ±1-2 off its own `_c` kernels; this
+//!                          port is byte-identical to a standalone build of
+//!                          FFmpeg's C reference, pinned by unit tests)
 //! ```
 //!
 //! ## Example
@@ -96,6 +109,7 @@
 
 pub mod codec;
 pub mod fftools;
+pub mod filter;
 pub mod format;
 pub mod gpu;
 pub mod shaders;
@@ -104,6 +118,7 @@ pub mod util;
 
 // Crate-root re-exports mirroring how C includes libavutil headers:
 // `use crate::{Error, Result, Frame, PixelFormat, Rational}`.
+pub use filter::{FilterGraph, LinkId, NodeId};
 pub use util::color::{ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTrc};
 pub use util::error::{Error, Result};
 pub use util::frame::{Frame, FrameFlags, PictureType};

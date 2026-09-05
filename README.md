@@ -4,7 +4,7 @@ A pipeline-faithful Rust port of [FFmpeg](https://github.com/ffmpeg/ffmpeg)
 (the 8.0.git tree at the sibling `FFmpeg` directory), built one bounded phase
 at a time, with Vulkan compute powering the swscale stage.
 
-## Status — Phase 2 (Vulkan swscale)
+## Status — Phase 3a (variable-width scaling filters)
 
 The full `demux → decode → convert → encode → mux` pipeline for **rawvideo**
 and **Y4M**, driven by an ffmpeg-style CLI, now with real resampling and a
@@ -29,12 +29,19 @@ frame=   10 fps=… q=-0.0 Lsize=     360KiB time=00:00:01.00 bitrate=2949.1kbit
 Correctness is pinned against the system ffmpeg (`tests/golden.rs`):
 y4m↔rawvideo conversions are **byte-exact**; the BT.601 rgb24 conversion is
 within ±3 of swscale per byte; the Vulkan and CPU scale engines agree to
-≤1 byte on every conversion mode × algorithm.
+≤1 byte on every conversion mode × the three shader algorithms
+(nearest/bilinear/bicubic). The additional libswscale kernels — area, gauss,
+sinc, lanczos, spline, with C's filter-width widening on downscale
+(`initFilter`, `utils.c:197-612`) — are CPU-only ports that measure ≤2 bytes
+off the system binary (entirely its SIMD apply path; byte-identical to a
+standalone build of FFmpeg's own C reference).
 
 ```console
 $ cargo run -- -i in.y4m -s 64x48 -f rawvideo -pix_fmt rgb24 out.raw -y
 # -s WxH            scale (nearest/bilinear/bicubic, default bicubic)
-# -scale_algo A     nearest | bilinear | bicubic
+# -scale_algo A     nearest | bilinear | bicubic | area | gauss | sinc |
+#                   lanczos | spline (the latter five CPU-only, auto-
+#                   falling back from the Vulkan engine)
 # -scale_engine E   auto (default) | vulkan | cpu
 ```
 
@@ -45,7 +52,7 @@ $ cargo run -- -i in.y4m -s 64x48 -f rawvideo -pix_fmt rgb24 out.raw -y
 | `src/util` | libavutil: `Rational`, errors, log, `PixelFormat`+descriptors, imgutils, `Frame` (Arc-backed planes) |
 | `src/codec` | libavcodec: `Packet`, `CodecParameters`, Decoder/Encoder traits, rawvideo dec/enc |
 | `src/format` | libavformat: `IoContext` (avio), demux/mux registries, Y4M + rawvideo |
-| `src/swscale` | libswscale: `ScaleContext` (unscaled converters + resampling, CPU + Vulkan engines) |
+| `src/swscale` | libswscale: `ScaleContext` (unscaled converters + resampling, CPU + Vulkan engines), `filter.rs` (`initFilter` port: area/gauss/sinc/lanczos/spline) |
 | `src/gpu` | libavutil/vulkan: headless `ComputeGpu` (device, queue, staging, one-shot cmdbuffers) |
 | `src/shaders` | libavfilter/vulkan: GLSL compute modules (`scale.comp`) |
 | `src/fftools` | the CLI: arg parsing, `av_dump_format` output, transcode loop |
@@ -58,12 +65,16 @@ deliberately skipped C paths with the guard that makes them unreachable.
 1. ✅ Phase 1 — CPU pipeline
 2. ✅ Phase 2 — Vulkan swscale: headless compute (`vulkano`), port of
    `vf_scale_vulkan.c`'s shape + the `libswscale` kernels,
-   nearest/bilinear/bicubic, `-s` (colorspace matrix support + filter-width
-   widening on downscale are Phase 3 candidates)
-3. Phase 3 — filtergraph (`libavfilter`: buffersrc/sink, `scale`/`format`)
-4. Phase 4 — `swresample` + audio paths
-5. Phase 5 — NUT container, more filters
-6. Stretch — winit player window on the Vulkan pipeline
+   nearest/bilinear/bicubic, `-s` (colorspace matrix support is a Phase 3
+   candidate)
+3. ✅ Phase 3a — libswscale variable-width filters on the CPU engine:
+   `initFilter` port (`utils.c:197-612`), area/gauss/sinc/lanczos/spline
+   via `-scale_algo` with filter-width widening on downscale, CPU fallback
+   for algorithms the Vulkan engine cannot run
+4. Phase 3b — filtergraph (`libavfilter`: buffersrc/sink, `scale`/`format`)
+5. Phase 4 — `swresample` + audio paths
+6. Phase 5 — NUT container, more filters
+7. Stretch — winit player window on the Vulkan pipeline
 
 ## Tests
 

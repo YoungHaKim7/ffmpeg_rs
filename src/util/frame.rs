@@ -286,6 +286,35 @@ impl Frame {
             self.flags = self.flags.union(FrameFlags::KEY);
         }
     }
+
+    /// `av_frame_copy_props` (frame.c) — copy every metadata field `Frame`
+    /// carries from `src` onto `self`, leaving the pixel data and geometry
+    /// (`planes`/`width`/`height`/`format`) untouched. Callers that override
+    /// a field (e.g. scale stamping the negotiated color metadata) do so
+    /// AFTER this call.
+    ///
+    /// Covers: pts, duration, time_base, pict_type, flags,
+    /// sample_aspect_ratio, crop_*, color_range, color_primaries, color_trc,
+    /// color_space, chroma_location — everything but the data/geometry
+    /// fields. Not ported from C: the side-data, metadata dictionary and
+    /// `AV_FRAME_FLAG_*` fields outside our subset (none exist here).
+    pub fn copy_props(&mut self, src: &Frame) {
+        self.pts = src.pts;
+        self.duration = src.duration;
+        self.time_base = src.time_base;
+        self.pict_type = src.pict_type;
+        self.flags = src.flags;
+        self.sample_aspect_ratio = src.sample_aspect_ratio;
+        self.crop_top = src.crop_top;
+        self.crop_bottom = src.crop_bottom;
+        self.crop_left = src.crop_left;
+        self.crop_right = src.crop_right;
+        self.color_range = src.color_range;
+        self.color_primaries = src.color_primaries;
+        self.color_trc = src.color_trc;
+        self.color_space = src.color_space;
+        self.chroma_location = src.chroma_location;
+    }
 }
 
 impl Clone for Frame {
@@ -368,5 +397,39 @@ mod tests {
         assert_eq!(f.time_base, Rational::UNKNOWN);
         assert_eq!(f.sample_aspect_ratio, Rational::UNKNOWN);
         assert!(f.planes.is_empty());
+    }
+
+    #[test]
+    fn copy_props_copies_metadata_not_geometry() {
+        let mut src = Frame::alloc(PixelFormat::Yuv420p, 32, 24).unwrap();
+        src.pts = 900;
+        src.duration = 100;
+        src.time_base = Rational::new(1, 90000);
+        src.pict_type = PictureType::I;
+        src.flags = FrameFlags::KEY;
+        src.sample_aspect_ratio = Rational::new(16, 9);
+        src.crop_top = 2;
+        src.color_range = ColorRange::Mpeg;
+        src.color_space = ColorSpace::Bt709;
+        src.chroma_location = ChromaLocation::Left;
+        src.plane_mut(0)[0] = 0xAB;
+
+        let mut dst = Frame::alloc(PixelFormat::Rgb24, 8, 8).unwrap();
+        dst.copy_props(&src);
+        assert_eq!(dst.pts, 900);
+        assert_eq!(dst.duration, 100);
+        assert_eq!(dst.time_base, Rational::new(1, 90000));
+        assert_eq!(dst.pict_type, PictureType::I);
+        assert!(dst.flags.contains(FrameFlags::KEY));
+        assert_eq!(dst.sample_aspect_ratio, Rational::new(16, 9));
+        assert_eq!(dst.crop_top, 2);
+        assert_eq!(dst.color_range, ColorRange::Mpeg);
+        assert_eq!(dst.color_space, ColorSpace::Bt709);
+        assert_eq!(dst.chroma_location, ChromaLocation::Left);
+        // Geometry and pixels are NOT copied — dst keeps its own.
+        assert_eq!(dst.format, PixelFormat::Rgb24);
+        assert_eq!(dst.width, 8);
+        assert_eq!(dst.height, 8);
+        assert_eq!(dst.plane(0)[0], 0);
     }
 }

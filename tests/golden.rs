@@ -293,9 +293,12 @@ fn golden_engine_consistency_cpu_vs_vulkan() {
 }
 
 /// Downscaled output vs system ffmpeg, within the documented fixed-tap
-/// divergence: swscale widens the kernel in source space on downscale
-/// (`utils.c:287-293`), our fixed 4-tap window under-blurs (measured max 89
-/// on testsrc2 at ½ scale — see the swscale module docs). Catches gross
+/// divergence of the FLOAT path: swscale widens the kernel in source space
+/// on downscale (`utils.c:287-293`), our fixed 4-tap window under-blurs
+/// (measured max 89 on testsrc2 at ½ scale — see the swscale module docs).
+/// This applies only to nearest/bilinear/bicubic; the table-driven kernels
+/// widen like swscale and are pinned tightly by
+/// `golden_scaled_new_algorithms_vs_system_ffmpeg` below. Catches gross
 /// breakage while the divergence is documented.
 #[test]
 fn golden_scaled_y4m_vs_system_ffmpeg_tolerance() {
@@ -340,6 +343,160 @@ fn golden_scaled_y4m_vs_system_ffmpeg_tolerance() {
         ours.len()
     );
     eprintln!("scaled yuv420p max byte diff vs swscale: {max_diff} ({over}/{} over ±3)", ours.len());
+}
+
+/// The five table-driven kernels ([`crate::swscale::filter`] — the
+/// `initFilter` port) vs system ffmpeg, which picks the same kernel via
+/// `-sws_flags` (its `sws_names` are exactly our `-scale_algo` values).
+/// Measured (2026-09, system ffmpeg 8.1.2 x86-64, testsrc2):
+///
+/// ```text
+/// downscale 128x96 → 64x48 yuv420p : area max 0, gauss 1, sinc 2,
+///                                     lanczos 1, spline 1; 0 bytes > ±3
+/// upscale  128x96 → 256x192 yuv420p : all five max 1;        0 bytes > ±3
+/// ```
+///
+/// The residual ±1-2 is system ffmpeg's own SIMD apply path: a standalone
+/// build of FFmpeg's C reference (`initFilter` + `hScale8To15_c` +
+/// `yuv2planeX_8_c`, utils.c/swscale.c/output.c) produces byte-identical
+/// output to this port for all five kernels in both directions — pinned by
+/// the coefficient-row unit tests in `filter.rs`. The distro binary's
+/// SSE/AVX2 apply kernels sit ±1-2 off its own `_c` code.
+#[test]
+fn golden_scaled_new_algorithms_vs_system_ffmpeg() {
+    let Some(fx) = Fixture::new("scaled_new") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+    let in_path = fx.path("in.y4m");
+    let in_arg = in_path.to_str().unwrap();
+
+    for algo in ["area", "gauss", "sinc", "lanczos", "spline"] {
+        for (label, size) in [("down", format!("{}x{}", W / 2, H / 2)), ("up", format!("{}x{}", W * 2, H * 2))] {
+            fx.run_ffmpeg(&[
+                "-i", in_arg,
+                "-s", &size, "-sws_flags", algo,
+                "-f", "rawvideo", "-pix_fmt", "yuv420p",
+                fx.path("ref.raw").to_str().unwrap(), "-y",
+            ]);
+            let (ok, _, stderr) = fx.run_ours(&[
+                "-i", in_arg,
+                "-s", &size, "-scale_algo", algo, "-scale_engine", "cpu",
+                "-f", "rawvideo", "-pix_fmt", "yuv420p",
+                fx.path("out.raw").to_str().unwrap(), "-y",
+            ]);
+            assert!(ok, "ffmpeg_rs failed ({algo}/{label}):\n{stderr}");
+
+            let ours = std::fs::read(fx.path("out.raw")).unwrap();
+            let theirs = std::fs::read(fx.path("ref.raw")).unwrap();
+            assert_eq!(ours.len(), theirs.len(), "{algo}/{label}");
+
+            let mut max_diff = 0usize;
+            let mut over = 0usize;
+            for (a, b) in ours.iter().zip(theirs.iter()) {
+                let d = a.abs_diff(*b);
+                max_diff = max_diff.max(d as usize);
+                if d > 3 {
+                    over += 1;
+                }
+            }
+            assert!(
+                max_diff <= 4,
+                "{algo}/{label} diverges beyond the SIMD-vs-C slack (max {max_diff})"
+            );
+            assert_eq!(over, 0, "{algo}/{label}: {over} bytes outside ±3");
+            eprintln!("{algo}/{label}: max byte diff vs swscale: {max_diff}");
+        }
+    }
+
+    // One rgb24 spot check through the composed planar→RGB path. The bound
+    // is dominated by the documented float-BT.601-converter divergence
+    // (±3 unscaled, amplified by downscale ringing — the existing float
+    // bicubic path measures the same shape: max 178, 37.7% over ±3;
+    // lanczos here: max 179, 29.5% over ±3).
+    let size = format!("{}x{}", W / 2, H / 2);
+    fx.run_ffmpeg(&[
+        "-i", in_arg,
+        "-s", &size, "-sws_flags", "lanczos",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        fx.path("ref.raw").to_str().unwrap(), "-y",
+    ]);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", in_arg,
+        "-s", &size, "-scale_algo", "lanczos", "-scale_engine", "cpu",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        fx.path("out.raw").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed (lanczos/rgb24):\n{stderr}");
+    let ours = std::fs::read(fx.path("out.raw")).unwrap();
+    let theirs = std::fs::read(fx.path("ref.raw")).unwrap();
+    let mut max_diff = 0usize;
+    let mut over = 0usize;
+    for (a, b) in ours.iter().zip(theirs.iter()) {
+        let d = a.abs_diff(*b);
+        max_diff = max_diff.max(d as usize);
+        if d > 3 {
+            over += 1;
+        }
+    }
+    assert!(max_diff <= 192, "lanczos rgb24 diverges (max {max_diff})");
+    assert!(
+        (over as f64 / ours.len() as f64) < 0.40,
+        "too many bytes outside ±3 ({over}/{})",
+        ours.len()
+    );
+    eprintln!("lanczos/rgb24: max {max_diff}, {over}/{} over ±3", ours.len());
+}
+
+/// The five table-driven kernels are CPU-only: `-scale_engine vulkan` must
+/// hard-fail at context creation (before touching any device), and
+/// `-scale_engine auto` must fall back and produce byte-identical output to
+/// the explicit CPU run. Neither leg needs a GPU, so no skip.
+#[test]
+fn engine_fallback_for_cpu_only_algorithms() {
+    let Some(fx) = Fixture::new("fallback") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+    let in_path = fx.path("in.y4m");
+    let in_arg = in_path.to_str().unwrap();
+    let size = format!("{}x{}", W / 2, H / 2);
+
+    // (i) explicit Vulkan + lanczos ⇒ nonzero exit, Unsupported message.
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", in_arg,
+        "-s", &size, "-scale_algo", "lanczos", "-scale_engine", "vulkan",
+        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        fx.path("gpu.out").to_str().unwrap(), "-y",
+    ]);
+    assert!(!ok, "vulkan + lanczos must fail, exit was 0");
+    assert!(
+        stderr.contains("not available on the Vulkan engine"),
+        "stderr lacks the fallback reason:\n{stderr}"
+    );
+
+    // (ii) auto ⇒ success, byte-identical to the CPU run.
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", in_arg,
+        "-s", &size, "-scale_algo", "lanczos",
+        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        fx.path("auto.out").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "auto engine failed:\n{stderr}");
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", in_arg,
+        "-s", &size, "-scale_algo", "lanczos", "-scale_engine", "cpu",
+        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        fx.path("cpu.out").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "cpu engine failed:\n{stderr}");
+    assert_eq!(
+        std::fs::read(fx.path("auto.out")).unwrap(),
+        std::fs::read(fx.path("cpu.out")).unwrap(),
+        "auto-fallback output must be the CPU result"
+    );
 }
 
 #[test]

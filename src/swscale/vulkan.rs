@@ -290,6 +290,10 @@ fn shader_algorithm(alg: ScaleAlgorithm) -> i32 {
         ScaleAlgorithm::Nearest => 0,
         ScaleAlgorithm::Bilinear => 1,
         ScaleAlgorithm::Bicubic => 2,
+        // The five table-driven kernels have no shader: ScaleContext::new
+        // falls back to the CPU (Auto) or errors (Vulkan) before any
+        // dispatch, so they never reach here.
+        _ => unreachable!("table-driven algorithms never reach the GPU (fallback in ScaleContext::new)"),
     }
 }
 

@@ -1,41 +1,62 @@
 //! `libswscale` — pixel-format conversion and scaling.
 //!
-//! ## Phase 2 scope
+//! ## Scope
 //!
 //! `ScaleContext` is the `sws_getContext` analog; `scale` the `sws_scale`
 //! one. The kernels cover YUV420P/GRAY8 → packed RGB at any size (BT.601
 //! range-aware) and same-family planar resampling (yuv420p→yuv420p,
-//! gray→gray), with three algorithms ported from `libswscale/filters.c`:
+//! gray→gray), with three float algorithms ported from
+//! `libswscale/filters.c` plus five table-driven kernels ported bit-faithfully
+//! from `initFilter` (`libswscale/utils.c:197-612`, see [`filter`]):
 //!
-//! | algorithm | C kernel | taps | support |
-//! |---|---|---|---|
-//! | [`ScaleAlgorithm::Nearest`] | `SWS_SCALE_POINT` (box) | 1 | 0.5 |
-//! | [`ScaleAlgorithm::Bilinear`] | `triangle` | 2 | 1.0 |
-//! | [`ScaleAlgorithm::Bicubic`] | `cubic(B=0, C=0.6)` | 4 | 2.0 |
+//! | algorithm | C kernel | taps | support | path |
+//! |---|---|---|---|---|
+//! | [`ScaleAlgorithm::Nearest`] | `SWS_SCALE_POINT` (box) | 1 | 0.5 | float |
+//! | [`ScaleAlgorithm::Bilinear`] | `triangle` | 2 | 1.0 | float |
+//! | [`ScaleAlgorithm::Bicubic`] | `cubic(B=0, C=0.6)` | 4 | 2.0 | float |
+//! | [`ScaleAlgorithm::Area`] | `SWS_AREA` trapezoid | 1+1, widened on downscale (`utils.c:287-293`) | ∞ | table, CPU-only |
+//! | [`ScaleAlgorithm::Gauss`] | `SWS_GAUSS` `2^(-3d²)` | 1+8, widened | ∞ | table, CPU-only |
+//! | [`ScaleAlgorithm::Sinc`] | `SWS_SINC` | 1+20, widened | ∞ | table, CPU-only |
+//! | [`ScaleAlgorithm::Lanczos`] | `SWS_LANCZOS` 3-lobe | 1+6, widened | ∞ | table, CPU-only |
+//! | [`ScaleAlgorithm::Spline`] | `SWS_SPLINE` recursive Hermite | 1+20, widened | ∞ | table, CPU-only |
 //!
 //! Bicubic is the default because it is FFmpeg's own default
-//! (`-sws_flags bicubic`). Coordinate mapping is the C
+//! (`-sws_flags bicubic`). Float-path coordinate mapping is the C
 //! `(dst_pos + 0.5)·src/dst − 0.5` center alignment (`filters.c:70-78`),
-//! weights normalized to sum 1. The fixed tap window means heavy downscaling
-//! (beyond ~2×) under-blurs relative to swscale, which widens the kernel in
-//! source space — a documented Phase 2 divergence.
+//! weights normalized to sum 1. The float tap window is fixed, so heavy
+//! downscaling (beyond ~2×) under-blurs relative to swscale for those three
+//! — a documented divergence, now scoped to the float/GPU algorithms only:
+//! the five table-driven kernels widen in source space exactly like
+//! swscale (`utils.c:287-293`).
 //!
-//! Chroma siting: `ChromaLocation::Center` (Y4M `C420jpeg`) samples chroma
-//! at the half-pixel-offset `(p−0.5)/2` position, everything else uses LEFT
-//! `p/2`. One exception, matching C: identity-geometry yuv420p→RGB takes
-//! `ff_get_unscaled_swscale`'s table converter (`swscale_unscaled.c:2425`),
-//! which reads chroma cosited with no interpolation and ignores the siting
-//! tag — see [`ScaleContext::scale_cpu_unscaled_yuv_rgb`].
+//! Chroma siting: on the float path `ChromaLocation::Center` (Y4M
+//! `C420jpeg`) samples chroma at the half-pixel-offset `(p−0.5)/2` position,
+//! everything else uses LEFT `p/2`; the table path derives positions the C
+//! way (`ff_sws_chroma_pos`, see [`filter::chroma_pos`]) — Unspecified means
+//! CENTER there. One exception, matching C: identity-geometry yuv420p→RGB
+//! takes `ff_get_unscaled_swscale`'s table converter
+//! (`swscale_unscaled.c:2425`), which reads chroma cosited with no
+//! interpolation and ignores the siting tag — see
+//! [`ScaleContext::scale_cpu_unscaled_yuv_rgb`].
 //!
 //! ## Engines
 //!
 //! [`ScaleEngine::Vulkan`] runs the port of `vf_scale_vulkan.c`'s shape in
 //! [`vulkan`]: a headless compute device (`src/gpu.rs`, the `FFVulkanContext`
-//! analog) executing `assets/scale.comp` — the same kernels, in GLSL.
-//! `Auto` picks the GPU and falls back to the CPU when no suitable device
-//! exists; the library default is `Cpu` so unit tests stay hermetic and
-//! deterministic. `tests/golden.rs` pins both engines against system ffmpeg.
+//! analog) executing `assets/scale.comp` — the same three float kernels, in
+//! GLSL. `Auto` picks the GPU and falls back to the CPU when no suitable
+//! device exists; the library default is `Cpu` so unit tests stay hermetic
+//! and deterministic. The five table-driven kernels have no shader:
+//! `Auto` falls back to the CPU for them (logged at verbose level) and
+//! `Vulkan` reports them unsupported at context creation — unless the
+//! conversion never runs the algorithm (identity copy, unscaled yuv420p→RGB
+//! table converter), where the GPU decision is unchanged. Known corner,
+//! accepted: identity-geometry gray8→RGB *does* execute the algorithm
+//! (degenerate weights), so `gray8→rgb same-size + lanczos` errors on the
+//! Vulkan engine rather than silently ignoring the flag.
+//! `tests/golden.rs` pins both engines against system ffmpeg.
 
+pub mod filter;
 pub mod vulkan;
 
 use crate::util::color::{ChromaLocation, ColorRange};
@@ -68,6 +89,28 @@ pub enum ConversionMode {
     Gray8ToGray8,
 }
 
+/// Can `ScaleContext` consume `fmt` as a SOURCE? Pure export of the
+/// `ConversionMode` gates in `ScaleContext::new` (mod.rs:284-298) — the
+/// input side of the conversion matrix, for the filtergraph's format
+/// negotiation (`vf_scale` query_formats builds its one-sided input list
+/// from this).
+///
+/// NOTE the deliberately narrower-than-C subset (C's `sws_isSupportedInput`
+/// accepts ~every YUV/RGB/gray format): C422/C444/10-bit inputs fail
+/// conversion graphs exactly like today's `-pix_fmt` path does; `-vf null`
+/// still passes them through untouched.
+pub fn supported_input(fmt: PixelFormat) -> bool {
+    matches!(fmt, PixelFormat::Yuv420p | PixelFormat::Gray8)
+}
+
+/// Can `ScaleContext` produce `fmt` as a DESTINATION? The output side of the
+/// same matrix: same-format resampling for the two supported planar inputs,
+/// plus every packed-RGB output. See [`supported_input`] for the
+/// narrower-than-C caveat.
+pub fn supported_output(fmt: PixelFormat) -> bool {
+    matches!(fmt, PixelFormat::Yuv420p | PixelFormat::Gray8) || RGB_OUTPUTS.contains(&fmt)
+}
+
 /// Which kernel resamples with (`SWS_*` flags subset).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScaleAlgorithm {
@@ -78,6 +121,24 @@ pub enum ScaleAlgorithm {
     /// `SWS_BICUBIC` — cubic B=0/C=0.6, 4 taps. FFmpeg's default scaler.
     #[default]
     Bicubic,
+    /// `SWS_AREA` (1<<5) — area averaging: downscale trapezoid, upscale
+    /// bilinear 2-tap (`utils.c:244-267, 346-354`). CPU-only (table path).
+    Area,
+    /// `SWS_GAUSS` (1<<7) — `2^(-3·d²)`, sizeFactor 8 (`utils.c:355-357`).
+    /// CPU-only (table path).
+    Gauss,
+    /// `SWS_SINC` (1<<8) — `sin(πd)/(πd)`, sizeFactor 20 (`utils.c:358-359`).
+    /// CPU-only (table path).
+    Sinc,
+    /// `SWS_LANCZOS` (1<<9) — 3-lobe `sinc·sinc/p`, sizeFactor
+    /// `ceil(2·3.0) = 6` (`utils.c:278-279, 360-365`). CPU-only (table path).
+    Lanczos,
+    /// `SWS_SPLINE` (1<<10) — recursive cubic-Hermite with
+    /// `p = -2.196152422706632`, sizeFactor 20 (`utils.c:155-166, 371-373`).
+    /// One value like ffmpeg's `-sws_flags spline` — no spline16/36/64
+    /// tables exist in libswscale; the width character is the tap count.
+    /// CPU-only (table path).
+    Spline,
 }
 
 impl ScaleAlgorithm {
@@ -86,6 +147,11 @@ impl ScaleAlgorithm {
             "nearest" | "point" => ScaleAlgorithm::Nearest,
             "bilinear" => ScaleAlgorithm::Bilinear,
             "bicubic" => ScaleAlgorithm::Bicubic,
+            "area" => ScaleAlgorithm::Area,
+            "gauss" => ScaleAlgorithm::Gauss,
+            "sinc" => ScaleAlgorithm::Sinc,
+            "lanczos" => ScaleAlgorithm::Lanczos,
+            "spline" => ScaleAlgorithm::Spline,
             _ => return None,
         })
     }
@@ -95,21 +161,63 @@ impl ScaleAlgorithm {
             ScaleAlgorithm::Nearest => "nearest",
             ScaleAlgorithm::Bilinear => "bilinear",
             ScaleAlgorithm::Bicubic => "bicubic",
+            ScaleAlgorithm::Area => "area",
+            ScaleAlgorithm::Gauss => "gauss",
+            ScaleAlgorithm::Sinc => "sinc",
+            ScaleAlgorithm::Lanczos => "lanczos",
+            ScaleAlgorithm::Spline => "spline",
         }
     }
 
-    /// Tap count per axis (`filters.c` filter_size for upscaling).
+    /// Tap count per axis (`filters.c` filter_size for upscaling). For the
+    /// table-driven variants this is the informational upscale tap count
+    /// (1+sizeFactor, `utils.c:287-293`) — never used, because those go
+    /// through [`filter::scale_plane`], which widens on downscale and lets
+    /// the near-zero reduction pass pick the final size.
     pub const fn taps(self) -> usize {
         match self {
             ScaleAlgorithm::Nearest => 1,
             ScaleAlgorithm::Bilinear => 2,
             ScaleAlgorithm::Bicubic => 4,
+            ScaleAlgorithm::Area => 2,
+            ScaleAlgorithm::Gauss => 9,
+            ScaleAlgorithm::Sinc => 21,
+            ScaleAlgorithm::Lanczos => 7,
+            ScaleAlgorithm::Spline => 21,
         }
+    }
+
+    /// The `scale_algorithms[]` sizeFactor (`utils.c:183-195` + lanczos
+    /// override `utils.c:278-279`) — 0 for the float-path algorithms.
+    pub const fn size_factor(self) -> i32 {
+        match self {
+            ScaleAlgorithm::Area => 1,
+            ScaleAlgorithm::Gauss => 8,
+            ScaleAlgorithm::Sinc => 20,
+            ScaleAlgorithm::Lanczos => 6,
+            ScaleAlgorithm::Spline => 20,
+            _ => 0,
+        }
+    }
+
+    /// Whether this kernel runs on the [`filter`] table path (CPU-only,
+    /// bit-faithful `initFilter` port) instead of the float sampler.
+    pub const fn is_table_driven(self) -> bool {
+        matches!(
+            self,
+            ScaleAlgorithm::Area
+                | ScaleAlgorithm::Gauss
+                | ScaleAlgorithm::Sinc
+                | ScaleAlgorithm::Lanczos
+                | ScaleAlgorithm::Spline
+        )
     }
 
     /// Kernel weight at distance `x` (source pixels). `filters.c:423`
     /// `cubic()` with the SWS_BICUBIC params {B=0, C=0.6}, `triangle()`
-    /// (`filters.c:336`) for bilinear.
+    /// (`filters.c:336`) for bilinear. The table-driven kernels are
+    /// fixed-point and live in [`filter`] — this is never called for them
+    /// (`sample_plane` guards with `is_table_driven`).
     pub fn weight(self, x: f32) -> f32 {
         match self {
             ScaleAlgorithm::Nearest => {
@@ -133,6 +241,7 @@ impl ScaleAlgorithm {
                     0.0
                 }
             }
+            _ => unreachable!("table-driven kernels are fixed-point (filter.rs)"),
         }
     }
 }
@@ -165,6 +274,14 @@ pub struct ScaleContext {
     mode: ConversionMode,
     /// Lazily created GPU session (None on the CPU path).
     gpu: Option<vulkan::GpuScaler>,
+    /// Coefficient tables for the table-driven algorithms, built on the
+    /// first table-driven `scale()` call (`initFilter` runs per context in
+    /// C too, at `ff_sws_init_single_context`).
+    filters: Option<filter::FilterPlan>,
+    /// The chroma location the cached tables were built for (siting is frame
+    /// metadata in C — `ff_sws_chroma_pos` reads the frame — so a changed
+    /// location triggers a rebuild).
+    filters_loc: ChromaLocation,
 }
 
 impl std::fmt::Debug for ScaleContext {
@@ -202,21 +319,56 @@ impl ScaleContext {
             )));
         };
 
-        let gpu = match options.engine {
-            ScaleEngine::Cpu => None,
-            engine => match vulkan::GpuScaler::new() {
-                Ok(scaler) => Some(scaler),
-                Err(e) if engine == ScaleEngine::Vulkan => return Err(e),
-                Err(e) => {
-                    // Auto: fall back, saying why at verbose level.
+        // Algorithm reachability: mirror scale()'s two unscaled early-outs —
+        // copy_identity and the unscaled yuv420p→RGB table converter never
+        // execute the algorithm, so those contexts keep the GPU decision
+        // unchanged. The five table-driven kernels (filter.rs) have no
+        // shader: Auto falls back to the CPU (logged), Vulkan errors —
+        // mirroring the hard-fail arm below.
+        let algo_used = !(src.0 == dst.0 && src.1 == dst.1 && src.2 == dst.2)
+            && !(src.1 == dst.1 && src.2 == dst.2 && mode == ConversionMode::Yuv420pToRgb);
+
+        let gpu = if options.algorithm.is_table_driven() && algo_used {
+            match options.engine {
+                ScaleEngine::Vulkan => {
+                    return Err(Error::Unsupported(format!(
+                        "scaling algorithm '{}' is not available on the Vulkan engine \
+                         (supported: nearest, bilinear, bicubic)",
+                        options.algorithm.name()
+                    )));
+                }
+                _ => {
                     crate::log_verbose!(None,
-                        "Vulkan scaler unavailable ({}), using CPU kernels", e);
+                        "scaling algorithm '{}' has no Vulkan kernel, using CPU",
+                        options.algorithm.name());
                     None
                 }
-            },
+            }
+        } else {
+            match options.engine {
+                ScaleEngine::Cpu => None,
+                engine => match vulkan::GpuScaler::new() {
+                    Ok(scaler) => Some(scaler),
+                    Err(e) if engine == ScaleEngine::Vulkan => return Err(e),
+                    Err(e) => {
+                        // Auto: fall back, saying why at verbose level.
+                        crate::log_verbose!(None,
+                            "Vulkan scaler unavailable ({}), using CPU kernels", e);
+                        None
+                    }
+                },
+            }
         };
 
-        Ok(ScaleContext { src, dst, options, mode, gpu })
+        Ok(ScaleContext {
+            src,
+            dst,
+            options,
+            mode,
+            gpu,
+            filters: None,
+            filters_loc: ChromaLocation::Unspecified,
+        })
     }
 
     /// Whether the GPU path is active (for CLI diagnostics).
@@ -302,8 +454,11 @@ impl ScaleContext {
     }
 
     /// The CPU kernels — the semantic reference the GPU shader mirrors
-    /// line-for-line.
-    fn scale_cpu(&self, src: &Frame, dst: &mut Frame) -> Result<()> {
+    /// line-for-line (float path), plus the table-driven dispatch.
+    fn scale_cpu(&mut self, src: &Frame, dst: &mut Frame) -> Result<()> {
+        if self.options.algorithm.is_table_driven() {
+            return self.scale_cpu_c(src, dst);
+        }
         let alg = self.options.algorithm;
         // Range and siting follow the SOURCE frame (swscale derives the
         // colorspace details from the input's color tags).
@@ -406,6 +561,114 @@ impl ScaleContext {
         Ok(())
     }
 
+    /// The table-driven path — a two-pass H/V run of the [`filter`]
+    /// coefficient plan (the `initFilter` port, `ff_swscale`'s slice
+    /// pipeline materialized). Serves the five libswscale kernels the float
+    /// sampler doesn't implement; CPU-only (`ScaleContext::new` falls back
+    /// or rejects on the Vulkan engine).
+    fn scale_cpu_c(&mut self, src: &Frame, dst: &mut Frame) -> Result<()> {
+        // Siting is frame metadata in C too (`ff_sws_chroma_pos` reads the
+        // frame); rebuild the tables if a later frame carries a different
+        // chroma location than the cached plan.
+        if self.filters.is_none() || self.filters_loc != src.chroma_location {
+            let scaler = filter::TableScaler::from_algorithm(self.options.algorithm);
+            self.filters = Some(filter::build_plan(
+                scaler,
+                (src.width as i32, src.height as i32),
+                (dst.width as i32, dst.height as i32),
+                src.chroma_location,
+            )?);
+            self.filters_loc = src.chroma_location;
+        }
+        let plan = self.filters.as_ref().expect("filter plan just built");
+
+        // Planar modes: per-plane H+V with the luma or chroma tables —
+        // exactly C's lum/chr planar passes (slice.c's descriptors).
+        let planar = |plane: usize,
+                      src: &Frame,
+                      dst: &mut Frame,
+                      h: &filter::SwsFilter,
+                      v: &filter::SwsFilter| {
+            let luma = plane == 0;
+            let (sw, sh) = if luma {
+                (src.width as usize, src.height as usize)
+            } else {
+                (src.width.div_ceil(2) as usize, src.height.div_ceil(2) as usize)
+            };
+            let dst_ls = dst.linesize(plane);
+            filter::scale_plane(
+                src.plane(plane),
+                src.linesize(plane),
+                (sw as i32, sh as i32),
+                dst.plane_mut(plane),
+                dst_ls,
+                h,
+                v,
+            );
+        };
+
+        match self.mode {
+            ConversionMode::Yuv420pToYuv420p => {
+                for p in 0..3 {
+                    let (h, v) = if p == 0 {
+                        (&plan.h_lum, &plan.v_lum)
+                    } else {
+                        (&plan.h_chr, &plan.v_chr)
+                    };
+                    planar(p, src, dst, h, v);
+                }
+                Ok(())
+            }
+            ConversionMode::Gray8ToGray8 => {
+                planar(0, src, dst, &plan.h_lum, &plan.v_lum);
+                Ok(())
+            }
+            ConversionMode::Yuv420pToRgb => {
+                // Compose like C's planar intermediate: resample to a
+                // yuv420p frame at the destination geometry, then reuse the
+                // unscaled table converter. This adds one extra 8-bit
+                // rounding on the chroma path vs C's fused yuv2packedX —
+                // inside the already-documented ±3 RGB converter divergence
+                // (the new-algorithm golden tests assert on planar output).
+                let mut inter = Frame::alloc(PixelFormat::Yuv420p, dst.width, dst.height)?;
+                inter.color_range = src.color_range;
+                for p in 0..3 {
+                    let (h, v) = if p == 0 {
+                        (&plan.h_lum, &plan.v_lum)
+                    } else {
+                        (&plan.h_chr, &plan.v_chr)
+                    };
+                    planar(p, src, &mut inter, h, v);
+                }
+                self.scale_cpu_unscaled_yuv_rgb(&inter, dst)
+            }
+            ConversionMode::Gray8ToRgb => {
+                // Same composition at identity positions: the existing
+                // replicate loop, fed by a resampled gray intermediate.
+                let mut inter = Frame::alloc(PixelFormat::Gray8, dst.width, dst.height)?;
+                planar(0, src, &mut inter, &plan.h_lum, &plan.v_lum);
+                let full = src.color_range == ColorRange::Jpeg;
+                let out_ls = dst.linesize(0);
+                let (r_off, g_off, b_off) = rgb_offsets(dst.format);
+                let step = pixdesc::descriptor(dst.format).comp[0].step as usize;
+                let (dw, dh) = (dst.width as usize, dst.height as usize);
+                let out = dst.plane_mut(0);
+                for yy in 0..dh {
+                    let out_row = &mut out[yy * out_ls..];
+                    let g_row = &inter.plane(0)[yy * dw..];
+                    for xx in 0..dw {
+                        let c = range_expand(g_row[xx] as f32, full).round().clamp(0.0, 255.0) as u8;
+                        let px = xx * step;
+                        out_row[px + r_off] = c;
+                        out_row[px + g_off] = c;
+                        out_row[px + b_off] = c;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Sample Y/U/V at dst pixel (xx,yy) and convert to RGB (BT.601).
     fn sample_yuv_rgb(
         &self,
@@ -483,6 +746,10 @@ pub(crate) fn sample_plane(
     pos: (f32, f32),
     alg: ScaleAlgorithm,
 ) -> f32 {
+    debug_assert!(
+        !alg.is_table_driven(),
+        "table algorithms go through filter::scale_plane"
+    );
     let (w, h) = (size.0 as i32, size.1 as i32);
     let nearest = |p: (f32, f32)| {
         let x = (p.0.round() as i32).clamp(0, w - 1);
@@ -833,6 +1100,185 @@ mod tests {
         // half-pixel-offset resample) sum to 1.
         let s: f32 = (0..4).map(|i| bic((i as f32 - 1.5).abs())).sum();
         assert!((s - 1.0).abs() < 1e-3, "sum {s}");
+    }
+
+    /// The five table-driven kernels keep constant-color input constant in
+    /// planar mode — the error-diffused row-sum invariant end-to-end (the
+    /// table-path analog of `constant_color_is_preserved_by_resampling`).
+    #[test]
+    fn table_algorithms_preserve_constant_color_planar() {
+        for alg in [
+            ScaleAlgorithm::Area,
+            ScaleAlgorithm::Gauss,
+            ScaleAlgorithm::Sinc,
+            ScaleAlgorithm::Lanczos,
+            ScaleAlgorithm::Spline,
+        ] {
+            let mut src = Frame::alloc(PixelFormat::Yuv420p, 9, 7).unwrap();
+            for p in 0..3 {
+                for b in src.plane_mut(p).iter_mut() {
+                    *b = (77 + p * 11) as u8;
+                }
+            }
+            let mut dst = Frame::alloc(PixelFormat::Yuv420p, 17, 13).unwrap();
+            ScaleContext::new(
+                (PixelFormat::Yuv420p, 9, 7),
+                (PixelFormat::Yuv420p, 17, 13),
+                cpu_opts(alg),
+            )
+            .unwrap()
+            .scale(&src, &mut dst)
+            .unwrap_or_else(|e| panic!("{alg:?}: {e}"));
+            for p in 0..3 {
+                let want = (77 + p * 11) as u8;
+                assert!(
+                    dst.plane(p).iter().all(|&b| b == want),
+                    "{alg:?} plane {p}: not constant {}",
+                    dst.plane(p).iter().min().unwrap()
+                );
+            }
+
+            // Downscale direction too.
+            let mut dst = Frame::alloc(PixelFormat::Yuv420p, 5, 4).unwrap();
+            ScaleContext::new(
+                (PixelFormat::Yuv420p, 9, 7),
+                (PixelFormat::Yuv420p, 5, 4),
+                cpu_opts(alg),
+            )
+            .unwrap()
+            .scale(&src, &mut dst)
+            .unwrap_or_else(|e| panic!("{alg:?}: {e}"));
+            for p in 0..3 {
+                let want = (77 + p * 11) as u8;
+                assert!(dst.plane(p).iter().all(|&b| b == want), "{alg:?} down plane {p}");
+            }
+        }
+    }
+
+    /// The table path composes RGB conversions through a planar
+    /// intermediate (one extra rounding vs C's fused yuv2packedX — kept
+    /// inside the ±3 converter divergence; smoke-checked here for shape).
+    #[test]
+    fn table_algorithm_rgb_compose_smoke() {
+        let mut src = Frame::alloc(PixelFormat::Yuv420p, 16, 8).unwrap();
+        for p in 0..3 {
+            for (i, b) in src.plane_mut(p).iter_mut().enumerate() {
+                *b = ((i * (p + 3)) % 191) as u8;
+            }
+        }
+        for alg in [ScaleAlgorithm::Lanczos, ScaleAlgorithm::Area] {
+            let mut dst = Frame::alloc(PixelFormat::Rgb24, 8, 4).unwrap();
+            ScaleContext::new(
+                (PixelFormat::Yuv420p, 16, 8),
+                (PixelFormat::Rgb24, 8, 4),
+                cpu_opts(alg),
+            )
+            .unwrap()
+            .scale(&src, &mut dst)
+            .unwrap_or_else(|e| panic!("{alg:?}: {e}"));
+            // 8×4 rgb24 = 96 bytes, all populated.
+            assert_eq!(dst.plane(0).len(), 8 * 4 * 3);
+            assert!(dst.plane(0).iter().any(|&b| b != 0));
+        }
+    }
+
+    /// A left-sited source (Y4M `C420mpeg2`) rebuilds the chroma tables with
+    /// the C siting positions — chroma output differs from the center
+    /// default, luma does not.
+    #[test]
+    fn table_filters_rebuild_on_chroma_location_change() {
+        let mut ctx = ScaleContext::new(
+            (PixelFormat::Yuv420p, 13, 7),
+            (PixelFormat::Yuv420p, 26, 14),
+            cpu_opts(ScaleAlgorithm::Lanczos),
+        )
+        .unwrap();
+        let mut src = Frame::alloc(PixelFormat::Yuv420p, 13, 7).unwrap();
+        for p in 0..3 {
+            for (i, b) in src.plane_mut(p).iter_mut().enumerate() {
+                *b = ((i * 7 * (p + 1)) % 181) as u8;
+            }
+        }
+        let mut dst_center = Frame::alloc(PixelFormat::Yuv420p, 26, 14).unwrap();
+        src.chroma_location = ChromaLocation::Center;
+        ctx.scale(&src, &mut dst_center).unwrap();
+        let mut dst_left = Frame::alloc(PixelFormat::Yuv420p, 26, 14).unwrap();
+        src.chroma_location = ChromaLocation::Left;
+        ctx.scale(&src, &mut dst_left).unwrap();
+        assert_eq!(dst_center.plane(0), dst_left.plane(0), "luma independent of siting");
+        assert_ne!(
+            dst_center.plane(1), dst_left.plane(1),
+            "chroma siting must shift the resample"
+        );
+    }
+
+    /// Engine policy for the CPU-only kernels, decided at context creation:
+    /// Vulkan hard-fails (without touching the device), Auto silently takes
+    /// the CPU. Conversions that never execute the algorithm (identity
+    /// copy, unscaled yuv420p→RGB) keep the GPU decision unchanged.
+    #[test]
+    fn engine_fallback_for_table_algorithms() {
+        let table = ScaleAlgorithm::Lanczos;
+        // Real conversion, engine=Vulkan ⇒ Unsupported, no GPU required.
+        let err = ScaleContext::new(
+            (PixelFormat::Yuv420p, 9, 7),
+            (PixelFormat::Rgb24, 17, 13),
+            ScaleOptions { algorithm: table, engine: ScaleEngine::Vulkan },
+        )
+        .unwrap_err();
+        match err {
+            Error::Unsupported(msg) => {
+                assert!(msg.contains("not available on the Vulkan engine"), "{msg}")
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        // Same conversion, engine=Auto ⇒ CPU, no GPU required.
+        let ctx = ScaleContext::new(
+            (PixelFormat::Yuv420p, 9, 7),
+            (PixelFormat::Rgb24, 17, 13),
+            ScaleOptions { algorithm: table, engine: ScaleEngine::Auto },
+        )
+        .unwrap();
+        assert!(!ctx.uses_gpu());
+        // Identity-geometry yuv420p→RGB never runs the algorithm: no early
+        // table rejection — the context builds fine and the GPU decision is
+        // whatever the host offers (host-dependent, so nothing asserted).
+        ScaleContext::new(
+            (PixelFormat::Yuv420p, 9, 7),
+            (PixelFormat::Rgb24, 9, 7),
+            ScaleOptions { algorithm: table, engine: ScaleEngine::Auto },
+        )
+        .unwrap();
+        // Known corner (documented in the module docs): identity-geometry
+        // gray8→rgb DOES run the algorithm today, so Vulkan + lanczos
+        // errors even though the geometry is unscaled.
+        let err = ScaleContext::new(
+            (PixelFormat::Gray8, 9, 7),
+            (PixelFormat::Rgb24, 9, 7),
+            ScaleOptions { algorithm: table, engine: ScaleEngine::Vulkan },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Unsupported(_)));
+    }
+
+    /// `-scale_algo` names round-trip and the informational sizeFactor
+    /// matches `utils.c:183-195`.
+    #[test]
+    fn algorithm_names_and_size_factors() {
+        for (name, alg, sf) in [
+            ("area", ScaleAlgorithm::Area, 1),
+            ("gauss", ScaleAlgorithm::Gauss, 8),
+            ("sinc", ScaleAlgorithm::Sinc, 20),
+            ("lanczos", ScaleAlgorithm::Lanczos, 6),
+            ("spline", ScaleAlgorithm::Spline, 20),
+        ] {
+            assert_eq!(ScaleAlgorithm::from_name(name), Some(alg));
+            assert_eq!(alg.name(), name);
+            assert_eq!(alg.size_factor(), sf);
+            assert!(alg.is_table_driven());
+        }
+        assert_eq!(ScaleAlgorithm::Bicubic.size_factor(), 0);
+        assert!(!ScaleAlgorithm::Bicubic.is_table_driven());
     }
 
 }
