@@ -48,9 +48,14 @@ impl PixFmtFlags {
     pub const RGB: PixFmtFlags = PixFmtFlags(1 << 5);
     pub const ALPHA: PixFmtFlags = PixFmtFlags(1 << 7);
     pub const BE: PixFmtFlags = PixFmtFlags(1 << 2);
+    pub const FLOAT: PixFmtFlags = PixFmtFlags(1 << 9);
+    pub const XYZ: PixFmtFlags = PixFmtFlags(1 << 10);
 
     pub const fn contains(self, other: PixFmtFlags) -> bool {
         self.0 & other.0 == other.0
+    }
+    pub const fn intersects(self, other: PixFmtFlags) -> bool {
+        self.0 & other.0 != 0
     }
     pub const fn union(self, other: PixFmtFlags) -> PixFmtFlags {
         PixFmtFlags(self.0 | other.0)

@@ -24,10 +24,11 @@ use crate::util::frame::Frame;
 use crate::util::pixfmt::PixelFormat;
 use crate::{log_error, log_verbose};
 
-use super::filter::{FilterDef, FilterNode};
+use super::filter::{FilterDef, FilterNode, PadRef};
 use super::formats;
-use super::link::{Link, LinkId, ListIdx, NodeId};
+use super::link::{Link, LinkId, LinkInitState, ListIdx, NodeId};
 use super::Options;
+use crate::util::rational::Rational;
 
 /// One negotiation axis — C's `AVFilterFormatsMerger.offset` field selection
 /// (`formats.h:562-580`) becomes an enum. The merger order for video is
@@ -38,6 +39,37 @@ pub enum Axis {
     Formats,
     ColorSpaces,
     ColorRanges,
+}
+
+/// One typed list entry — `REDUCE_FORMATS`'s `fmt_type fmt` generic, which
+/// C instantiates per axis (avfiltergraph.c:943-978).
+#[derive(Clone, Copy, Debug)]
+enum ListValue {
+    Pix(PixelFormat),
+    Csp(ColorSpace),
+    Rng(ColorRange),
+}
+
+/// `REDUCE_FORMATS`'s per-axis body (avfiltergraph.c:962-974): collapse
+/// `list` onto the singleton when it contains it; an empty list BECOMES the
+/// singleton (C's `ff_add_format` onto an empty list). Returns whether a
+/// reduction happened; a no-op for lists already of length 1.
+fn reduce_in_place<T: PartialEq + Copy>(list: &mut Vec<T>, fmt: T) -> bool {
+    if list.len() == 1 {
+        return false; // C: `out_link->incfg.list->nb == 1` skips
+    }
+    if list.is_empty() {
+        list.push(fmt);
+        return true;
+    }
+    match list.iter().position(|f| *f == fmt) {
+        Some(idx) => {
+            list.swap(0, idx);
+            list.truncate(1);
+            true
+        }
+        None => false,
+    }
 }
 
 /// `AVFilterInOut` (`avfilter.h:718-728`) — one open pad returned by graph
@@ -280,7 +312,619 @@ impl FilterGraph {
     /// validity stage only; the formats negotiation round, link config and
     /// size checks arrive with wave 2 (this method grows them in order).
     pub fn config(&mut self) -> Result<()> {
-        self.check_validity()
+        // `avfilter_graph_config` order (avfiltergraph.c:1426-1452);
+        // `graph_config_pointers` (sink-link age heap) is not ported.
+        self.check_validity()?;
+        while matches!(self.query_formats_round(), Err(Error::Again)) {
+            log_verbose!(None, "query_formats not finished\n"); // avfiltergraph.c:1374
+        }
+        self.graph_config_formats_tail()?;
+        self.graph_config_links()?;
+        self.graph_check_links()
+    }
+
+    // -----------------------------------------------------------------------
+    // Format negotiation (avfiltergraph.c:522-737, 943-1060, 1311-1400)
+    // -----------------------------------------------------------------------
+
+    /// `query_formats` (avfiltergraph.c:522-737) — ONE round: query every
+    /// under-declared filter, then merge lists link by link, auto-inserting
+    /// `scale` converters where halves cannot merge. `Err(Again)` = progress
+    /// was made, caller re-runs; the stuck case errors with C's text.
+    pub(crate) fn query_formats_round(&mut self) -> Result<()> {
+        // (527-547) query every filter whose declarations are incomplete.
+        let mut count_queried = 0;
+        let mut count_merged = 0;
+        let mut count_already_merged = 0;
+        let mut count_delayed = 0;
+        let mut converter_count = 0usize;
+        for i in 0..self.nodes.len() {
+            let node = NodeId(i);
+            if self.formats_declared(node) {
+                continue;
+            }
+            match self.query_formats_filter(node) {
+                // EAGAIN may indicate partial success — not counted yet.
+                Err(Error::Again) => continue,
+                other => other?,
+            }
+            count_queried += 1;
+        }
+
+        // (549-709) merge as many lists as possible; `retry:` re-enters here
+        // after converter insertion.
+        'retry: loop {
+            for i in 0..self.nodes.len() {
+                let filter = NodeId(i);
+                let inputs = self.nodes[filter.0].inputs.clone();
+                for link in inputs.iter().flatten() {
+                    // Pass 1 (565-584): an axis whose halves cannot merge
+                    // registers a converter. Every video merger's conversion
+                    // filter is "scale" (formats.c:384-419), so at most one
+                    // converter is ever registered per link (C dedupes by
+                    // name); alpha modes ("premultiply_dynamic") dropped.
+                    let mut need_conv = false;
+                    for axis in [Axis::Formats, Axis::ColorSpaces, Axis::ColorRanges] {
+                        let (a, b) = self.link_halves(*link, axis);
+                        if let (Some(a), Some(b)) = (a, b) {
+                            if a != b && !self.can_merge_axis(axis, a, b) {
+                                need_conv = true;
+                            }
+                        }
+                    }
+                    // Pass 2 (586-605): classify each axis.
+                    for axis in [Axis::Formats, Axis::ColorSpaces, Axis::ColorRanges] {
+                        let (a, b) = self.link_halves(*link, axis);
+                        match (a, b) {
+                            (None, _) | (_, None) => count_delayed += 1,
+                            (Some(a), Some(b)) if a == b => count_already_merged += 1,
+                            (Some(a), Some(b)) if !need_conv => {
+                                count_merged += 1;
+                                if !self.merge_axis(axis, a, b) {
+                                    need_conv = true;
+                                }
+                            }
+                            _ => {} // mergeable but a converter is pending
+                        }
+                    }
+
+                    if !need_conv {
+                        continue;
+                    }
+                    // (611-641) auto-insert the converter. C would honor
+                    // disable_auto_convert; this port has no such flag.
+                    if super::filter_def("scale").is_none() {
+                        log_error!(
+                            None,
+                            "'scale' filter not present, cannot convert formats.\n"
+                        );
+                        return Err(Error::NotFound(
+                            "'scale' filter not present, cannot convert formats.".into(),
+                        ));
+                    }
+                    let inst_name = format!("auto_scale_{converter_count}");
+                    converter_count += 1;
+                    // C: `avfilter_graph_create_filter(.., inst_name, conv_opts..)`
+                    // — `scale_sws_opts` is not ported (empty options); the
+                    // node keeps C's `auto_scale_N` instance name.
+                    let conv = self.create_filter("scale", "")?;
+                    self.nodes[conv.0].name = inst_name;
+                    self.insert_filter(*link, conv)?;
+                    self.query_formats_filter(conv)?;
+
+                    // (649-701) preemptively settle the converter's own
+                    // links on every scale-bearing axis.
+                    let inlink = self.nodes[conv.0].inputs[0]
+                        .expect("inserted converter has an input link");
+                    let outlink = self.nodes[conv.0].outputs[0]
+                        .expect("inserted converter has an output link");
+                    let (src_name, dst_name) = {
+                        let l = &self.links[link.0];
+                        (
+                            self.nodes[l.src.0].name.clone(),
+                            self.nodes[l.dst.0].name.clone(),
+                        )
+                    };
+                    for axis in [Axis::Formats, Axis::ColorSpaces, Axis::ColorRanges] {
+                        for l in [inlink, outlink] {
+                            let (a, b) = self.link_halves(l, axis);
+                            match (a, b) {
+                                (Some(a), Some(b)) if self.merge_axis(axis, a, b) => {
+                                    count_merged += 1;
+                                }
+                                _ => {
+                                    log_error!(
+                                        None,
+                                        "Impossible to convert between the formats supported by the filter '{}' and the filter '{}'\n",
+                                        src_name,
+                                        dst_name
+                                    );
+                                    return Err(Error::Unsupported(
+                                        "Impossible to convert between the formats supported by the filter".into(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    // (704-706) converters may cross-interact — start over.
+                    continue 'retry;
+                }
+            }
+            break;
+        }
+
+        // (709-712) C's debug summary — kept as a verbose line.
+        log_verbose!(
+            None,
+            "query_formats: {count_queried} queried, {count_merged} merged, {count_already_merged} already done, {count_delayed} delayed\n"
+        );
+        // (714-736) delayed halves with no progress = stuck negotiation.
+        if count_delayed > 0 {
+            if count_queried > 0 || count_merged > 0 {
+                return Err(Error::Again);
+            }
+            let mut names = String::new();
+            for i in 0..self.nodes.len() {
+                let node = NodeId(i);
+                if !self.formats_declared(node) {
+                    if !names.is_empty() {
+                        names += ", ";
+                    }
+                    names += &self.nodes[i].name;
+                }
+            }
+            log_error!(
+                None,
+                "The following filters could not choose their formats: {names}\nConsider inserting the (a)format filter near their input or output.\n"
+            );
+            return Err(Error::InvalidData(
+                "The following filters could not choose their formats".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// `filter_query_formats` (avfiltergraph.c:336-410): the filter's own
+    /// query, then the always-run default fill. `Err(Again)` from the impl
+    /// short-circuits BEFORE the fill (C returns early at 395).
+    fn query_formats_filter(&mut self, node: NodeId) -> Result<()> {
+        let mut imp = self.nodes[node.0]
+            .imp
+            .take()
+            .expect("query_formats_filter: imp already taken");
+        let ret = imp.query_formats(self, node);
+        self.nodes[node.0].imp = Some(imp);
+        ret?;
+        self.default_query_formats(node)
+    }
+
+    /// `formats_declared` (avfiltergraph.c:413-449) — video halves only
+    /// (audio axes and alpha modes are out of scope).
+    fn formats_declared(&self, node: NodeId) -> bool {
+        for l in self.nodes[node.0].inputs.iter().flatten() {
+            let h = &self.links[l.0].outcfg;
+            if h.formats.is_none() || h.color_spaces.is_none() || h.color_ranges.is_none() {
+                return false;
+            }
+        }
+        for l in self.nodes[node.0].outputs.iter().flatten() {
+            let h = &self.links[l.0].incfg;
+            if h.formats.is_none() || h.color_spaces.is_none() || h.color_ranges.is_none() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The two negotiation halves of one axis on one link (`incfg`, `outcfg`
+    /// — C reads them via the merger's struct offset).
+    fn link_halves(&self, link: LinkId, axis: Axis) -> (Option<ListIdx>, Option<ListIdx>) {
+        let l = &self.links[link.0];
+        match axis {
+            Axis::Formats => (l.incfg.formats, l.outcfg.formats),
+            Axis::ColorSpaces => (l.incfg.color_spaces, l.outcfg.color_spaces),
+            Axis::ColorRanges => (l.incfg.color_ranges, l.outcfg.color_ranges),
+        }
+    }
+
+    fn can_merge_axis(&self, axis: Axis, a: ListIdx, b: ListIdx) -> bool {
+        match axis {
+            Axis::Formats => formats::can_merge_pix_fmts(self, a, b),
+            Axis::ColorSpaces => formats::can_merge_csp(self, a, b),
+            Axis::ColorRanges => formats::can_merge_rng(self, a, b),
+        }
+    }
+
+    fn merge_axis(&mut self, axis: Axis, a: ListIdx, b: ListIdx) -> bool {
+        match axis {
+            Axis::Formats => formats::merge_pix_fmts(self, a, b),
+            Axis::ColorSpaces => formats::merge_csp(self, a, b),
+            Axis::ColorRanges => formats::merge_rng(self, a, b),
+        }
+    }
+
+    /// The post-query tail of `graph_config_formats` (avfiltergraph.c:1379-1398):
+    /// reduce, then pick. (`swap_sample_fmts`/`swap_samplerates`/
+    /// `swap_channel_layouts`, 1057-1309, are audio-only.)
+    fn graph_config_formats_tail(&mut self) -> Result<()> {
+        self.reduce_formats()?;
+        self.pick_formats()
+    }
+
+    /// `reduce_formats` (avfiltergraph.c:1040-1057): fixpoint loop over
+    /// `reduce_formats_on_filter`.
+    fn reduce_formats(&mut self) -> Result<()> {
+        loop {
+            let mut reduced = false;
+            for i in 0..self.nodes.len() {
+                if self.reduce_formats_on_filter(NodeId(i))? {
+                    reduced = true;
+                }
+            }
+            if !reduced {
+                return Ok(());
+            }
+        }
+    }
+
+    /// `REDUCE_FORMATS` over the three video axes (avfiltergraph.c:943-978):
+    /// an input's singleton `outcfg` list collapses each output's `incfg`
+    /// list — empty becomes the singleton, non-singleton containing it
+    /// collapses onto it. Lists are mutated IN PLACE in the arena (C mutates
+    /// the shared object; every sharer sees the reduction).
+    fn reduce_formats_on_filter(&mut self, filter: NodeId) -> Result<bool> {
+        let mut ret = false;
+        for axis in [Axis::Formats, Axis::ColorSpaces, Axis::ColorRanges] {
+            let inputs = self.nodes[filter.0].inputs.clone();
+            for l in inputs.iter().flatten() {
+                let Some(singleton) = self.links[l.0].outcfg.slot(axis) else {
+                    continue;
+                };
+                let fmt = match axis {
+                    Axis::Formats => match self.fmt_lists[singleton as usize].as_slice() {
+                        [f] => ListValue::Pix(*f),
+                        _ => continue, // not a singleton
+                    },
+                    Axis::ColorSpaces => match self.csp_lists[singleton as usize].as_slice() {
+                        [c] => ListValue::Csp(*c),
+                        _ => continue,
+                    },
+                    Axis::ColorRanges => match self.rng_lists[singleton as usize].as_slice() {
+                        [r] => ListValue::Rng(*r),
+                        _ => continue,
+                    },
+                };
+                let outputs = self.nodes[filter.0].outputs.clone();
+                for o in outputs.iter().flatten() {
+                    let Some(list_idx) = self.links[o.0].incfg.slot(axis) else {
+                        continue;
+                    };
+                    let collapse = match (axis, fmt) {
+                        (Axis::Formats, ListValue::Pix(f)) => {
+                            reduce_in_place(&mut self.fmt_lists[list_idx as usize], f)
+                        }
+                        (Axis::ColorSpaces, ListValue::Csp(c)) => {
+                            reduce_in_place(&mut self.csp_lists[list_idx as usize], c)
+                        }
+                        (Axis::ColorRanges, ListValue::Rng(r)) => {
+                            reduce_in_place(&mut self.rng_lists[list_idx as usize], r)
+                        }
+                        _ => unreachable!("axis/value kind mismatch"),
+                    };
+                    if collapse {
+                        ret = true;
+                        break; // C breaks the output loop per axis/input
+                    }
+                }
+            }
+        }
+        Ok(ret)
+    }
+
+    /// `pick_formats` (avfiltergraph.c:1311-1364): change-loop — a
+    /// singleton list picks its link NOW, and a filter with a picked input
+    /// picks its outputs against that reference; final sweep picks the rest.
+    fn pick_formats(&mut self) -> Result<()> {
+        loop {
+            let mut change = false;
+            for i in 0..self.nodes.len() {
+                let filter = NodeId(i);
+                let inputs = self.nodes[filter.0].inputs.clone();
+                for l in inputs.iter().flatten() {
+                    if self.incfg_singleton(*l) {
+                        self.pick_format(*l, None)?;
+                        change = true;
+                    }
+                }
+                let outputs = self.nodes[filter.0].outputs.clone();
+                for l in outputs.iter().flatten() {
+                    if self.incfg_singleton(*l) {
+                        self.pick_format(*l, None)?;
+                        change = true;
+                    }
+                }
+                // (1345-1352) forward the picked input format to unpicked
+                // outputs via best-of-2.
+                if let Some(&in0) = inputs.first().and_then(|l| l.as_ref()) {
+                    if self.links[in0.0].format.is_some() {
+                        for l in outputs.iter().flatten() {
+                            if self.links[l.0].format.is_none() {
+                                self.pick_format(*l, Some(in0))?;
+                                change = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !change {
+                break;
+            }
+        }
+        // (1354-1362) final sweep: pick everything still unpicked.
+        for i in 0..self.nodes.len() {
+            let filter = NodeId(i);
+            let inputs = self.nodes[filter.0].inputs.clone();
+            for l in inputs.iter().flatten() {
+                self.pick_format(*l, None)?;
+            }
+            let outputs = self.nodes[filter.0].outputs.clone();
+            for l in outputs.iter().flatten() {
+                self.pick_format(*l, None)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// incfg formats list exists and has exactly one entry (the C loop
+    /// guards at avfiltergraph.c:1323/1333).
+    fn incfg_singleton(&self, link: LinkId) -> bool {
+        self.links[link.0]
+            .incfg
+            .formats
+            .is_some_and(|l| self.fmt_lists[l as usize].len() == 1)
+    }
+
+    /// `pick_format` (avfiltergraph.c:793-941): choose the link's format
+    /// (best-of-2 against `ref` when given), then color space/range, then
+    /// drop every list half on the link.
+    fn pick_format(&mut self, link: LinkId, refr: Option<LinkId>) -> Result<()> {
+        let Some(list) = self.links[link.0].incfg.formats else {
+            return Ok(()); // nothing declared — already final
+        };
+        if let Some(refl) = refr {
+            // (801-813) fold best-of-2 over the whole list against the
+            // reference format. has_alpha: C's FIXME keeps the
+            // nb_components-even approximation.
+            let ref_fmt = self.links[refl.0].format.expect("reference link picked");
+            let has_alpha =
+                crate::util::pixdesc::descriptor(ref_fmt).nb_components % 2 == 0;
+            let mut best: Option<PixelFormat> = None;
+            for &p in &self.fmt_lists[list as usize] {
+                best = Some(formats::find_best_pix_fmt_of_2(best, p, ref_fmt, has_alpha));
+            }
+            if let Some(best) = best {
+                self.fmt_lists[list as usize] = vec![best];
+            }
+        }
+        let fmt = self.fmt_lists[list as usize][0];
+        self.links[link.0].format = Some(fmt);
+
+        // (843-891) color space / range selection.
+        if !formats::regular_yuv(fmt) {
+            // Explicitly YUV-only fields get sane values otherwise.
+            let desc = crate::util::pixdesc::descriptor(fmt);
+            self.links[link.0].color_range = if desc.flags.contains(crate::util::pixdesc::PixFmtFlags::FLOAT) {
+                ColorRange::Unspecified
+            } else {
+                ColorRange::Jpeg
+            };
+            self.links[link.0].colorspace = if desc
+                .flags
+                .intersects(
+                    crate::util::pixdesc::PixFmtFlags::RGB
+                        .union(crate::util::pixdesc::PixFmtFlags::XYZ),
+                )
+            {
+                ColorSpace::Rgb
+            } else {
+                ColorSpace::Unspecified
+            };
+        } else {
+            let csp_list = self.links[link.0]
+                .incfg
+                .color_spaces
+                .expect("query filled color spaces");
+            if self.csp_lists[csp_list as usize].is_empty() {
+                let (src_name, dst_name) = self.link_endpoints(link);
+                log_error!(
+                    None,
+                    "Cannot select color space for the link between filters {src_name} and {dst_name}.\n"
+                );
+                return Err(Error::InvalidArgument(
+                    "Cannot select color space for the link".into(),
+                ));
+            }
+            self.links[link.0].colorspace = self.csp_lists[csp_list as usize][0];
+
+            if formats::forced_full_range(fmt) {
+                self.links[link.0].color_range = ColorRange::Jpeg;
+            } else {
+                let rng_list = self.links[link.0]
+                    .incfg
+                    .color_ranges
+                    .expect("query filled color ranges");
+                if self.rng_lists[rng_list as usize].is_empty() {
+                    let (src_name, dst_name) = self.link_endpoints(link);
+                    log_error!(
+                        None,
+                        "Cannot select color range for the link between filters {src_name} and {dst_name}.\n"
+                    );
+                    return Err(Error::InvalidArgument(
+                        "Cannot select color range for the link".into(),
+                    ));
+                }
+                self.links[link.0].color_range = self.rng_lists[rng_list as usize][0];
+            }
+        }
+
+        // (920-935) unref both halves of every axis on this link.
+        let l = &mut self.links[link.0];
+        l.incfg.formats = None;
+        l.outcfg.formats = None;
+        l.incfg.color_spaces = None;
+        l.outcfg.color_spaces = None;
+        l.incfg.color_ranges = None;
+        l.outcfg.color_ranges = None;
+        Ok(())
+    }
+
+    fn link_endpoints(&self, link: LinkId) -> (String, String) {
+        let l = &self.links[link.0];
+        (self.nodes[l.src.0].name.clone(), self.nodes[l.dst.0].name.clone())
+    }
+
+    // -----------------------------------------------------------------------
+    // Link configuration (avfiltergraph.c:248-260 + avfilter.c:327-452)
+    // -----------------------------------------------------------------------
+
+    /// `graph_config_links` (avfiltergraph.c:248-260): configure from the
+    /// sinks inward (filters with no outputs first — recursion walks
+    /// upstream).
+    fn graph_config_links(&mut self) -> Result<()> {
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].def.outputs.is_empty() {
+                self.config_links_for(NodeId(i))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `ff_filter_config_links` (avfilter.c:327-452): per input link —
+    /// recurse upstream, run the SOURCE's output-pad `config_props` first,
+    /// apply the video defaults, then the DEST's input-pad `config_props`.
+    fn config_links_for(&mut self, filter: NodeId) -> Result<()> {
+        let n_inputs = self.nodes[filter.0].def.inputs.len();
+        for j in 0..n_inputs {
+            let Some(link) = self.nodes[filter.0].inputs[j] else {
+                log_error!(None, "Not all input and output are properly linked ({j}).\n");
+                return Err(Error::InvalidArgument(
+                    "Not all input and output are properly linked".into(),
+                ));
+            };
+            match self.links[link.0].init_state {
+                LinkInitState::Init => continue,
+                LinkInitState::StartInit => {
+                    log_verbose!(None, "circular filter chain detected\n"); // avfilter.c:352
+                    return Ok(());
+                }
+                LinkInitState::Uninit => {}
+            }
+            self.links[link.0].init_state = LinkInitState::StartInit;
+
+            let src = self.links[link.0].src;
+            let srcpad = self.links[link.0].srcpad;
+            let dst = self.links[link.0].dst;
+            let dstpad = self.links[link.0].dstpad;
+            self.config_links_for(src)?;
+
+            // (364-373) the source's output-pad config_props. C errors when
+            // a source/multi-input filter lacks the callback; FilterImpl has
+            // a default no-op, so the check is not portable — noted divergence.
+            {
+                let mut imp = self.nodes[src.0]
+                    .imp
+                    .take()
+                    .expect("config_links: imp already taken");
+                let ret = imp.config_props(self, src, PadRef::Out(srcpad));
+                self.nodes[src.0].imp = Some(imp);
+                if let Err(e) = ret {
+                    log_error!(
+                        None,
+                        "Failed to configure output pad on {}\n",
+                        self.nodes[src.0].name
+                    );
+                    return Err(e);
+                }
+            }
+
+            // (405-430) video defaults: inherit time base / SAR / frame
+            // rate / geometry from the source's first input link.
+            let inlink = self.nodes[src.0].inputs.first().copied().flatten();
+            {
+                // (405-430) inherit from the source's first input link.
+                let upstream = inlink.map(|il| {
+                    let i = &self.links[il.0];
+                    (i.time_base, i.sample_aspect_ratio, i.frame_rate, i.w, i.h)
+                });
+                let l = &mut self.links[link.0];
+                if l.time_base == Rational::ZERO {
+                    l.time_base = upstream
+                        .map(|u| u.0)
+                        .unwrap_or(Rational::new(1, 1_000_000)); // AV_TIME_BASE_Q
+                }
+                if l.sample_aspect_ratio == Rational::ZERO {
+                    l.sample_aspect_ratio = upstream.map(|u| u.1).unwrap_or(Rational::ONE);
+                }
+                if let Some((_, _, fr, w, h)) = upstream {
+                    if l.frame_rate == Rational::ZERO {
+                        l.frame_rate = fr;
+                    }
+                    if l.w == 0 {
+                        l.w = w;
+                    }
+                    if l.h == 0 {
+                        l.h = h;
+                    }
+                } else if l.w == 0 || l.h == 0 {
+                    log_error!(
+                        None,
+                        "Video source filters must set their output link's width and height\n"
+                    );
+                    return Err(Error::InvalidArgument(
+                        "Video source filters must set their output link's width and height"
+                            .into(),
+                    ));
+                }
+            }
+
+            // (445-452) the destination's input-pad config_props, LAST.
+            {
+                let mut imp = self.nodes[dst.0]
+                    .imp
+                    .take()
+                    .expect("config_links: imp already taken");
+                let ret = imp.config_props(self, dst, PadRef::In(dstpad));
+                self.nodes[dst.0].imp = Some(imp);
+                if let Err(e) = ret {
+                    log_error!(
+                        None,
+                        "Failed to configure input pad on {}\n",
+                        self.nodes[dst.0].name
+                    );
+                    return Err(e);
+                }
+            }
+
+            self.links[link.0].init_state = LinkInitState::Init;
+        }
+        Ok(())
+    }
+
+    /// `graph_check_links` (avfiltergraph.c:263-282): every output link must
+    /// carry a sane geometry for its negotiated format.
+    fn graph_check_links(&mut self) -> Result<()> {
+        for i in 0..self.nodes.len() {
+            let outputs = self.nodes[i].outputs.clone();
+            for l in outputs.iter().flatten() {
+                let link = &self.links[l.0];
+                let Some(fmt) = link.format else {
+                    continue; // unconfigured links only exist pre-config
+                };
+                crate::util::imgutils::check_size(link.w, link.h)?;
+                let _ = fmt;
+            }
+        }
+        Ok(())
     }
 
     /// `graph_check_validity` (avfiltergraph.c:203-240): every pad of every
@@ -525,6 +1169,7 @@ mod tests {
     use super::*;
     use crate::filter::graph::engine_test_helpers::*;
     use crate::filter::filter;
+    use crate::filter::FilterImpl;
 
     fn null_pair() -> (FilterGraph, NodeId, NodeId, LinkId) {
         let mut g = FilterGraph::new();
@@ -534,13 +1179,120 @@ mod tests {
         (g, a, b, l)
     }
 
-    /// Configure a link's geometry for engine tests (what a real config()
-    /// derives from the frames in flight).
-    fn configure(g: &mut FilterGraph, l: LinkId, fmt: PixelFormat, w: u32, h: u32) {
-        let li = &mut g.links[l.0];
-        li.format = Some(fmt);
-        li.w = w;
-        li.h = h;
+    // -----------------------------------------------------------------------
+    // Negotiation driver (avfiltergraph.c:522-1060, 1311-1400)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn query_round_picks_formats_and_drops_halves() {
+        // src → null → sink with default (all-list) queries: one round
+        // merges everything, pick_formats picks, halves disappear.
+        let mut g = FilterGraph::new();
+        let src = g.alloc_test_src();
+        let n = g.create_filter("null", "").unwrap();
+        let sink = g.alloc_test_sink();
+        let la = g.link(src, 0, n, 0).unwrap();
+        let lb = g.link(n, 0, sink, 0).unwrap();
+        g.query_formats_round().unwrap();
+        g.graph_config_formats_tail().unwrap();
+        for l in [la, lb] {
+            assert!(g.links[l.0].format.is_some(), "format picked");
+            // pick_format unrefs both halves (avfiltergraph.c:920-935).
+            assert_eq!(g.links[l.0].incfg.formats, None);
+            assert_eq!(g.links[l.0].outcfg.formats, None);
+            assert!(matches!(
+                g.links[l.0].colorspace,
+                ColorSpace::Unspecified | ColorSpace::Bt709 | ColorSpace::Bt470bg
+            ));
+        }
+    }
+
+    #[test]
+    fn reduce_formats_collapses_output_lists() {
+        // src --la--> a --lb--> b: a declares its INPUT accepts only yuv420p
+        // (la's outcfg singleton); its OUTPUT list contains it among others
+        // — REDUCE_FORMATS collapses lb's incfg onto it.
+        let mut g = FilterGraph::new();
+        let src = g.alloc_test_src();
+        let a = g.create_filter("null", "").unwrap();
+        let b = g.create_filter("null", "").unwrap();
+        let la = g.link(src, 0, a, 0).unwrap();
+        let lb = g.link(a, 0, b, 0).unwrap();
+        let single = g.alloc_pix_list(vec![PixelFormat::Yuv420p]);
+        let many = g.alloc_pix_list(vec![PixelFormat::Rgb24, PixelFormat::Yuv420p]);
+        g.links[la.0].outcfg.formats = Some(single);
+        g.links[lb.0].incfg.formats = Some(many);
+        assert!(g.reduce_formats_on_filter(a).unwrap());
+        assert_eq!(
+            g.fmt_lists[many as usize],
+            vec![PixelFormat::Yuv420p],
+            "reduced in place, sharers see it"
+        );
+        // Fixpoint: a second round is a no-op.
+        assert!(!g.reduce_formats_on_filter(a).unwrap());
+    }
+
+    #[test]
+    fn pick_format_non_yuv_gets_jpeg_range_rgb_space() {
+        // avfiltergraph.c:845-861: rgb24 is not regular YUV → range JPEG,
+        // space RGB — WITHOUT consulting the (unset) color lists.
+        let (mut g, _a, _b, l) = null_pair();
+        let list = g.alloc_pix_list(vec![PixelFormat::Rgb24]);
+        g.links[l.0].incfg.formats = Some(list);
+        g.pick_format(l, None).unwrap();
+        assert_eq!(g.links[l.0].format, Some(PixelFormat::Rgb24));
+        assert_eq!(g.links[l.0].color_range, ColorRange::Jpeg);
+        assert_eq!(g.links[l.0].colorspace, ColorSpace::Rgb);
+        assert_eq!(g.links[l.0].incfg.color_spaces, None, "halves dropped");
+    }
+
+    #[test]
+    fn pick_format_yuv_picks_declared_color_lists() {
+        let (mut g, _a, _b, l) = null_pair();
+        let fmts = g.alloc_pix_list(vec![PixelFormat::Yuv420p]);
+        let csps = g.alloc_csp_list(vec![ColorSpace::Bt709]);
+        let rngs = g.alloc_rng_list(vec![ColorRange::Mpeg]);
+        g.links[l.0].incfg.formats = Some(fmts);
+        g.links[l.0].incfg.color_spaces = Some(csps);
+        g.links[l.0].incfg.color_ranges = Some(rngs);
+        g.pick_format(l, None).unwrap();
+        assert_eq!(g.links[l.0].colorspace, ColorSpace::Bt709);
+        assert_eq!(g.links[l.0].color_range, ColorRange::Mpeg);
+    }
+
+    #[test]
+    fn negotiation_stuck_errors_with_filter_names() {
+        // A filter whose query always defers (Err(Again)) with nothing else
+        // to merge: C's "could not choose their formats" EIO path
+        // (avfiltergraph.c:723-736).
+        let mut g = FilterGraph::new();
+        let src = g.alloc_test_src();
+        let sink = g.alloc_test_sink();
+        let l = g.link(src, 0, sink, 0).unwrap();
+        let _ = l;
+        // Make BOTH endpoints defer: swap src's impl for a deferring one.
+        g.nodes[src.0].imp = Some(Box::new(DeferQuery));
+        g.nodes[sink.0].imp = Some(Box::new(DeferQuery));
+        let err = g.query_formats_round().unwrap_err();
+        assert!(err.to_string().contains("could not choose their formats"));
+    }
+
+    /// query_formats that never declares anything (C: filters returning
+    /// AVERROR(EAGAIN) from their query).
+    struct DeferQuery;
+    impl FilterImpl for DeferQuery {
+        fn filter_frame(
+            &mut self,
+            _g: &mut FilterGraph,
+            _node: NodeId,
+            _pad: usize,
+            _frame: Frame,
+        ) -> Result<()> {
+            Err(Error::Unsupported("not used".into()))
+        }
+        fn query_formats(&mut self, _g: &mut FilterGraph, _node: NodeId) -> Result<()> {
+            Err(Error::Again)
+        }
     }
 
     #[test]
@@ -621,7 +1373,7 @@ mod tests {
 
     #[test]
     fn insert_filter_rewires_and_moves_outcfg() {
-        let (mut g, a, b, l) = null_pair();
+        let (mut g, _a, b, l) = null_pair();
         // Downstream declarations on the old link's outcfg (what negotiation
         // would have put there)...
         let fmts = g.alloc_pix_list(vec![PixelFormat::Rgb24]);
@@ -659,16 +1411,19 @@ mod tests {
         let lb = g.link(n0, 0, n1, 0).unwrap();
         let lc = g.link(n1, 0, sink, 0).unwrap();
 
-        // Wave-1 config stub: validity only (formats/links arrive wave 2).
+        // Full config: validity → query/merge/pick formats → link config.
+        // TestSrc sets w/h=8 in config_props (as buffersrc does); formats
+        // are negotiated from the default all-lists.
         g.config().unwrap();
-        // Configure link geometry as a real config() would (Gray8 8x8).
-        configure(&mut g, la, PixelFormat::Gray8, 8, 8);
-        configure(&mut g, lb, PixelFormat::Gray8, 8, 8);
-        configure(&mut g, lc, PixelFormat::Gray8, 8, 8);
+        for (name, l) in [("la", la), ("lb", lb), ("lc", lc)] {
+            assert_eq!(g.links[l.0].w, 8, "{name} width from config_props");
+            assert!(g.links[l.0].format.is_some(), "{name} format picked");
+        }
 
         // Push a frame through the source's output link (what buffersrc's
-        // add_frame will do internally).
-        let mut frame = Frame::alloc(PixelFormat::Gray8, 8, 8).unwrap();
+        // add_frame will do internally) — in the NEGOTIATED format.
+        let negotiated = g.links[la.0].format.unwrap();
+        let mut frame = Frame::alloc(negotiated, 8, 8).unwrap();
         frame.pts = 5;
         filter::filter_frame(&mut g, la, frame).unwrap();
         assert_eq!(g.links[la.0].fifo.len(), 1);
@@ -723,6 +1478,21 @@ pub(crate) mod engine_test_helpers {
         }
         fn activate(&mut self, _g: &mut FilterGraph, _node: NodeId) -> Result<()> {
             Ok(()) // nothing queued upstream: would-be BUFFERSRC_EMPTY
+        }
+        /// What buffersrc does: a source sets its output geometry in
+        /// config_props (avfilter.c:424-429 requires it).
+        fn config_props(
+            &mut self,
+            g: &mut FilterGraph,
+            node: NodeId,
+            pad: PadRef,
+        ) -> Result<()> {
+            if let PadRef::Out(_) = pad {
+                let l = g.outlink(node, 0);
+                g.links[l.0].w = 8;
+                g.links[l.0].h = 8;
+            }
+            Ok(())
         }
     }
 

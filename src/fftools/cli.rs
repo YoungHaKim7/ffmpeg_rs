@@ -58,6 +58,9 @@ pub struct Cli {
     pub output_pix_fmt: Option<PixelFormat>,
     /// `-s WxH` — resample through swscale (Phase 2).
     pub output_size: Option<(u32, u32)>,
+    /// `-vf GRAPH` — a filtergraph description run between decode and
+    /// encode (Phase 3b): `buffersrc -> GRAPH -> buffersink`.
+    pub video_filters: Option<String>,
     /// `-scale_algo` (default bicubic, ffmpeg's default).
     pub scale_algorithm: ScaleAlgorithm,
     /// `-scale_engine` (default auto: GPU when possible).
@@ -83,6 +86,8 @@ output options (after -i):
   -f FMT          force output format (yuv4mpegpipe|rawvideo)
   -pix_fmt F      output pixel format
   -s WXH          rescale, e.g. 320x240 (Vulkan compute when available)
+  -vf GRAPH       filtergraph between decode and encode, e.g.
+                  'null', 'scale=320:240', 'scale=320:240,format=gray'
   -scale_algo A   nearest | bilinear | bicubic (default) | area | gauss |
                   sinc | lanczos | spline (the latter five are CPU-only,
                   auto-falling back from the Vulkan engine)
@@ -148,6 +153,7 @@ pub fn parse(args: &[String]) -> Result<Cli> {
         output_format: None,
         output_pix_fmt: None,
         output_size: None,
+        video_filters: None,
         scale_algorithm: ScaleAlgorithm::Bicubic,
         scale_engine: ScaleEngine::Auto,
     };
@@ -263,7 +269,25 @@ pub fn parse(args: &[String]) -> Result<Cli> {
                     }
                 };
             }
-            "-r" | "-vf" | "-ss" => {
+            "-vf" => {
+                if !positional.is_empty() {
+                    return Err(Error::InvalidArgument(format!(
+                        "option {arg} belongs before the output file"
+                    )));
+                }
+                i += 1;
+                let desc = args.get(i).ok_or_else(|| {
+                    Error::InvalidArgument(format!(
+                        "option {arg} requires a graph description argument"
+                    ))
+                })?;
+                if cli.video_filters.replace(desc.clone()).is_some() {
+                    return Err(Error::InvalidArgument(format!(
+                        "option {arg} given twice"
+                    )));
+                }
+            }
+            "-r" | "-ss" => {
                 return Err(Error::Unsupported(format!(
                     "option {arg} arrives with a later phase (filtergraph / seeking)"
                 )));
