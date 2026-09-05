@@ -707,7 +707,7 @@ mod tests {
     fn best_of_2_ref_yuv420p_prefers_yuv420p_over_rgb24() {
         // Identity scores INT_MAX; rgb24 loses COLORSPACE big.
         assert_eq!(
-            find_best_pix_fmt_of_2(Rgb24, Yuv420p, Yuv420p, false),
+            find_best_pix_fmt_of_2(Some(Rgb24), Yuv420p, Yuv420p, false),
             Yuv420p
         );
         // Fold over a whole list: [rgb24, yuv420p] with ref yuv420p →
@@ -737,7 +737,7 @@ mod tests {
         // rgb24 vs bgr24 are symmetric under any YUV ref — same score, same
         // padded bits, same component count → incumbent (dst1) wins.
         assert_eq!(
-            find_best_pix_fmt_of_2(Rgb24, Bgr24, Yuv420p, false),
+            find_best_pix_fmt_of_2(Some(Rgb24), Bgr24, Yuv420p, false),
             Rgb24
         );
     }

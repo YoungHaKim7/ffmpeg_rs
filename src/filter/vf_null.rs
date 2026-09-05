@@ -69,10 +69,15 @@ mod tests {
                 imp: Some((def.make)()),
                 ready: 0,
                 initialized: true,
-                opts: super::Options::default(),
+                opts: super::super::Options::default(),
             });
         }
         let l = g.link(a, 0, b, 0).unwrap();
+        // Link geometry as a real config() would derive it from the frames.
+        let li = &mut g.links[l.0];
+        li.format = Some(PixelFormat::Yuv420p);
+        li.w = 16;
+        li.h = 16;
 
         let mut frame = Frame::alloc(PixelFormat::Yuv420p, 16, 16).unwrap();
         frame.pts = 33;

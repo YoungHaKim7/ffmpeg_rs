@@ -290,12 +290,14 @@ impl FilterGraph {
         for (i, filt) in self.nodes.iter().enumerate() {
             let node = NodeId(i);
             for (j, pad) in filt.def.inputs.iter().enumerate() {
+                // C checks `filt->inputs[j] && filt->inputs[j]->src` — the
+                // stored link must be attached to THIS node on its dst side.
                 let connected = filt
                     .inputs
                     .get(j)
                     .copied()
                     .flatten()
-                    .is_some_and(|l| self.links[l.0].src == node);
+                    .is_some_and(|l| self.links[l.0].dst == node && self.links[l.0].dstpad == j);
                 if !connected {
                     let msg = format!(
                         "Input pad \"{}\" with type video of the filter instance \"{}\" of {} not connected to any source",
@@ -311,7 +313,7 @@ impl FilterGraph {
                     .get(j)
                     .copied()
                     .flatten()
-                    .is_some_and(|l| self.links[l.0].dst == node);
+                    .is_some_and(|l| self.links[l.0].src == node && self.links[l.0].srcpad == j);
                 if !connected {
                     let msg = format!(
                         "Output pad \"{}\" with type video of the filter instance \"{}\" of {} not connected to any destination",
@@ -532,6 +534,15 @@ mod tests {
         (g, a, b, l)
     }
 
+    /// Configure a link's geometry for engine tests (what a real config()
+    /// derives from the frames in flight).
+    fn configure(g: &mut FilterGraph, l: LinkId, fmt: PixelFormat, w: u32, h: u32) {
+        let li = &mut g.links[l.0];
+        li.format = Some(fmt);
+        li.w = w;
+        li.h = h;
+    }
+
     #[test]
     fn link_enforces_range_occupancy_and_init() {
         let (mut g, a, b, _l) = null_pair();
@@ -577,30 +588,35 @@ mod tests {
         // a's input and b's output are open pads: must fail.
         let err = g.check_validity().unwrap_err();
         assert!(err.to_string().contains("not connected to any source"));
-        // close the chain: c -> a -> b -> d
-        let c = g.create_filter("null", "").unwrap();
-        let d = g.create_filter("null", "").unwrap();
-        g.link(c, 0, a, 0).unwrap();
-        g.link(b, 0, d, 0).unwrap();
+        // Close the chain with bare endpoint filters: src -> a -> b -> sink.
+        // (Extra null filters would leave their outer pads open — C checks
+        // EVERY pad, no exceptions.)
+        let src = g.alloc_test_src();
+        let sink = g.alloc_test_sink();
+        g.link(src, 0, a, 0).unwrap();
+        g.link(b, 0, sink, 0).unwrap();
         g.check_validity().unwrap();
     }
 
     #[test]
     fn set_common_fill_if_unset_and_identity_sharing() {
-        let (mut g, a, _b, l) = null_pair();
+        let (mut g, a, b, l) = null_pair();
         // An explicitly declared half survives the default query.
         let explicit = g.alloc_pix_list(vec![PixelFormat::Yuv420p]);
         g.links[l.0].outcfg.formats = Some(explicit);
         g.default_query_formats(a).unwrap();
         // fill-if-unset: the explicit list was NOT overwritten...
         assert_eq!(g.links[l.0].outcfg.formats, Some(explicit));
-        // ...the unset half got the ALL list...
+        // ...the unset half got the ALL list (a's output → link incfg)...
         let all_idx = g.links[l.0].incfg.formats.expect("filled by default query");
         assert_eq!(g.fmt_lists[all_idx as usize].as_slice(), PixelFormat::ALL);
-        // ...and csp/range axes are filled too (same crossing).
+        // The far end's query fills the opposite halves (SET_COMMON_FORMATS2
+        // crossing: inputs→outcfg, outputs→incfg — C formats.c:985-1010).
+        g.default_query_formats(b).unwrap();
         assert!(g.links[l.0].incfg.color_spaces.is_some());
         assert!(g.links[l.0].outcfg.color_spaces.is_some());
         assert!(g.links[l.0].incfg.color_ranges.is_some());
+        assert!(g.links[l.0].outcfg.color_ranges.is_some());
     }
 
     #[test]
@@ -645,6 +661,10 @@ mod tests {
 
         // Wave-1 config stub: validity only (formats/links arrive wave 2).
         g.config().unwrap();
+        // Configure link geometry as a real config() would (Gray8 8x8).
+        configure(&mut g, la, PixelFormat::Gray8, 8, 8);
+        configure(&mut g, lb, PixelFormat::Gray8, 8, 8);
+        configure(&mut g, lc, PixelFormat::Gray8, 8, 8);
 
         // Push a frame through the source's output link (what buffersrc's
         // add_frame will do internally).

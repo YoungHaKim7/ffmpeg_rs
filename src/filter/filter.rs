@@ -61,6 +61,7 @@ impl FilterFlags {
 /// `FREE_NAME` (owned strings), the `get_buffer`/`filter_frame`/
 /// `request_frame`/`config_props` pad callbacks — those live on
 /// [`FilterImpl`] instead, so a pad is pure data.
+#[derive(Clone, Copy)]
 pub struct PadDef {
     pub name: &'static str,
     pub needs_writable: bool,
@@ -520,7 +521,7 @@ pub fn inlink_set_status(g: &mut FilterGraph, link: LinkId, status: Error) {
     }
     g.links[link.0].frame_wanted_out = false;
     g.links[link.0].frame_blocked_in = false;
-    link_set_out_status(g, link, status.clone(), NOPTS);
+    link_set_out_status(g, link, clone_status(&status), NOPTS);
     // Discard all queued frames (avfilter.c:1640-1643) — intentional: the
     // destination declared it will never consume them.
     g.links[link.0].fifo.clear();
@@ -770,6 +771,13 @@ mod tests {
             });
         }
         let l = g.link(NodeId(0), 0, NodeId(1), 0).unwrap();
+        // Configure the link as a real graph config() would from the
+        // pushed frames (Gray8 4x4) — C's av_assert1s in ff_filter_frame
+        // assume configured links.
+        let li = &mut g.links[l.0];
+        li.format = Some(crate::util::pixfmt::PixelFormat::Gray8);
+        li.w = 4;
+        li.h = 4;
         (g, NodeId(0), NodeId(1), l)
     }
 
@@ -842,7 +850,9 @@ mod tests {
         inlink_consume_frame(&mut g, l).unwrap();
         let (status, pts) = inlink_acknowledge_status(&mut g, l).expect("transition");
         assert!(matches!(status, Error::Eof));
-        assert_eq!(pts, 1); // current_pts of the last consumed frame
+        // C (avfilter.c:1477-1479): the ack updates current_pts to
+        // status_in_pts and returns it — NOT the last consumed frame's pts.
+        assert_eq!(pts, 100);
         // Second acknowledge: already acked → None.
         assert!(inlink_acknowledge_status(&mut g, l).is_none());
     }
