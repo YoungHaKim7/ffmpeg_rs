@@ -47,6 +47,7 @@ pub mod filter;
 pub mod formats;
 pub mod graph;
 pub mod link;
+pub mod parser;
 pub mod vf_format;
 pub mod vf_null;
 

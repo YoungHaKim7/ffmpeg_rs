@@ -164,7 +164,7 @@ impl FilterGraph {
     pub fn create_filter(&mut self, name: &str, args: &str) -> Result<NodeId> {
         let node = self.alloc_filter(name)?;
         let def = self.nodes[node.0].def;
-        let opts = parse_args_simple(args, def)?;
+        let opts = super::parser::filter_opt_parse(args, def)?;
         self.init_filter(node, opts)?;
         Ok(node)
     }
@@ -1162,10 +1162,10 @@ impl FilterGraph {
     /// `avfilter_graph_parse_ptr` — parse a graph description into open pad
     /// lists. **Wave 2** (graphparser.c). Stub.
     pub fn parse_ptr(&mut self, desc: &str) -> Result<(Vec<InOut>, Vec<InOut>)> {
-        let _ = desc;
-        Err(Error::Unsupported(
-            "graph parsing arrives with the parser module (wave 2)".into(),
-        ))
+        // `avfilter_graph_parse_ptr` (graphparser.c:920-1042) — no
+        // caller-supplied open lists in this shape (the full C-signature
+        // port is parser::graph_parse_ptr).
+        super::parser::parse_ptr(self, desc)
     }
 
     // -----------------------------------------------------------------------
@@ -1187,37 +1187,6 @@ impl FilterGraph {
 }
 
 /// Wave-1 stand-in for `ff_filter_opt_parse` (avfilter.c:853-902): split an
-/// args string into ordered `(key, value)` pairs on ':' / '=', assigning
-/// positional values to `def.shorthand` slots in order; an explicit
-/// `key=value` disables all remaining positional slots (avfilter.c:889-892).
-/// No quoting/escaping — the parser module (wave 2) replaces this wholesale
-/// with the real `av_get_token`-based parser.
-fn parse_args_simple(args: &str, def: &FilterDef) -> Result<Options> {
-    let mut opts = Options::default();
-    if args.is_empty() {
-        return Ok(opts);
-    }
-    let mut shorthand_pos = 0usize;
-    let mut explicit_seen = false;
-    for tok in args.split(':') {
-        if let Some(eq) = tok.find('=') {
-            explicit_seen = true;
-            opts.entries
-                .push((tok[..eq].to_string(), tok[eq + 1..].to_string()));
-        } else {
-            if explicit_seen || shorthand_pos >= def.shorthand.len() {
-                return Err(Error::InvalidArgument(format!(
-                    "No option name near '{tok}'"
-                )));
-            }
-            opts.entries
-                .push((def.shorthand[shorthand_pos].to_string(), tok.to_string()));
-            shorthand_pos += 1;
-        }
-    }
-    Ok(opts)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
