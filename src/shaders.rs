@@ -5,9 +5,4 @@
 //! |---|---|---|
 //! | [`scale_cs`] | `assets/scale.comp` | `libswscale` kernels + `libavfilter/vulkan/scale.comp.glsl` shape |
 
-pub(crate) mod scale_cs {
-    vulkano_shaders::shader! {
-        ty: "compute",
-        path: "../assets/scale.comp",
-    }
-}
+pub(crate) mod scale_cs;

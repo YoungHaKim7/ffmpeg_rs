@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-pub mod usage;
+pub(crate) mod usage;
 
 use vulkano::{
     VulkanLibrary,
