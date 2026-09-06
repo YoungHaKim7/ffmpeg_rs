@@ -2,6 +2,7 @@
 name = "ffmpeg_rs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98.0"
 
 [dependencies]
 raw-window-handle = "0.6"
