@@ -17,18 +17,24 @@
 //! after config), the AVOption table on AVFilterGraph (44-70 — only
 //! `scale_sws_opts` survives as a plain field).
 
-use crate::swscale::{ScaleAlgorithm, ScaleEngine};
-use crate::util::color::{ColorRange, ColorSpace};
-use crate::util::error::{Error, Result};
-use crate::util::frame::Frame;
-use crate::util::pixfmt::PixelFormat;
-use crate::{log_error, log_verbose};
+use crate::{
+    log_error, log_verbose,
+    swscale::{ScaleAlgorithm, ScaleEngine},
+    util::{
+        color::{ColorRange, ColorSpace},
+        error::{Error, Result},
+        frame::Frame,
+        pixfmt::PixelFormat,
+        rational::Rational,
+    },
+};
 
-use super::Options;
-use super::filter::{FilterDef, FilterNode, PadRef};
-use super::formats;
-use super::link::{Link, LinkId, LinkInitState, ListIdx, NodeId};
-use crate::util::rational::Rational;
+use super::{
+    Options,
+    filter::{FilterDef, FilterNode, PadRef},
+    formats,
+    link::{Link, LinkId, LinkInitState, ListIdx, NodeId},
+};
 
 /// One negotiation axis — C's `AVFilterFormatsMerger.offset` field selection
 /// (`formats.h:562-580`) becomes an enum. The merger order for video is
