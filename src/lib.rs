@@ -101,7 +101,7 @@
 //!
 //! ## Example
 //!
-//! ```text
+//! ```bash
 //! $ ffmpeg -f lavfi -i testsrc2=duration=1:size=128x96:rate=10 \
 //!          -pix_fmt yuv420p -f yuv4mpegpipe in.y4m -y
 //! $ cargo run -- -i in.y4m -f rawvideo -pix_fmt rgb24 out.raw -y
