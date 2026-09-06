@@ -8,10 +8,10 @@
 //! (`avcodec_parameters_to_context`). Field names kept verbatim for
 //! grep-ability against C.
 
-use crate::{
-    util::color::{ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTrc},
-    util::pixfmt::PixelFormat,
-    util::rational::Rational,
+use crate::util::{
+    color::{ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTrc},
+    pixfmt::PixelFormat,
+    rational::Rational,
 };
 
 /// `enum AVMediaType`.
