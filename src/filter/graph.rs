@@ -910,22 +910,24 @@ impl FilterGraph {
             // rate / geometry from the source's first input link.
             let inlink = self.nodes[src.0].inputs.first().copied().flatten();
             {
-                // (405-430) inherit from the source's first input link.
+                // (405-430) inherit from the source's first input link. C's
+                // "unset" test is `!num && !den` (the 0/0 zero-init — our
+                // `Rational::UNKNOWN`), NOT 0/1.
                 let upstream = inlink.map(|il| {
                     let i = &self.links[il.0];
                     (i.time_base, i.sample_aspect_ratio, i.frame_rate, i.w, i.h)
                 });
                 let l = &mut self.links[link.0];
-                if l.time_base == Rational::ZERO {
+                if l.time_base == Rational::UNKNOWN {
                     l.time_base = upstream
                         .map(|u| u.0)
                         .unwrap_or(Rational::new(1, 1_000_000)); // AV_TIME_BASE_Q
                 }
-                if l.sample_aspect_ratio == Rational::ZERO {
+                if l.sample_aspect_ratio == Rational::UNKNOWN {
                     l.sample_aspect_ratio = upstream.map(|u| u.1).unwrap_or(Rational::ONE);
                 }
                 if let Some((_, _, fr, w, h)) = upstream {
-                    if l.frame_rate == Rational::ZERO {
+                    if l.frame_rate == Rational::UNKNOWN {
                         l.frame_rate = fr;
                     }
                     if l.w == 0 {
