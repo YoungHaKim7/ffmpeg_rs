@@ -315,9 +315,14 @@ impl FilterGraph {
         // `avfilter_graph_config` order (avfiltergraph.c:1426-1452);
         // `graph_config_pointers` (sink-link age heap) is not ported.
         self.check_validity()?;
-        while matches!(self.query_formats_round(), Err(Error::Again)) {
+        // graph_config_formats (1366-1398): loop while the round reports
+        // progress-pending; any OTHER error is fatal (C returns it).
+        let mut ret = self.query_formats_round();
+        while matches!(ret, Err(Error::Again)) {
             log_verbose!(None, "query_formats not finished\n"); // avfiltergraph.c:1374
+            ret = self.query_formats_round();
         }
+        ret?;
         self.graph_config_formats_tail()?;
         self.graph_config_links()?;
         self.graph_check_links()
@@ -391,8 +396,18 @@ impl FilterGraph {
                     if !need_conv {
                         continue;
                     }
-                    // (611-641) auto-insert the converter. C would honor
-                    // disable_auto_convert; this port has no such flag.
+                    // (611-621) automatic conversion disabled → hard error.
+                    if self.disable_auto_convert {
+                        let (src_name, dst_name) = self.link_endpoints(*link);
+                        log_error!(
+                            None,
+                            "The filters '{src_name}' and '{dst_name}' do not have a common format and automatic conversion is disabled.\n"
+                        );
+                        return Err(Error::InvalidArgument(
+                            "filters do not have a common format and automatic conversion is disabled".into(),
+                        ));
+                    }
+                    // (622-641) auto-insert the converter.
                     if super::filter_def("scale").is_none() {
                         log_error!(
                             None,
@@ -1599,3 +1614,4 @@ pub(crate) mod engine_test_helpers {
         panic!("graph did not reach quiescence in 1000 activations");
     }
 }
+
