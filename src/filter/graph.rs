@@ -1118,31 +1118,22 @@ impl FilterGraph {
     // -----------------------------------------------------------------------
 
     /// `av_buffersrc_add_frame_flags(KEEP_REF)` — push one decoded frame into
-    /// the source. **Wave 2** (buffersrc.c:220-287): param-change checks,
-    /// KEEP_REF clone, watchdog. Stub.
+    /// the source (buffersrc.c:220-287): param-change checks, KEEP_REF
+    /// semantics (our Arc-backed `&Frame` clone is exactly that), watchdog.
     pub fn add_frame(&mut self, src: NodeId, frame: &Frame) -> Result<()> {
-        let _ = (src, frame);
-        Err(Error::Unsupported(
-            "FilterGraph::add_frame arrives with the buffersrc module (wave 2)".into(),
-        ))
+        super::buffersrc::buffersrc_add_frame(self, src, Some(frame))
     }
 
-    /// `av_buffersrc_close` — announce EOF on the source. **Wave 2**. Stub.
+    /// `av_buffersrc_close` — announce EOF on the source.
     pub fn close_source(&mut self, src: NodeId) -> Result<()> {
-        let _ = src;
-        Err(Error::Unsupported(
-            "FilterGraph::close_source arrives with the buffersrc module (wave 2)".into(),
-        ))
+        super::buffersrc::buffersrc_close(self, src, crate::NOPTS)
     }
 
     /// `av_buffersink_get_frame` — pull one frame from the sink.
-    /// `Err(Again)` = starved, `Err(Eof)` = drained. **Wave 2** (the
-    /// `get_frame_internal` loop, buffersink.c:93-130). Stub.
+    /// `Err(Again)` = starved, `Err(Eof)` = drained (`get_frame_internal`
+    /// loop, buffersink.c:93-133).
     pub fn get_frame(&mut self, sink: NodeId) -> Result<Frame> {
-        let _ = sink;
-        Err(Error::Unsupported(
-            "FilterGraph::get_frame arrives with the buffersink module (wave 2)".into(),
-        ))
+        super::buffersink::buffersink_get_frame(self, sink)
     }
 
     /// `avfilter_graph_parse_ptr` — parse a graph description into open pad

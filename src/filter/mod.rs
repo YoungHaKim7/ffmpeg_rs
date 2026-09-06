@@ -41,10 +41,13 @@
 //! * `AVFilterFormats` refcounting becomes arena slots + [`link::ListIdx`]
 //!   identity; merges sweep losers graph-wide (C's `MERGE_REF`).
 
+pub mod buffersink;
+pub mod buffersrc;
 pub mod filter;
 pub mod formats;
 pub mod graph;
 pub mod link;
+pub mod vf_format;
 pub mod vf_null;
 
 // Crate-root re-exports mirror how C code includes libavfilter headers:
@@ -69,15 +72,18 @@ pub struct Options {
 
 /// `avfilter_get_by_name` (allfilters.c:658-671: a linear scan — so is this).
 ///
-/// Wave-1 registry: only `null` is ported. The wave-2/3 subagents append
-/// their defs (`buffer`, `buffersink`, `scale`, `format`, `noformat`); until
-/// then those names resolve to `None` and `alloc_filter` fails with
-/// `No such filter: '<name>'` — the same text C produces for an unknown
+/// Registry: `null`, `format`, `noformat`, `buffer` (buffersrc),
+/// `buffersink` are ported. `scale` arrives with wave 2C (vf_scale.c);
+/// until then it resolves to `None` and `alloc_filter` fails with
+/// `No such filter: 'scale'` — the same text C produces for an unknown
 /// filter.
 pub fn filter_def(name: &str) -> Option<&'static FilterDef> {
     match name {
+        "buffer" => Some(&buffersrc::BUFFER_SRC_DEF),
+        "buffersink" => Some(&buffersink::BUFFERSINK_DEF),
+        "format" => Some(&vf_format::FORMAT_DEF),
+        "noformat" => Some(&vf_format::NOFORMAT_DEF),
         "null" => Some(&vf_null::NULL_DEF),
-        // Wave 2: "buffer" | "buffersink" | "format" | "noformat"
         // Wave 2C: "scale"
         _ => None,
     }
@@ -88,19 +94,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_wave1_null_only() {
+    fn registry_wave2() {
         let def = filter_def("null").expect("null is registered");
         assert_eq!(def.name, "null");
         assert_eq!(def.inputs.len(), 1);
         assert_eq!(def.outputs.len(), 1);
         assert_eq!(def.inputs[0].name, "default");
         assert!(def.shorthand.is_empty());
-        for not_yet in ["buffer", "buffersink", "scale", "format", "noformat"] {
-            assert!(
-                filter_def(not_yet).is_none(),
-                "{not_yet} must be unregistered until its wave lands"
-            );
+        for (name, shorthand) in [
+            ("buffer", "width"),
+            ("buffersink", "pixel_formats"),
+            ("format", "pix_fmts"),
+            ("noformat", "pix_fmts"),
+        ] {
+            let def = filter_def(name).unwrap_or_else(|| panic!("{name} is registered"));
+            assert_eq!(def.name, name);
+            assert_eq!(def.shorthand.first(), Some(&shorthand), "{name}");
         }
+        // Wave 2C: scale is not ported yet.
+        assert!(filter_def("scale").is_none());
         assert!(filter_def("idet").is_none());
     }
 }

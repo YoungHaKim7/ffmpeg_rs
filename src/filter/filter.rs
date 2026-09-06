@@ -177,6 +177,13 @@ pub trait FilterImpl {
         crate::filter::default_activate(self, g, node)
     }
 
+    /// Downcast hook for the runtime APIs (buffersrc/buffersink free
+    /// functions reach the concrete impl through the take/restore dance).
+    /// Rust-side mechanics only — no C counterpart.
+    fn as_any(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
+
 }
 
 // ---------------------------------------------------------------------------
