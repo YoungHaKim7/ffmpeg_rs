@@ -20,12 +20,14 @@ use crate::codec::packet::Packet;
 use crate::codec::params::{CodecId, CodecParameters};
 use crate::codec::rawvideo::{RawVideoDecoder, RawVideoEncoder};
 use crate::codec::traits::{Decoder, Encoder};
+use crate::filter::{buffersink, FilterGraph, NodeId};
 use crate::format::demux::DemuxOptions;
 use crate::format::{InputFormatContext, OutputFormatContext, Stream};
 use crate::log_error;
 use crate::log_info;
 use crate::swscale::{ScaleContext, ScaleOptions};
 use crate::log_verbose;
+use crate::util::color::{ColorRange, ColorSpace};
 use crate::util::error::{Error, Result};
 use crate::util::frame::Frame;
 use crate::util::imgutils;
@@ -70,6 +72,132 @@ struct Stats {
     started: Instant,
 }
 
+/// The `-vf` filtergraph runner — ffmpeg_filter.c's single-chain shape:
+/// `buffersrc` (fed with decoded frames) → parsed description →
+/// `buffersink` (pulled into the encoder). The auto-inserted trailing
+/// `scale`/`format` (ffmpeg's `insert_filter` for `-s`/`-pix_fmt`) are
+/// folded into the description by the caller before construction.
+struct VfGraph {
+    g: FilterGraph,
+    src: NodeId,
+    sink: NodeId,
+}
+
+/// `av_buffersrc_parameters_set` via the option string (the port's only
+/// parameter path) — video fields only, colorspace/range when declared.
+fn buffersrc_args(in_st: &Stream) -> String {
+    use std::fmt::Write;
+    let par = &in_st.codecpar;
+    let mut s = format!(
+        "video_size={}x{}:pix_fmt={}:time_base={}/{}:frame_rate={}/{}",
+        par.width,
+        par.height,
+        par.format.name(),
+        in_st.time_base.num,
+        in_st.time_base.den,
+        in_st.avg_frame_rate.num,
+        in_st.avg_frame_rate.den,
+    );
+    if in_st.sample_aspect_ratio.num != 0 || in_st.sample_aspect_ratio.den != 0 {
+        let _ = write!(
+            s,
+            ":sar={}/{}",
+            in_st.sample_aspect_ratio.num, in_st.sample_aspect_ratio.den
+        );
+    }
+    let csp_name = |c: ColorSpace| match c {
+        ColorSpace::Rgb => "gbr", // av_color_space_name(AVCOL_SPC_RGB)
+        ColorSpace::Bt709 => "bt709",
+        ColorSpace::Fcc => "fcc",
+        ColorSpace::Bt470bg => "bt470bg",
+        ColorSpace::Smpte170m => "smpte170m",
+        ColorSpace::Smpte240m => "smpte240m",
+        ColorSpace::Bt2020Ncl => "bt2020nc",
+        _ => "",
+    };
+    if !csp_name(par.color_space).is_empty() {
+        let _ = write!(s, ":colorspace={}", csp_name(par.color_space));
+    }
+    match par.color_range {
+        ColorRange::Mpeg => s.push_str(":range=tv"),
+        ColorRange::Jpeg => s.push_str(":range=pc"),
+        _ => {}
+    }
+    s
+}
+
+impl VfGraph {
+    /// `configure_filtergraph` (ffmpeg_filter.c): create the endpoints,
+    /// parse the description, attach the open pads, negotiate formats.
+    fn new(desc: &str, in_st: &Stream) -> Result<VfGraph> {
+        let mut g = FilterGraph::new();
+        let src = g.create_filter("buffer", &buffersrc_args(in_st))?;
+        let (open_inputs, open_outputs) = g.parse_ptr(desc)?;
+        let sink = g.create_filter("buffersink", "")?;
+
+        // Attach the endpoints to the parsed graph's open pads — exactly one
+        // unnamed open pad on each side for this single-chain CLI
+        // (ffmpeg_filter.c errors "Too many inputs"/outputs otherwise).
+        let attach = |side: &str, pads: &[crate::filter::InOut]| -> Result<(NodeId, usize)> {
+            if pads.len() != 1 {
+                return Err(Error::InvalidArgument(format!(
+                    "Simple filtergraph description has {n} open {side} pads; this CLI supports exactly one",
+                    n = pads.len()
+                )));
+            }
+            Ok((pads[0].node, pads[0].pad))
+        };
+        if open_inputs.is_empty() {
+            // degenerate empty description: wire source straight to sink
+            g.link(src, 0, sink, 0)?;
+        } else {
+            let (node, pad) = attach("input", &open_inputs)?;
+            g.link(src, 0, node, pad)?;
+        }
+        let (out_node, out_pad) = if open_outputs.is_empty() {
+            (sink, 0)
+        } else {
+            attach("output", &open_outputs)?
+        };
+        g.link(out_node, out_pad, sink, 0)?;
+
+        g.config()?;
+        Ok(VfGraph { g, src, sink })
+    }
+
+    /// One decoded frame into the source (`av_buffersrc_add_frame`).
+    fn push(&mut self, frame: &Frame) -> Result<()> {
+        self.g.add_frame(self.src, frame)
+    }
+
+    /// One filtered frame out, `Err(Again)` when starved.
+    fn pull(&mut self) -> Result<Frame> {
+        self.g.get_frame(self.sink)
+    }
+
+    /// `av_buffersrc_close` — EOF into the source.
+    fn close(&mut self) -> Result<()> {
+        self.g.close_source(self.src)
+    }
+
+    fn sink_format(&self) -> Result<PixelFormat> {
+        buffersink::buffersink_get_format(&self.g, self.sink)?
+            .ok_or_else(|| Error::InvalidArgument("buffersink link has no format".into()))
+    }
+
+    fn sink_w(&self) -> Result<u32> {
+        buffersink::buffersink_get_w(&self.g, self.sink)
+    }
+
+    fn sink_h(&self) -> Result<u32> {
+        buffersink::buffersink_get_h(&self.g, self.sink)
+    }
+
+    fn sink_color_range(&self) -> ColorRange {
+        buffersink::buffersink_get_color_range(&self.g, self.sink).unwrap_or(ColorRange::Unspecified)
+    }
+}
+
 /// The whole pipeline, `transcode()` in fftools/ffmpeg.c.
 fn transcode(cli: &Cli) -> Result<Stats> {
     // Output-file overwrite policy (ffmpeg_opt.c's assert_file_overwrite).
@@ -98,13 +226,37 @@ fn transcode(cli: &Cli) -> Result<Stats> {
 
     let in_st = ictx.streams[0].clone();
 
+    // ---- filtergraph (-vf) -------------------------------------------------
+    // ffmpeg folds `-s`/`-pix_fmt` into the graph as trailing filters
+    // (`insert_filter`, ffmpeg_filter.c) — same here.
+    let mut vf = match &cli.video_filters {
+        Some(desc) => {
+            let mut full = desc.clone();
+            if let Some((w, h)) = cli.output_size {
+                full += &format!(",scale={w}x{h}");
+            }
+            if let Some(fmt) = cli.output_pix_fmt {
+                full += &format!(",format={}", fmt.name());
+            }
+            log_verbose!(None, "filtergraph description: {full}");
+            Some(VfGraph::new(&full, &in_st)?)
+        }
+        None => None,
+    };
+
     // ---- output stream construction (ffmpeg_mux_init.c) -------------------
-    let out_pix_fmt = cli.output_pix_fmt.unwrap_or(in_st.codecpar.format);
-    // `-s` overrides the output geometry (what the auto-inserted scale
-    // filter would negotiate in ffmpeg).
-    let (out_w, out_h) = cli
-        .output_size
-        .unwrap_or((in_st.codecpar.width, in_st.codecpar.height));
+    // With a graph running, the output geometry/format come from the
+    // negotiated sink link (what C reads off the sink after config).
+    let out_pix_fmt = match vf.as_ref() {
+        Some(v) => v.sink_format()?,
+        None => cli.output_pix_fmt.unwrap_or(in_st.codecpar.format),
+    };
+    let (out_w, out_h) = match vf.as_ref() {
+        Some(v) => (v.sink_w()?, v.sink_h()?),
+        None => cli
+            .output_size
+            .unwrap_or((in_st.codecpar.width, in_st.codecpar.height)),
+    };
     let mut out_par = CodecParameters {
         codec_id: CodecId::Rawvideo,
         format: out_pix_fmt,
@@ -116,8 +268,11 @@ fn transcode(cli: &Cli) -> Result<Stats> {
         ..in_st.codecpar.clone()
     };
     // RGB outputs are full-range by convention (what the auto-inserted
-    // swscale conversion produces); YUV stays as decoded.
-    if out_pix_fmt != in_st.codecpar.format
+    // swscale conversion produces); YUV stays as decoded. With a graph
+    // running, the sink's negotiated range wins.
+    if let Some(v) = vf.as_ref() {
+        out_par.color_range = v.sink_color_range();
+    } else if out_pix_fmt != in_st.codecpar.format
         && pixdesc::descriptor(out_pix_fmt).flags.contains(pixdesc::PixFmtFlags::RGB)
     {
         out_par.color_range = crate::util::color::ColorRange::Jpeg;
@@ -157,9 +312,11 @@ fn transcode(cli: &Cli) -> Result<Stats> {
     let mut encoder = RawVideoEncoder::new();
     encoder.init(&out_st.codecpar)?;
 
-    // ffmpeg inserts a scale filter when format OR size differs.
-    let needs_scale = in_st.codecpar.format != out_pix_fmt
-        || (in_st.codecpar.width, in_st.codecpar.height) != (out_w, out_h);
+    // ffmpeg inserts a scale filter when format OR size differs — but with
+    // -vf the graph owns the conversion; no separate scaler runs.
+    let needs_scale = vf.is_none()
+        && (in_st.codecpar.format != out_pix_fmt
+            || (in_st.codecpar.width, in_st.codecpar.height) != (out_w, out_h));
     let mut scaler = if needs_scale {
         Some(ScaleContext::new(
             (in_st.codecpar.format, in_st.codecpar.width, in_st.codecpar.height),
@@ -205,19 +362,51 @@ fn transcode(cli: &Cli) -> Result<Stats> {
         loop {
             match decoder.receive_frame() {
                 Ok(frame) => {
-                    let out_frame = convert_frame(&frame, &mut scaler, &out_st)?;
-                    encoder.send_frame(Some(&out_frame))?;
-                    loop {
-                        match encoder.receive_packet() {
-                            Ok(pkt) => write_packet(&mut octx, &pkt, &mut stats)?,
-                            Err(Error::Again) => break,
-                            Err(Error::Eof) => break,
-                            Err(e) => return Err(e),
+                    // ffmpeg_filter.c: the frame goes into the graph (if
+                    // any), else straight through the standalone scaler.
+                    let frames: Vec<Frame> = match vf.as_mut() {
+                        Some(vf) => {
+                            vf.push(&frame)?;
+                            let mut out = Vec::new();
+                            while let Ok(f) = vf.pull() {
+                                out.push(f);
+                            }
+                            out
+                        }
+                        None => vec![convert_frame(&frame, &mut scaler, &out_st)?],
+                    };
+                    for out_frame in frames {
+                        encoder.send_frame(Some(&out_frame))?;
+                        loop {
+                            match encoder.receive_packet() {
+                                Ok(pkt) => write_packet(&mut octx, &pkt, &mut stats)?,
+                                Err(Error::Again) => break,
+                                Err(Error::Eof) => break,
+                                Err(e) => return Err(e),
+                            }
                         }
                     }
                 }
                 Err(Error::Again) => break,
-                Err(Error::Eof) => break 'pipeline,
+                Err(Error::Eof) => {
+                    // EOF into the graph (av_buffersrc_close), then drain
+                    // the sink until it reports Eof.
+                    if let Some(vf) = vf.as_mut() {
+                        vf.close()?;
+                        while let Ok(f) = vf.pull() {
+                            encoder.send_frame(Some(&f))?;
+                            loop {
+                                match encoder.receive_packet() {
+                                    Ok(pkt) => write_packet(&mut octx, &pkt, &mut stats)?,
+                                    Err(Error::Again) => break,
+                                    Err(Error::Eof) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        }
+                    }
+                    break 'pipeline;
+                }
                 Err(e) => return Err(e),
             }
         }
