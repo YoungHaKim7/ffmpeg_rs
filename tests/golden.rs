@@ -690,3 +690,83 @@ fn cli_dump_output_shape() {
     assert!(stderr.contains("rawvideo (RGB[24] / 0x18424752), rgb24(pc, progressive), 128x96 [SAR 1:1 DAR 4:3], q=2-31, 2949 kb/s, 10 fps, 10 tbn"), "{stderr}");
     assert!(stderr.contains("time=00:00:01.00"), "{stderr}");
 }
+
+/// `-vf null` — the identity filtergraph end to end: demux → decode →
+/// buffersrc → parsed `null` → negotiation → buffersink → encode. Byte-exact
+/// against system ffmpeg (no pixel math involved — the graph must move
+/// frames untouched, Arc-shares and all).
+#[test]
+fn golden_vf_null_is_byte_exact() {
+    let Some(fx) = Fixture::new("vf_null") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+
+    fx.run_ffmpeg(&[
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        "null",
+        "-f",
+        "yuv4mpegpipe",
+        fx.path("ref.y4m").to_str().unwrap(),
+        "-y",
+    ]);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        "null",
+        "-f",
+        "yuv4mpegpipe",
+        fx.path("out.y4m").to_str().unwrap(),
+        "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    assert_eq!(
+        std::fs::read(fx.path("out.y4m")).unwrap(),
+        std::fs::read(fx.path("ref.y4m")).unwrap(),
+        "-vf null output differs from system ffmpeg"
+    );
+}
+
+/// `-vf` with a multi-filter chain and an explicit `format` (no format
+/// change — the graph must negotiate the same format on every link without
+/// inserting a converter).
+#[test]
+fn golden_vf_null_null_format_chain_is_byte_exact() {
+    let Some(fx) = Fixture::new("vf_chain") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+
+    let desc = "null,null,format=pix_fmts=yuv420p";
+    fx.run_ffmpeg(&[
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        desc,
+        "-f",
+        "yuv4mpegpipe",
+        fx.path("ref.y4m").to_str().unwrap(),
+        "-y",
+    ]);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        desc,
+        "-f",
+        "yuv4mpegpipe",
+        fx.path("out.y4m").to_str().unwrap(),
+        "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    assert_eq!(
+        std::fs::read(fx.path("out.y4m")).unwrap(),
+        std::fs::read(fx.path("ref.y4m")).unwrap(),
+        "-vf chain output differs from system ffmpeg"
+    );
+}
