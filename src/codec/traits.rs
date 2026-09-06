@@ -16,10 +16,10 @@
 //! frame per packet, but the trait keeps the general shape so later codecs
 //! — PCM, FFV1 — drop in unchanged).
 
-use crate::codec::packet::Packet;
-use crate::codec::params::CodecParameters;
-use crate::util::error::Result;
-use crate::util::frame::Frame;
+use crate::{
+    codec::{packet::Packet, params::CodecParameters},
+    util::{error::Result, frame::Frame},
+};
 
 /// Decoder interface (`FFCodec` with `FF_CODEC_DECODE_CB`).
 pub trait Decoder {

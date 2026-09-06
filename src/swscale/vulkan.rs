@@ -14,27 +14,37 @@
 
 use std::sync::Arc;
 
-use vulkano::buffer::Subbuffer;
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CopyBufferToImageInfo, CopyImageToBufferInfo, PrimaryAutoCommandBuffer,
+use vulkano::{
+    buffer::Subbuffer,
+    command_buffer::{
+        AutoCommandBufferBuilder, CopyBufferToImageInfo, CopyImageToBufferInfo,
+        PrimaryAutoCommandBuffer,
+    },
+    descriptor_set::{DescriptorImageInfo, DescriptorSet, WriteDescriptorSet},
+    format::Format,
+    image::{
+        sampler::{Sampler, SamplerCreateInfo},
+        {Image, ImageCreateInfo, ImageType, ImageUsage, view::ImageView},
+    },
+    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
+    pipeline::{
+        PipelineBindPoint, PipelineLayout,
+        compute::{ComputePipeline, ComputePipelineCreateInfo},
+    },
 };
-use vulkano::descriptor_set::{DescriptorImageInfo, DescriptorSet, WriteDescriptorSet};
-use vulkano::format::Format;
-use vulkano::image::sampler::{Sampler, SamplerCreateInfo};
-use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage, view::ImageView};
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::PipelineBindPoint;
-use vulkano::pipeline::PipelineLayout;
-use vulkano::pipeline::compute::{ComputePipeline, ComputePipelineCreateInfo};
 
-use crate::gpu::{self, ComputeGpu};
-use crate::shaders::scale_cs;
-use crate::util::color::{ChromaLocation, ColorRange};
-use crate::util::error::{Error, Result};
-use crate::util::frame::Frame;
-use crate::util::pixdesc;
+use crate::{
+    gpu::{self, ComputeGpu},
+    shaders::scale_cs,
+    util::{
+        color::{ChromaLocation, ColorRange},
+        error::{Error, Result},
+        frame::Frame,
+        pixdesc,
+    },
+};
 
-use super::{rgb_offsets, ConversionMode, ScaleAlgorithm};
+use super::{ConversionMode, ScaleAlgorithm, rgb_offsets};
 
 /// Per-geometry image set; rebuilt when the frame geometry changes.
 struct Images {
@@ -79,9 +89,8 @@ impl GpuScaler {
             .entry_point("main")
             .ok_or_else(|| Error::Unsupported("scale.comp has no main".into()))?;
         let stage = vulkano::pipeline::PipelineShaderStageCreateInfo::new(&entry);
-        let layout =
-            PipelineLayout::from_stages(&gpu.device, std::slice::from_ref(&stage))
-                .map_err(|e| Error::Unsupported(format!("pipeline layout: {e}")))?;
+        let layout = PipelineLayout::from_stages(&gpu.device, std::slice::from_ref(&stage))
+            .map_err(|e| Error::Unsupported(format!("pipeline layout: {e}")))?;
         let pipeline = ComputePipeline::new(
             &gpu.device,
             None,
@@ -99,11 +108,25 @@ impl GpuScaler {
         )
         .map_err(|e| Error::Unsupported(format!("sampler: {e}")))?;
 
-        let dummy = plane_image(&gpu.memory_allocator, Format::R8_UNORM, 1, 1, gpu::usage::DUMMY)?;
+        let dummy = plane_image(
+            &gpu.memory_allocator,
+            Format::R8_UNORM,
+            1,
+            1,
+            gpu::usage::DUMMY,
+        )?;
 
         let device_name = gpu.device_name.clone();
         crate::log_verbose!(None, "swscale: using Vulkan device '{device_name}'");
-        Ok(GpuScaler { gpu, pipeline, layout, sampler, dummy, images: None, device_name })
+        Ok(GpuScaler {
+            gpu,
+            pipeline,
+            layout,
+            sampler,
+            dummy,
+            images: None,
+            device_name,
+        })
     }
 
     /// The picked device name, for the CLI banner.
@@ -163,35 +186,49 @@ impl GpuScaler {
             .push_constants(self.layout.clone(), 0, push)
             .map_err(|e| Error::Unsupported(format!("push constants: {e:?}")))?;
         let groups = [dst.width.div_ceil(8), dst.height.div_ceil(8), 1];
-        unsafe { builder.dispatch(groups) }.map_err(|e| Error::Unsupported(format!("dispatch: {e:?}")))?;
+        unsafe { builder.dispatch(groups) }
+            .map_err(|e| Error::Unsupported(format!("dispatch: {e:?}")))?;
 
         // ---- download ---------------------------------------------------------
         match mode {
             ConversionMode::Yuv420pToRgb | ConversionMode::Gray8ToRgb => {
                 let w4 = dst.width as usize * 4;
-                let buf = gpu::readback_buffer(&self.gpu.memory_allocator, w4 * dst.height as usize)?;
+                let buf =
+                    gpu::readback_buffer(&self.gpu.memory_allocator, w4 * dst.height as usize)?;
                 builder
-                    .copy_image_to_buffer(CopyImageToBufferInfo::new(images.out_rgb.image().clone(), buf.clone()))
+                    .copy_image_to_buffer(CopyImageToBufferInfo::new(
+                        images.out_rgb.image().clone(),
+                        buf.clone(),
+                    ))
                     .map_err(|e| Error::Unsupported(format!("copy to buffer: {e:?}")))?;
                 self.gpu.submit_wait(builder)?;
                 pack_rgba_to_dst(&buf, dst)
             }
             ConversionMode::Yuv420pToYuv420p | ConversionMode::Gray8ToGray8 => {
                 let out_planes = images.out_planes();
-                let nb = if mode == ConversionMode::Yuv420pToYuv420p { 3 } else { 1 };
+                let nb = if mode == ConversionMode::Yuv420pToYuv420p {
+                    3
+                } else {
+                    1
+                };
                 let mut bufs: Vec<(Subbuffer<[u8]>, usize, usize)> = Vec::with_capacity(nb);
                 for view in out_planes.iter().take(nb) {
                     let ext = view.image().extent();
                     let (w, h) = (ext[0] as usize, ext[1] as usize);
                     let buf = gpu::readback_buffer(&self.gpu.memory_allocator, w * h)?;
                     builder
-                        .copy_image_to_buffer(CopyImageToBufferInfo::new(view.image().clone(), buf.clone()))
+                        .copy_image_to_buffer(CopyImageToBufferInfo::new(
+                            view.image().clone(),
+                            buf.clone(),
+                        ))
                         .map_err(|e| Error::Unsupported(format!("copy to buffer: {e:?}")))?;
                     bufs.push((buf, w, h));
                 }
                 self.gpu.submit_wait(builder)?;
                 for (p, (buf, w, h)) in bufs.iter().enumerate() {
-                    let data = buf.read().map_err(|e| Error::Unsupported(format!("readback: {e:?}")))?;
+                    let data = buf
+                        .read()
+                        .map_err(|e| Error::Unsupported(format!("readback: {e:?}")))?;
                     let data: &[u8] = &data[..];
                     let ls = dst.linesize(p);
                     let out = dst.plane_mut(p);
@@ -205,8 +242,14 @@ impl GpuScaler {
     }
 
     fn descriptor_set(&self, images: &Images, mode: ConversionMode) -> Result<Arc<DescriptorSet>> {
-        let planar_out = matches!(mode, ConversionMode::Yuv420pToYuv420p | ConversionMode::Gray8ToGray8);
-        let gray = matches!(mode, ConversionMode::Gray8ToRgb | ConversionMode::Gray8ToGray8);
+        let planar_out = matches!(
+            mode,
+            ConversionMode::Yuv420pToYuv420p | ConversionMode::Gray8ToGray8
+        );
+        let gray = matches!(
+            mode,
+            ConversionMode::Gray8ToRgb | ConversionMode::Gray8ToGray8
+        );
         let dummy = &self.dummy;
         let (y_in, u_in, v_in) = if gray {
             (&images.src[0], dummy, dummy)
@@ -224,14 +267,39 @@ impl GpuScaler {
         // This vulkano rev writes every image-ish descriptor (sampled,
         // storage, or plain sampler) through DescriptorImageInfo.
         let infos = [
-            DescriptorImageInfo { image_view: Some(y_in), ..Default::default() },
-            DescriptorImageInfo { image_view: Some(u_in), ..Default::default() },
-            DescriptorImageInfo { image_view: Some(v_in), ..Default::default() },
-            DescriptorImageInfo { image_view: Some(out_y), ..Default::default() },
-            DescriptorImageInfo { image_view: Some(out_u), ..Default::default() },
-            DescriptorImageInfo { image_view: Some(out_v), ..Default::default() },
-            DescriptorImageInfo { image_view: Some(out_rgb), ..Default::default() },
-            DescriptorImageInfo { sampler: Some(&self.sampler), image_view: None, ..Default::default() },
+            DescriptorImageInfo {
+                image_view: Some(y_in),
+                ..Default::default()
+            },
+            DescriptorImageInfo {
+                image_view: Some(u_in),
+                ..Default::default()
+            },
+            DescriptorImageInfo {
+                image_view: Some(v_in),
+                ..Default::default()
+            },
+            DescriptorImageInfo {
+                image_view: Some(out_y),
+                ..Default::default()
+            },
+            DescriptorImageInfo {
+                image_view: Some(out_u),
+                ..Default::default()
+            },
+            DescriptorImageInfo {
+                image_view: Some(out_v),
+                ..Default::default()
+            },
+            DescriptorImageInfo {
+                image_view: Some(out_rgb),
+                ..Default::default()
+            },
+            DescriptorImageInfo {
+                sampler: Some(&self.sampler),
+                image_view: None,
+                ..Default::default()
+            },
         ];
         let writes: Vec<WriteDescriptorSet> = infos
             .iter()
@@ -240,7 +308,11 @@ impl GpuScaler {
             .collect();
         DescriptorSet::new(
             &self.gpu.descriptor_set_allocator,
-            self.pipeline.layout().set_layouts().first().expect("scale.comp has set 0"),
+            self.pipeline
+                .layout()
+                .set_layouts()
+                .first()
+                .expect("scale.comp has set 0"),
             &writes,
             &[],
         )
@@ -260,14 +332,29 @@ impl GpuScaler {
         let mk = |fmt, w, h, usage| plane_image(&self.gpu.memory_allocator, fmt, w, h, usage);
         self.images = Some(Images {
             src: [
-                mk(Format::R8_UNORM, src.width, src.height, gpu::usage::PLANE_IN)?,
+                mk(
+                    Format::R8_UNORM,
+                    src.width,
+                    src.height,
+                    gpu::usage::PLANE_IN,
+                )?,
                 mk(Format::R8_UNORM, cw, ch, gpu::usage::PLANE_IN)?,
                 mk(Format::R8_UNORM, cw, ch, gpu::usage::PLANE_IN)?,
             ],
-            out_y: mk(Format::R8_UNORM, dst.width, dst.height, gpu::usage::PLANE_OUT)?,
+            out_y: mk(
+                Format::R8_UNORM,
+                dst.width,
+                dst.height,
+                gpu::usage::PLANE_OUT,
+            )?,
             out_u: mk(Format::R8_UNORM, dcw, dch, gpu::usage::PLANE_OUT)?,
             out_v: mk(Format::R8_UNORM, dcw, dch, gpu::usage::PLANE_OUT)?,
-            out_rgb: mk(Format::R8G8B8A8_UNORM, dst.width, dst.height, gpu::usage::PLANE_OUT)?,
+            out_rgb: mk(
+                Format::R8G8B8A8_UNORM,
+                dst.width,
+                dst.height,
+                gpu::usage::PLANE_OUT,
+            )?,
             src_geom,
             dst_geom,
         });
@@ -293,7 +380,9 @@ fn shader_algorithm(alg: ScaleAlgorithm) -> i32 {
         // The five table-driven kernels have no shader: ScaleContext::new
         // falls back to the CPU (Auto) or errors (Vulkan) before any
         // dispatch, so they never reach here.
-        _ => unreachable!("table-driven algorithms never reach the GPU (fallback in ScaleContext::new)"),
+        _ => unreachable!(
+            "table-driven algorithms never reach the GPU (fallback in ScaleContext::new)"
+        ),
     }
 }
 
@@ -313,7 +402,9 @@ fn copy_plane_to_image(
 
 /// RGBA8 readback → the caller's packed-RGB frame layout (rgb24/bgr24/…).
 fn pack_rgba_to_dst(buf: &Subbuffer<[u8]>, dst: &mut Frame) -> Result<()> {
-    let data = buf.read().map_err(|e| Error::Unsupported(format!("readback: {e:?}")))?;
+    let data = buf
+        .read()
+        .map_err(|e| Error::Unsupported(format!("readback: {e:?}")))?;
     let data: &[u8] = &data[..];
     let w4 = dst.width as usize * 4;
     let (r_off, g_off, b_off) = rgb_offsets(dst.format);

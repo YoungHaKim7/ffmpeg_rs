@@ -14,9 +14,11 @@
 //!   some paths, we allocate compactly and document it) the buffer size is the
 //!   plain sum of plane sizes.
 
-use super::error::{Error, Result};
-use super::pixdesc::{descriptor, PixFmtDescriptor};
-use super::pixfmt::PixelFormat;
+use super::{
+    error::{Error, Result},
+    pixdesc::{PixFmtDescriptor, descriptor},
+    pixfmt::PixelFormat,
+};
 
 /// `AV_CEIL_RSHIFT(a, b)` — ceil(a / 2^b).
 #[inline]
@@ -41,9 +43,19 @@ fn fill_max_pixsteps(desc: &PixFmtDescriptor) -> ([u8; 4], [u8; 4]) {
 }
 
 /// `image_get_linesize` (imgutils.c:54) — linesize of one plane.
-fn image_get_linesize(width: u32, _plane: usize, max_step: u8, max_step_comp: u8, desc: &PixFmtDescriptor) -> Result<usize> {
+fn image_get_linesize(
+    width: u32,
+    _plane: usize,
+    max_step: u8,
+    max_step_comp: u8,
+    desc: &PixFmtDescriptor,
+) -> Result<usize> {
     // Subsampling applies only when the plane's widest component is chroma.
-    let s = if max_step_comp == 1 || max_step_comp == 2 { desc.log2_chroma_w } else { 0 };
+    let s = if max_step_comp == 1 || max_step_comp == 2 {
+        desc.log2_chroma_w
+    } else {
+        0
+    };
     let shifted_w = ceil_rshift(width, s as u32);
     Ok(max_step as usize * shifted_w as usize)
 }
@@ -69,7 +81,11 @@ pub fn fill_linesizes(fmt: PixelFormat, width: u32) -> Result<[usize; 4]> {
 
 /// `av_image_fill_plane_sizes` — byte size of each plane given its linesize
 /// and the image height. Planes past `count_planes` stay 0.
-pub fn fill_plane_sizes(fmt: PixelFormat, height: u32, linesizes: &[usize; 4]) -> Result<[usize; 4]> {
+pub fn fill_plane_sizes(
+    fmt: PixelFormat,
+    height: u32,
+    linesizes: &[usize; 4],
+) -> Result<[usize; 4]> {
     let desc = descriptor(fmt);
     let mut sizes = [0usize; 4];
 
@@ -85,9 +101,15 @@ pub fn fill_plane_sizes(fmt: PixelFormat, height: u32, linesizes: &[usize; 4]) -
         if !has_plane[i] {
             break; // C loop stops at the first absent plane
         }
-        let s = if i == 1 || i == 2 { desc.log2_chroma_h } else { 0 };
+        let s = if i == 1 || i == 2 {
+            desc.log2_chroma_h
+        } else {
+            0
+        };
         let h = ceil_rshift(height, s as u32);
-        sizes[i] = linesizes[i].checked_mul(h as usize).ok_or(Error::OutOfRange)?;
+        sizes[i] = linesizes[i]
+            .checked_mul(h as usize)
+            .ok_or(Error::OutOfRange)?;
     }
     Ok(sizes)
 }
@@ -103,7 +125,10 @@ pub fn get_buffer_size(fmt: PixelFormat, width: u32, height: u32, align: usize) 
         aligned[i] = linesizes[i].div_ceil(align) * align;
     }
     let sizes = fill_plane_sizes(fmt, height, &aligned)?;
-    let total: usize = sizes.iter().try_fold(0usize, |acc, &s| acc.checked_add(s)).ok_or(Error::OutOfRange)?;
+    let total: usize = sizes
+        .iter()
+        .try_fold(0usize, |acc, &s| acc.checked_add(s))
+        .ok_or(Error::OutOfRange)?;
     Ok(total)
 }
 
@@ -143,7 +168,11 @@ pub fn copy_to_buffer(
     let mut out = vec![0u8; size];
     let mut dst = out.as_mut_slice();
     for i in 0..nb_planes {
-        let shift = if i == 1 || i == 2 { desc.log2_chroma_h } else { 0 };
+        let shift = if i == 1 || i == 2 {
+            desc.log2_chroma_h
+        } else {
+            0
+        };
         let h = ceil_rshift(height, shift as u32) as usize;
         let src = planes.get(i).copied().unwrap_or(&[]);
         for j in 0..h {
@@ -180,7 +209,7 @@ mod tests {
             (PixelFormat::Yuv420p10le, 8, [16, 8, 8, 0]),
             (PixelFormat::Yuv444p10le, 7, [14, 14, 14, 0]),
             (PixelFormat::Yuv420p16le, 7, [14, 8, 8, 0]),
-            (PixelFormat::Nv12, 7, [7, 8, 0, 0]),  // UV plane = 2*ceil(7/2)
+            (PixelFormat::Nv12, 7, [7, 8, 0, 0]), // UV plane = 2*ceil(7/2)
             (PixelFormat::Nv12, 8, [8, 8, 0, 0]),
             (PixelFormat::Nv21, 7, [7, 8, 0, 0]),
             (PixelFormat::Yuyv422, 7, [16, 0, 0, 0]), // 4 * ceil(7/2)
@@ -212,7 +241,10 @@ mod tests {
     fn buffer_size_yuv420p_128x96() {
         // 128*96 + 2 * (64*48) = 12288 + 6144 = 18432 — matches a real Y4M
         // frame payload exactly.
-        assert_eq!(get_buffer_size(PixelFormat::Yuv420p, 128, 96, 1).unwrap(), 18432);
+        assert_eq!(
+            get_buffer_size(PixelFormat::Yuv420p, 128, 96, 1).unwrap(),
+            18432
+        );
     }
 
     #[test]
@@ -250,6 +282,9 @@ mod tests {
         let src_ls = [8, 4, 4, 0];
         let out = copy_to_buffer(PixelFormat::Yuv420p, 4, 2, 1, &planes, &src_ls).unwrap();
         assert_eq!(out, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 14]);
-        assert_eq!(out.len(), get_buffer_size(PixelFormat::Yuv420p, 4, 2, 1).unwrap());
+        assert_eq!(
+            out.len(),
+            get_buffer_size(PixelFormat::Yuv420p, 4, 2, 1).unwrap()
+        );
     }
 }

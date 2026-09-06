@@ -35,11 +35,13 @@
 
 use std::sync::Arc;
 
-use super::color::{ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTrc};
-use super::error::{Error, Result};
-use super::imgutils;
-use super::pixfmt::PixelFormat;
-use super::rational::Rational;
+use super::{
+    color::{ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTrc},
+    error::{Error, Result},
+    imgutils,
+    pixfmt::PixelFormat,
+    rational::Rational,
+};
 
 /// `AV_NOPTS_VALUE` re-exported for frame users.
 pub use super::NOPTS;
@@ -198,12 +200,19 @@ impl Frame {
     /// `av_image_fill_arrays` + `av_frame_ref` combined: adopt an existing
     /// compact buffer (e.g. packet data straight off the demuxer) as the
     /// frame's storage. Zero copies, zero allocations.
-    pub fn wrap_buffer(buf: Arc<[u8]>, format: PixelFormat, width: u32, height: u32) -> Result<Frame> {
+    pub fn wrap_buffer(
+        buf: Arc<[u8]>,
+        format: PixelFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<Frame> {
         imgutils::check_size(width, height)?;
         let linesizes = imgutils::fill_linesizes(format, width)?;
         let sizes = imgutils::fill_plane_sizes(format, height, &linesizes)?;
-        let total: usize =
-            sizes.iter().try_fold(0usize, |a, &s| a.checked_add(s)).ok_or(Error::OutOfRange)?;
+        let total: usize = sizes
+            .iter()
+            .try_fold(0usize, |a, &s| a.checked_add(s))
+            .ok_or(Error::OutOfRange)?;
         if buf.len() < total {
             return Err(Error::InvalidData(format!(
                 "buffer of {} bytes too small for {}x{} {} (needs {total})",

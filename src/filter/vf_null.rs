@@ -12,12 +12,13 @@
 //! has no Rust counterpart flag — ownership transfer IS the metadata-only
 //! semantics here.
 
-use crate::util::error::Result;
-use crate::util::frame::Frame;
+use crate::util::{error::Result, frame::Frame};
 
-use super::filter::{filter_frame, FilterDef, FilterFlags, FilterImpl, PadDef};
-use super::graph::FilterGraph;
-use super::link::NodeId;
+use super::{
+    filter::{FilterDef, FilterFlags, FilterImpl, PadDef, filter_frame},
+    graph::FilterGraph,
+    link::NodeId,
+};
 
 /// Zero state — vf_null's private context is empty.
 pub struct Null;
@@ -36,7 +37,10 @@ impl FilterImpl for Null {
     }
 }
 
-const DEFAULT_PAD: PadDef = PadDef { name: "default", needs_writable: false };
+const DEFAULT_PAD: PadDef = PadDef {
+    name: "default",
+    needs_writable: false,
+};
 
 /// `ff_vf_null` (vf_null.c:29-35).
 pub static NULL_DEF: FilterDef = FilterDef {

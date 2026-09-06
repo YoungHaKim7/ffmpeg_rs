@@ -53,16 +53,22 @@
 //! gain those aliases. Promote into `util::pixfmt.rs` if another wave needs
 //! them there.
 
-use crate::log_error;
-use crate::util::color::{ColorRange, ColorSpace};
-use crate::util::error::{Error, Result};
-use crate::util::frame::Frame;
-use crate::util::pixfmt::PixelFormat;
+use crate::{
+    log_error,
+    util::{
+        color::{ColorRange, ColorSpace},
+        error::{Error, Result},
+        frame::Frame,
+        pixfmt::PixelFormat,
+    },
+};
 
-use super::filter::{filter_frame, FilterDef, FilterFlags, FilterImpl, PadDef};
-use super::formats;
-use super::graph::FilterGraph;
-use super::link::NodeId;
+use super::{
+    filter::{FilterDef, FilterFlags, FilterImpl, PadDef, filter_frame},
+    formats,
+    graph::FilterGraph,
+    link::NodeId,
+};
 
 // ---------------------------------------------------------------------------
 // Private context (vf_format.c:40-51)
@@ -365,7 +371,10 @@ impl FilterImpl for FormatContext {
 /// `ff_video_default_filterpad`). The input's `ff_null_get_video_buffer`
 /// callback is not ported — pad buffer callbacks do not exist (the engine
 /// has no frame pools).
-static DEFAULT_PAD: PadDef = PadDef { name: "default", needs_writable: false };
+static DEFAULT_PAD: PadDef = PadDef {
+    name: "default",
+    needs_writable: false,
+};
 
 /// `ff_vf_format` (vf_format.c:190-208):
 /// "Convert the input video to one of the specified pixel formats."
@@ -414,8 +423,8 @@ pub static NOFORMAT_DEF: FilterDef = FilterDef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::graph::engine_test_helpers::run_to_quiescence;
     use crate::filter::filter_def;
+    use crate::filter::graph::engine_test_helpers::run_to_quiescence;
     use crate::filter::link::LinkId;
 
     /// src -> filter(args) -> sink (the engine-test endpoints stand in for
@@ -448,8 +457,14 @@ mod tests {
         // SET_COMMON_FORMATS2 crossing (formats.c:978-1015 +
         // avfiltergraph.c:373-390): the INPUT link's outcfg and the OUTPUT
         // link's incfg hold the SAME list (identity sharing)...
-        let in_half = g.links[lin.0].outcfg.formats.expect("input outcfg declared");
-        let out_half = g.links[lout.0].incfg.formats.expect("output incfg declared");
+        let in_half = g.links[lin.0]
+            .outcfg
+            .formats
+            .expect("input outcfg declared");
+        let out_half = g.links[lout.0]
+            .incfg
+            .formats
+            .expect("output incfg declared");
         assert_eq!(in_half, out_half);
         // ...whose arena vec is the option order.
         assert_eq!(
@@ -525,7 +540,10 @@ mod tests {
         // Explicit key=value disables the rest of the shorthand chain
         // (avfilter.c:889-892) — and the port's shorthand is pix_fmts only,
         // so 'bt709' has no positional slot at all.
-        match g.create_filter("format", "pix_fmts=yuv420p:bt709").unwrap_err() {
+        match g
+            .create_filter("format", "pix_fmts=yuv420p:bt709")
+            .unwrap_err()
+        {
             Error::InvalidArgument(msg) => assert_eq!(msg, "No option name near 'bt709'"),
             other => panic!("unexpected error: {other}"),
         }
@@ -547,7 +565,10 @@ mod tests {
         // table, so the entry is a leftover — init_filter's check is C's own
         // unknown-option error shape (avfilter.c:976-980).
         let mut g = FilterGraph::new();
-        match g.create_filter("format", "alpha_modes=straight").unwrap_err() {
+        match g
+            .create_filter("format", "alpha_modes=straight")
+            .unwrap_err()
+        {
             Error::NotFound(msg) => assert_eq!(msg, "No such option: alpha_modes"),
             other => panic!("unexpected error: {other}"),
         }
@@ -558,11 +579,11 @@ mod tests {
     #[test]
     fn format_alias_resolution() {
         for (arg, want) in [
-            ("gray", PixelFormat::Gray8),          // from_name alias
-            ("gray8", PixelFormat::Gray8),         // from_name alias
-            ("gray16", PixelFormat::Gray16le),     // le-retry (pixdesc.c:3402-3407)
-            ("rgb32", PixelFormat::Bgra),          // LE rewrite (pixdesc.c:3396-3399)
-            ("bgr32", PixelFormat::Rgba),          // LE rewrite
+            ("gray", PixelFormat::Gray8),      // from_name alias
+            ("gray8", PixelFormat::Gray8),     // from_name alias
+            ("gray16", PixelFormat::Gray16le), // le-retry (pixdesc.c:3402-3407)
+            ("rgb32", PixelFormat::Bgra),      // LE rewrite (pixdesc.c:3396-3399)
+            ("bgr32", PixelFormat::Rgba),      // LE rewrite
             ("yuv420p10", PixelFormat::Yuv420p10le),
         ] {
             let (mut g, f, _lin, lout) = chain("format", arg);
@@ -642,7 +663,11 @@ mod tests {
         invert_formats(&mut fmts, formats::all_pix_fmts());
         assert!(fmts.is_none(), "absent list stays absent");
         // Duplicate forbidden entries are harmless; order is preserved.
-        let mut some = Some(vec![PixelFormat::Yuv420p, PixelFormat::Yuv420p, PixelFormat::Rgb24]);
+        let mut some = Some(vec![
+            PixelFormat::Yuv420p,
+            PixelFormat::Yuv420p,
+            PixelFormat::Rgb24,
+        ]);
         invert_formats(&mut some, formats::all_pix_fmts());
         let expected: Vec<PixelFormat> = PixelFormat::ALL
             .iter()
@@ -688,7 +713,10 @@ mod tests {
         let (mut g, f, _lin, lout) = chain("format", "color_ranges=tv|pc");
         run_query_formats(&mut g, f);
         let idx = g.links[lout.0].incfg.color_ranges.expect("rng declared");
-        assert_eq!(g.rng_lists[idx as usize], vec![ColorRange::Mpeg, ColorRange::Jpeg]);
+        assert_eq!(
+            g.rng_lists[idx as usize],
+            vec![ColorRange::Mpeg, ColorRange::Jpeg]
+        );
 
         let (mut g, f, _lin, lout) = chain("noformat", "color_ranges=tv");
         run_query_formats(&mut g, f);
@@ -706,8 +734,14 @@ mod tests {
             parse_pixel_format("yuv420p", "format").unwrap(),
             PixelFormat::Yuv420p
         );
-        assert_eq!(parse_color_space("bt2020nc", "format").unwrap(), ColorSpace::Bt2020Ncl);
-        assert_eq!(parse_color_space("unknown", "noformat").unwrap(), ColorSpace::Unspecified);
+        assert_eq!(
+            parse_color_space("bt2020nc", "format").unwrap(),
+            ColorSpace::Bt2020Ncl
+        );
+        assert_eq!(
+            parse_color_space("unknown", "noformat").unwrap(),
+            ColorSpace::Unspecified
+        );
         assert_eq!(parse_color_range("tv", "format").unwrap(), ColorRange::Mpeg);
         assert_eq!(parse_color_range("pc", "format").unwrap(), ColorRange::Jpeg);
         // C color_space_names outside the ported enum subset -> error.

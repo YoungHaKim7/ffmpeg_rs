@@ -32,11 +32,17 @@ pub mod rawvideo;
 pub mod testutil;
 pub mod y4m;
 
-use crate::codec::packet::Packet;
-use crate::codec::params::{CodecParameters, MediaType};
-use crate::util::error::{Error, Result};
-use crate::util::rational::Rational;
-use crate::NOPTS;
+use crate::{
+    NOPTS,
+    codec::{
+        packet::Packet,
+        params::{CodecParameters, MediaType},
+    },
+    util::{
+        error::{Error, Result},
+        rational::Rational,
+    },
+};
 
 pub use demux::{DemuxOptions, Demuxer, InputFormat, PROBE_SCORE_MAX};
 pub use mux::{Muxer, OutputFormat};
@@ -105,8 +111,14 @@ impl InputFormatContext {
         // Format selection (avformat_open_input → io_open + init_input).
         let iformat: &'static InputFormat = if let Some(name) = format_name {
             demux::find_input_format(name).ok_or_else(|| {
-                Error::NotFound(format!("demuxer '{name}' (known: {})",
-                    demux::INPUT_FORMATS.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")))
+                Error::NotFound(format!(
+                    "demuxer '{name}' (known: {})",
+                    demux::INPUT_FORMATS
+                        .iter()
+                        .map(|f| f.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
             })?
         } else if let Some(f) = demux::find_input_format_by_extension(url) {
             f
@@ -126,7 +138,11 @@ impl InputFormatContext {
                 Error::InvalidData(format!(
                     "Unable to find a suitable input format for '{url}'; \
                      force one with -f (known: {})",
-                    demux::INPUT_FORMATS.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")
+                    demux::INPUT_FORMATS
+                        .iter()
+                        .map(|f| f.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ))
             })?
         };
@@ -186,8 +202,14 @@ impl OutputFormatContext {
     pub fn create(url: &str, format_name: Option<&str>, stream: Stream) -> Result<Self> {
         let oformat: &'static OutputFormat = if let Some(name) = format_name {
             mux::find_output_format(name).ok_or_else(|| {
-                Error::NotFound(format!("muxer '{name}' (known: {})",
-                    mux::OUTPUT_FORMATS.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")))
+                Error::NotFound(format!(
+                    "muxer '{name}' (known: {})",
+                    mux::OUTPUT_FORMATS
+                        .iter()
+                        .map(|f| f.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
             })?
         } else if let Some(f) = mux::find_output_format_by_extension(url) {
             f
@@ -195,7 +217,11 @@ impl OutputFormatContext {
             return Err(Error::InvalidArgument(format!(
                 "Unable to infer output format from '{url}'; force one with -f \
                  (known: {})",
-                mux::OUTPUT_FORMATS.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")
+                mux::OUTPUT_FORMATS
+                    .iter()
+                    .map(|f| f.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         };
 
@@ -228,7 +254,9 @@ impl OutputFormatContext {
     /// `av_write_frame`.
     pub fn write_frame(&mut self, pkt: &Packet) -> Result<()> {
         if !self.header_written || self.trailer_written {
-            return Err(Error::InvalidArgument("write_frame outside header/trailer".into()));
+            return Err(Error::InvalidArgument(
+                "write_frame outside header/trailer".into(),
+            ));
         }
         self.muxer.write_packet(&mut self.io, &self.streams, pkt)
     }

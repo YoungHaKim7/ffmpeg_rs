@@ -14,8 +14,7 @@
 //! Skips (with a notice, exit 0) when `ffmpeg` is not installed — CI boxes
 //! without it should not fail on missing tooling.
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::{path::PathBuf, process::Command};
 
 const W: u32 = 128;
 const H: u32 = 96;
@@ -66,11 +65,18 @@ impl Fixture {
             .args(args)
             .output()
             .expect("run system ffmpeg");
-        assert!(out.status.success(), "system ffmpeg failed: {args:?}\n{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "system ffmpeg failed: {args:?}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     fn run_ours(&self, args: &[&str]) -> (bool, String, String) {
-        let out = Command::new(&self.ours).args(args).output().expect("run ffmpeg_rs");
+        let out = Command::new(&self.ours)
+            .args(args)
+            .output()
+            .expect("run ffmpeg_rs");
         (
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -81,10 +87,14 @@ impl Fixture {
     /// testsrc2 y4m input, ffmpeg-generated (A1:1, C420jpeg).
     fn make_input_y4m(&self) {
         self.run_ffmpeg(&[
-            "-f", "lavfi",
-            "-i", &format!("testsrc2=duration=1:size={W}x{H}:rate={FPS}"),
-            "-pix_fmt", "yuv420p",
-            "-f", "yuv4mpegpipe",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=duration=1:size={W}x{H}:rate={FPS}"),
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "yuv4mpegpipe",
             self.path("in.y4m").to_str().unwrap(),
             "-y",
         ]);
@@ -100,14 +110,24 @@ fn golden_y4m_to_rawvideo_is_byte_exact() {
     fx.make_input_y4m();
 
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        fx.path("ref.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        fx.path("ref.raw").to_str().unwrap(),
+        "-y",
     ]);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        fx.path("out.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        fx.path("out.raw").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed:\n{stderr}");
     assert_eq!(
@@ -131,28 +151,45 @@ fn golden_rawvideo_to_y4m_round_trip_is_byte_exact() {
     fx.make_input_y4m();
     // Reference raw yuv420p payload.
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        fx.path("frames.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        fx.path("frames.raw").to_str().unwrap(),
+        "-y",
     ]);
 
     fx.run_ffmpeg(&[
-        "-f", "rawvideo",
-        "-pixel_format", "yuv420p",
-        "-video_size", &format!("{W}x{H}"),
-        "-framerate", &FPS.to_string(),
-        "-i", fx.path("frames.raw").to_str().unwrap(),
-        "-f", "yuv4mpegpipe",
+        "-f",
+        "rawvideo",
+        "-pixel_format",
+        "yuv420p",
+        "-video_size",
+        &format!("{W}x{H}"),
+        "-framerate",
+        &FPS.to_string(),
+        "-i",
+        fx.path("frames.raw").to_str().unwrap(),
+        "-f",
+        "yuv4mpegpipe",
         fx.path("ref.y4m").to_str().unwrap(),
         "-y",
     ]);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-f", "rawvideo",
-        "-pixel_format", "yuv420p",
-        "-video_size", &format!("{W}x{H}"),
-        "-framerate", &FPS.to_string(),
-        "-i", fx.path("frames.raw").to_str().unwrap(),
-        "-f", "yuv4mpegpipe",
+        "-f",
+        "rawvideo",
+        "-pixel_format",
+        "yuv420p",
+        "-video_size",
+        &format!("{W}x{H}"),
+        "-framerate",
+        &FPS.to_string(),
+        "-i",
+        fx.path("frames.raw").to_str().unwrap(),
+        "-f",
+        "yuv4mpegpipe",
         fx.path("out.y4m").to_str().unwrap(),
         "-y",
     ]);
@@ -161,7 +198,8 @@ fn golden_rawvideo_to_y4m_round_trip_is_byte_exact() {
     let ours = std::fs::read(fx.path("out.y4m")).unwrap();
     let theirs = std::fs::read(fx.path("ref.y4m")).unwrap();
     assert_eq!(
-        ours, theirs,
+        ours,
+        theirs,
         "y4m output differs from system ffmpeg.\nours header: {:?}\ntheirs header: {:?}",
         String::from_utf8_lossy(&ours[..ours.len().min(80)]),
         String::from_utf8_lossy(&theirs[..theirs.len().min(80)]),
@@ -177,15 +215,26 @@ fn golden_y4m_to_rgb24_within_tolerance() {
     fx.make_input_y4m();
 
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-f", "rawvideo", "-pix_fmt", "rgb24",
-        fx.path("ref.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        fx.path("ref.raw").to_str().unwrap(),
+        "-y",
     ]);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-scale_engine", "cpu",
-        "-f", "rawvideo", "-pix_fmt", "rgb24",
-        fx.path("out.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-scale_engine",
+        "cpu",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        fx.path("out.raw").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed:\n{stderr}");
 
@@ -203,7 +252,10 @@ fn golden_y4m_to_rgb24_within_tolerance() {
             over += 1;
         }
     }
-    assert_eq!(over, 0, "rgb24 conversion exceeds ±3 tolerance (max {max_diff})");
+    assert_eq!(
+        over, 0,
+        "rgb24 conversion exceeds ±3 tolerance (max {max_diff})"
+    );
     eprintln!("rgb24 max byte diff vs swscale: {max_diff}");
 }
 
@@ -219,11 +271,16 @@ fn golden_engine_consistency_cpu_vs_vulkan() {
     };
     fx.make_input_y4m();
     fx.run_ffmpeg(&[
-        "-f", "lavfi",
-        "-i", &format!("testsrc2=duration=1:size={W}x{H}:rate={FPS}"),
-        "-pix_fmt", "gray8",
-        "-f", "rawvideo",
-        fx.path("in.gray").to_str().unwrap(), "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("testsrc2=duration=1:size={W}x{H}:rate={FPS}"),
+        "-pix_fmt",
+        "gray8",
+        "-f",
+        "rawvideo",
+        fx.path("in.gray").to_str().unwrap(),
+        "-y",
     ]);
 
     let y4m_path = fx.path("in.y4m");
@@ -240,18 +297,32 @@ fn golden_engine_consistency_cpu_vs_vulkan() {
         (
             "gray8→rgb24 (mode 1)",
             vec![
-                "-f", "rawvideo", "-pixel_format", "gray8",
-                "-video_size", &vsize, "-framerate", &fps,
-                "-i", gray,
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "gray8",
+                "-video_size",
+                &vsize,
+                "-framerate",
+                &fps,
+                "-i",
+                gray,
             ],
             "rgb24",
         ),
         (
             "gray8→gray8 (mode 3)",
             vec![
-                "-f", "rawvideo", "-pixel_format", "gray8",
-                "-video_size", &vsize, "-framerate", &fps,
-                "-i", gray,
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "gray8",
+                "-video_size",
+                &vsize,
+                "-framerate",
+                &fps,
+                "-i",
+                gray,
             ],
             "gray8",
         ),
@@ -260,12 +331,14 @@ fn golden_engine_consistency_cpu_vs_vulkan() {
     for (label, input_args, pix_fmt) in cases {
         for algo in ["nearest", "bilinear", "bicubic"] {
             let run = |engine: &str, out: &str| -> (bool, String) {
-                let (ok, _, stderr) = fx.run_ours(&[
-                    input_args.as_slice(),
-                    &["-s", &size, "-scale_algo", algo, "-scale_engine", engine],
-                    &["-f", "rawvideo", "-pix_fmt", pix_fmt, out, "-y"],
-                ]
-                .concat());
+                let (ok, _, stderr) = fx.run_ours(
+                    &[
+                        input_args.as_slice(),
+                        &["-s", &size, "-scale_algo", algo, "-scale_engine", engine],
+                        &["-f", "rawvideo", "-pix_fmt", pix_fmt, out, "-y"],
+                    ]
+                    .concat(),
+                );
                 (ok, stderr)
             };
             let (ok_cpu, err_cpu) = run("cpu", fx.path("cpu.out").to_str().unwrap());
@@ -310,16 +383,30 @@ fn golden_scaled_y4m_vs_system_ffmpeg_tolerance() {
     let size = &format!("{}x{}", W / 2, H / 2);
 
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-s", size,
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        fx.path("ref.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-s",
+        size,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        fx.path("ref.raw").to_str().unwrap(),
+        "-y",
     ]);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-s", size, "-scale_engine", "cpu",
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        fx.path("out.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-s",
+        size,
+        "-scale_engine",
+        "cpu",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        fx.path("out.raw").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed:\n{stderr}");
 
@@ -336,13 +423,19 @@ fn golden_scaled_y4m_vs_system_ffmpeg_tolerance() {
             over += 1;
         }
     }
-    assert!(max_diff <= 96, "downscale diverges beyond the documented fixed-tap slack (max {max_diff})");
+    assert!(
+        max_diff <= 96,
+        "downscale diverges beyond the documented fixed-tap slack (max {max_diff})"
+    );
     assert!(
         (over as f64 / ours.len() as f64) < 0.45,
         "too many bytes outside ±3 ({over}/{})",
         ours.len()
     );
-    eprintln!("scaled yuv420p max byte diff vs swscale: {max_diff} ({over}/{} over ±3)", ours.len());
+    eprintln!(
+        "scaled yuv420p max byte diff vs swscale: {max_diff} ({over}/{} over ±3)",
+        ours.len()
+    );
 }
 
 /// The five table-driven kernels ([`crate::swscale::filter`] — the
@@ -373,18 +466,39 @@ fn golden_scaled_new_algorithms_vs_system_ffmpeg() {
     let in_arg = in_path.to_str().unwrap();
 
     for algo in ["area", "gauss", "sinc", "lanczos", "spline"] {
-        for (label, size) in [("down", format!("{}x{}", W / 2, H / 2)), ("up", format!("{}x{}", W * 2, H * 2))] {
+        for (label, size) in [
+            ("down", format!("{}x{}", W / 2, H / 2)),
+            ("up", format!("{}x{}", W * 2, H * 2)),
+        ] {
             fx.run_ffmpeg(&[
-                "-i", in_arg,
-                "-s", &size, "-sws_flags", algo,
-                "-f", "rawvideo", "-pix_fmt", "yuv420p",
-                fx.path("ref.raw").to_str().unwrap(), "-y",
+                "-i",
+                in_arg,
+                "-s",
+                &size,
+                "-sws_flags",
+                algo,
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                fx.path("ref.raw").to_str().unwrap(),
+                "-y",
             ]);
             let (ok, _, stderr) = fx.run_ours(&[
-                "-i", in_arg,
-                "-s", &size, "-scale_algo", algo, "-scale_engine", "cpu",
-                "-f", "rawvideo", "-pix_fmt", "yuv420p",
-                fx.path("out.raw").to_str().unwrap(), "-y",
+                "-i",
+                in_arg,
+                "-s",
+                &size,
+                "-scale_algo",
+                algo,
+                "-scale_engine",
+                "cpu",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                fx.path("out.raw").to_str().unwrap(),
+                "-y",
             ]);
             assert!(ok, "ffmpeg_rs failed ({algo}/{label}):\n{stderr}");
 
@@ -417,16 +531,34 @@ fn golden_scaled_new_algorithms_vs_system_ffmpeg() {
     // lanczos here: max 179, 29.5% over ±3).
     let size = format!("{}x{}", W / 2, H / 2);
     fx.run_ffmpeg(&[
-        "-i", in_arg,
-        "-s", &size, "-sws_flags", "lanczos",
-        "-f", "rawvideo", "-pix_fmt", "rgb24",
-        fx.path("ref.raw").to_str().unwrap(), "-y",
+        "-i",
+        in_arg,
+        "-s",
+        &size,
+        "-sws_flags",
+        "lanczos",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        fx.path("ref.raw").to_str().unwrap(),
+        "-y",
     ]);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", in_arg,
-        "-s", &size, "-scale_algo", "lanczos", "-scale_engine", "cpu",
-        "-f", "rawvideo", "-pix_fmt", "rgb24",
-        fx.path("out.raw").to_str().unwrap(), "-y",
+        "-i",
+        in_arg,
+        "-s",
+        &size,
+        "-scale_algo",
+        "lanczos",
+        "-scale_engine",
+        "cpu",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        fx.path("out.raw").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed (lanczos/rgb24):\n{stderr}");
     let ours = std::fs::read(fx.path("out.raw")).unwrap();
@@ -446,7 +578,10 @@ fn golden_scaled_new_algorithms_vs_system_ffmpeg() {
         "too many bytes outside ±3 ({over}/{})",
         ours.len()
     );
-    eprintln!("lanczos/rgb24: max {max_diff}, {over}/{} over ±3", ours.len());
+    eprintln!(
+        "lanczos/rgb24: max {max_diff}, {over}/{} over ±3",
+        ours.len()
+    );
 }
 
 /// The five table-driven kernels are CPU-only: `-scale_engine vulkan` must
@@ -466,10 +601,20 @@ fn engine_fallback_for_cpu_only_algorithms() {
 
     // (i) explicit Vulkan + lanczos ⇒ nonzero exit, Unsupported message.
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", in_arg,
-        "-s", &size, "-scale_algo", "lanczos", "-scale_engine", "vulkan",
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        fx.path("gpu.out").to_str().unwrap(), "-y",
+        "-i",
+        in_arg,
+        "-s",
+        &size,
+        "-scale_algo",
+        "lanczos",
+        "-scale_engine",
+        "vulkan",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        fx.path("gpu.out").to_str().unwrap(),
+        "-y",
     ]);
     assert!(!ok, "vulkan + lanczos must fail, exit was 0");
     assert!(
@@ -479,17 +624,35 @@ fn engine_fallback_for_cpu_only_algorithms() {
 
     // (ii) auto ⇒ success, byte-identical to the CPU run.
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", in_arg,
-        "-s", &size, "-scale_algo", "lanczos",
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        fx.path("auto.out").to_str().unwrap(), "-y",
+        "-i",
+        in_arg,
+        "-s",
+        &size,
+        "-scale_algo",
+        "lanczos",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        fx.path("auto.out").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "auto engine failed:\n{stderr}");
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", in_arg,
-        "-s", &size, "-scale_algo", "lanczos", "-scale_engine", "cpu",
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        fx.path("cpu.out").to_str().unwrap(), "-y",
+        "-i",
+        in_arg,
+        "-s",
+        &size,
+        "-scale_algo",
+        "lanczos",
+        "-scale_engine",
+        "cpu",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "yuv420p",
+        fx.path("cpu.out").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "cpu engine failed:\n{stderr}");
     assert_eq!(
@@ -507,13 +670,21 @@ fn cli_dump_output_shape() {
     };
     fx.make_input_y4m();
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-f", "rawvideo", "-pix_fmt", "rgb24",
-        fx.path("out.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        fx.path("out.raw").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "{stderr}");
     assert!(stderr.contains("Input #0, yuv4mpegpipe, from"), "{stderr}");
-    assert!(stderr.contains("Duration: 00:00:01.00, start: 0.000000, bitrate: 1475 kb/s"), "{stderr}");
+    assert!(
+        stderr.contains("Duration: 00:00:01.00, start: 0.000000, bitrate: 1475 kb/s"),
+        "{stderr}"
+    );
     assert!(stderr.contains("Stream #0:0: Video: rawvideo (I420 / 0x30323449), yuv420p(progressive), 128x96, SAR 1:1 DAR 4:3, 10 fps, 10 tbr, 10 tbn"), "{stderr}");
     assert!(stderr.contains("Output #0, rawvideo, to"), "{stderr}");
     assert!(stderr.contains("rawvideo (RGB[24] / 0x18424752), rgb24(pc, progressive), 128x96 [SAR 1:1 DAR 4:3], q=2-31, 2949 kb/s, 10 fps, 10 tbn"), "{stderr}");

@@ -14,20 +14,22 @@
 
 use std::sync::Arc;
 
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
-    allocator::StandardCommandBufferAllocator,
+use vulkano::{
+    VulkanLibrary,
+    command_buffer::{
+        AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
+        allocator::StandardCommandBufferAllocator,
+    },
+    descriptor_set::allocator::StandardDescriptorSetAllocator,
+    device::{
+        Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
+        physical::{PhysicalDevice, PhysicalDeviceType},
+    },
+    format::{Format, FormatFeatures},
+    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
+    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
+    sync::{self, GpuFuture},
 };
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::device::{
-    Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
-    physical::{PhysicalDevice, PhysicalDeviceType},
-};
-use vulkano::format::{Format, FormatFeatures};
-use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::sync::{self, GpuFuture};
-use vulkano::VulkanLibrary;
 
 use crate::util::error::{Error, Result};
 
@@ -62,7 +64,11 @@ impl ComputeGpu {
             .enumerate_physical_devices()
             .map_err(|e| Error::Unsupported(format!("enumerating devices: {e}")))?;
         let mut ranked: Vec<_> = candidates
-            .filter(|p| p.queue_family_properties().iter().any(|q| q.queue_flags.intersects(QueueFlags::COMPUTE)))
+            .filter(|p| {
+                p.queue_family_properties()
+                    .iter()
+                    .any(|q| q.queue_flags.intersects(QueueFlags::COMPUTE))
+            })
             .filter(|p| Self::supports_shader_formats(p))
             .map(|p| {
                 let rank = match p.properties().device_type {
@@ -77,10 +83,9 @@ impl ComputeGpu {
             })
             .collect();
         ranked.sort_by_key(|(_, rank)| *rank);
-        let (physical_device, _) = ranked
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::NotFound("compute-capable Vulkan device with R8/RGBA8 image support".into()))?;
+        let (physical_device, _) = ranked.into_iter().next().ok_or_else(|| {
+            Error::NotFound("compute-capable Vulkan device with R8/RGBA8 image support".into())
+        })?;
 
         let queue_family_index = physical_device
             .queue_family_properties()
@@ -103,10 +108,7 @@ impl ComputeGpu {
         let queue = queues.next().expect("one queue was requested");
 
         Ok(ComputeGpu {
-            memory_allocator: Arc::new(StandardMemoryAllocator::new(
-                &device,
-                &Default::default(),
-            )),
+            memory_allocator: Arc::new(StandardMemoryAllocator::new(&device, &Default::default())),
             command_buffer_allocator: Arc::new(StandardCommandBufferAllocator::new(
                 &device,
                 &Default::default(),
@@ -124,8 +126,12 @@ impl ComputeGpu {
     /// R8 must be sampleable AND storable (plane in/out), RGBA8 storable
     /// (packed RGB out) — `optimal` tiling, the default for `Image::new`.
     fn supports_shader_formats(p: &PhysicalDevice) -> bool {
-        let r8 = p.format_properties(Format::R8_UNORM).optimal_tiling_features;
-        let rgba = p.format_properties(Format::R8G8B8A8_UNORM).optimal_tiling_features;
+        let r8 = p
+            .format_properties(Format::R8_UNORM)
+            .optimal_tiling_features;
+        let rgba = p
+            .format_properties(Format::R8G8B8A8_UNORM)
+            .optimal_tiling_features;
         let need = FormatFeatures::SAMPLED_IMAGE | FormatFeatures::STORAGE_IMAGE;
         r8.intersects(need) && rgba.intersects(FormatFeatures::STORAGE_IMAGE)
     }
@@ -142,7 +148,10 @@ impl ComputeGpu {
 
     /// Submit and block until done (frame-synchronous Phase 2; a
     /// queue of frames with fences is a later optimization).
-    pub fn submit_wait(&self, builder: AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>) -> Result<()> {
+    pub fn submit_wait(
+        &self,
+        builder: AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    ) -> Result<()> {
         let command_buffer = builder
             .build()
             .map_err(|e| Error::Unsupported(format!("building command buffer: {e}")))?;
@@ -157,7 +166,10 @@ impl ComputeGpu {
 }
 
 /// Staging upload buffer (house recipe: HOST | SEQUENTIAL_WRITE).
-pub fn upload_buffer(allocator: &Arc<StandardMemoryAllocator>, data: &[u8]) -> Result<vulkano::buffer::Subbuffer<[u8]>> {
+pub fn upload_buffer(
+    allocator: &Arc<StandardMemoryAllocator>,
+    data: &[u8],
+) -> Result<vulkano::buffer::Subbuffer<[u8]>> {
     vulkano::buffer::Buffer::from_iter(
         allocator,
         &vulkano::buffer::BufferCreateInfo {
@@ -165,7 +177,8 @@ pub fn upload_buffer(allocator: &Arc<StandardMemoryAllocator>, data: &[u8]) -> R
             ..Default::default()
         },
         &AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
         },
         data.iter().copied(),
@@ -174,7 +187,10 @@ pub fn upload_buffer(allocator: &Arc<StandardMemoryAllocator>, data: &[u8]) -> R
 }
 
 /// Readback buffer (HOST | RANDOM_ACCESS).
-pub fn readback_buffer(allocator: &Arc<StandardMemoryAllocator>, len: usize) -> Result<vulkano::buffer::Subbuffer<[u8]>> {
+pub fn readback_buffer(
+    allocator: &Arc<StandardMemoryAllocator>,
+    len: usize,
+) -> Result<vulkano::buffer::Subbuffer<[u8]>> {
     vulkano::buffer::Buffer::from_iter(
         allocator,
         &vulkano::buffer::BufferCreateInfo {
@@ -182,7 +198,8 @@ pub fn readback_buffer(allocator: &Arc<StandardMemoryAllocator>, len: usize) -> 
             ..Default::default()
         },
         &AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
             ..Default::default()
         },
         std::iter::repeat_n(0u8, len),
@@ -197,8 +214,9 @@ pub mod usage {
     /// Sampled input planes (`texture2D`, filled by transfer).
     pub const PLANE_IN: ImageUsage = ImageUsage::TRANSFER_DST.union(ImageUsage::SAMPLED);
     /// Storage output planes (r8, read back by transfer).
-    pub const PLANE_OUT: ImageUsage =
-        ImageUsage::STORAGE.union(ImageUsage::TRANSFER_SRC).union(ImageUsage::TRANSFER_DST);
+    pub const PLANE_OUT: ImageUsage = ImageUsage::STORAGE
+        .union(ImageUsage::TRANSFER_SRC)
+        .union(ImageUsage::TRANSFER_DST);
     /// The 1×1 stand-in bound to slots the current mode does not use. It can
     /// land on sampled OR storage bindings, so it needs both usages (a view
     /// without the descriptor's usage violates VUID-VkDescriptorImageInfo-

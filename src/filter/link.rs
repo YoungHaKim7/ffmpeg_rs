@@ -17,12 +17,16 @@
 
 use std::collections::VecDeque;
 
-use crate::util::color::{ColorRange, ColorSpace};
-use crate::util::error::Error;
-use crate::util::frame::Frame;
-use crate::util::pixfmt::PixelFormat;
-use crate::util::rational::Rational;
-use crate::NOPTS;
+use crate::{
+    NOPTS,
+    util::{
+        color::{ColorRange, ColorSpace},
+        error::Error,
+        frame::Frame,
+        pixfmt::PixelFormat,
+        rational::Rational,
+    },
+};
 
 /// Index of a filter instance in `FilterGraph::nodes` (C: the `AVFilterContext*`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -184,8 +188,11 @@ impl Default for Link {
 pub(crate) fn status_eq(a: &Error, b: &Error) -> bool {
     use Error::*;
     match (a, b) {
-        (Eof, Eof) | (Again, Again) | (StreamNotFound, StreamNotFound)
-        | (BufferTooSmall, BufferTooSmall) | (OutOfRange, OutOfRange) => true,
+        (Eof, Eof)
+        | (Again, Again)
+        | (StreamNotFound, StreamNotFound)
+        | (BufferTooSmall, BufferTooSmall)
+        | (OutOfRange, OutOfRange) => true,
         (InvalidData(x), InvalidData(y))
         | (Unsupported(x), Unsupported(y))
         | (NotFound(x), NotFound(y))

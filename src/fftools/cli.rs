@@ -18,11 +18,15 @@
 //! `-r`/`-vf` (filtergraph), `-ss` (seeking), `-t`, `-an/-vn`, multiple
 //! inputs/outputs.
 
-use crate::swscale::{ScaleAlgorithm, ScaleEngine};
-use crate::util::error::{Error, Result};
-use crate::util::log::Level;
-use crate::util::pixfmt::PixelFormat;
-use crate::util::rational::Rational;
+use crate::{
+    swscale::{ScaleAlgorithm, ScaleEngine},
+    util::{
+        error::{Error, Result},
+        log::Level,
+        pixfmt::PixelFormat,
+        rational::Rational,
+    },
+};
 
 /// What `-y`/`-n` decided about clobbering the output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -123,7 +127,12 @@ fn parse_size(s: &str) -> Result<(u32, u32)> {
     let bad = || Error::InvalidArgument(format!("Invalid video size: {s}"));
     let mut it = s.splitn(2, |c| c == 'x' || c == 'X');
     let w: u32 = it.next().unwrap().trim().parse().map_err(|_| bad())?;
-    let h: u32 = it.next().ok_or_else(bad)?.trim().parse().map_err(|_| bad())?;
+    let h: u32 = it
+        .next()
+        .ok_or_else(bad)?
+        .trim()
+        .parse()
+        .map_err(|_| bad())?;
     if w == 0 || h == 0 {
         return Err(bad());
     }
@@ -134,7 +143,11 @@ fn parse_pixfmt(flag: &str, s: &str) -> Result<PixelFormat> {
     PixelFormat::from_name(s).ok_or_else(|| {
         Error::InvalidArgument(format!(
             "Invalid pixel format for {flag}: '{s}' (known: {})",
-            PixelFormat::ALL.iter().map(|f| f.name()).collect::<Vec<_>>().join(", ")
+            PixelFormat::ALL
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))
     })
 }
@@ -166,9 +179,9 @@ pub fn parse(args: &[String]) -> Result<Cli> {
         let arg = &args[i];
         let mut next = |what: &str| -> Result<String> {
             i += 1;
-            args.get(i)
-                .cloned()
-                .ok_or_else(|| Error::InvalidArgument(format!("Option {what} requires an argument")))
+            args.get(i).cloned().ok_or_else(|| {
+                Error::InvalidArgument(format!("Option {what} requires an argument"))
+            })
         };
 
         match arg.as_str() {
@@ -180,10 +193,8 @@ pub fn parse(args: &[String]) -> Result<Cli> {
             "-n" => cli.overwrite = Overwrite::Never,
             "-v" | "-loglevel" => {
                 let v = next(arg)?;
-                cli.log_level =
-                    Level::from_name(&v).ok_or_else(|| {
-                        Error::InvalidArgument(format!("Unknown log level '{v}'"))
-                    })?;
+                cli.log_level = Level::from_name(&v)
+                    .ok_or_else(|| Error::InvalidArgument(format!("Unknown log level '{v}'")))?;
             }
             "-f" => {
                 let v = next(arg)?;
@@ -265,7 +276,7 @@ pub fn parse(args: &[String]) -> Result<Cli> {
                     other => {
                         return Err(Error::InvalidArgument(format!(
                             "Unknown scaling engine '{other}' (auto|vulkan|cpu)"
-                        )))
+                        )));
                     }
                 };
             }
@@ -282,9 +293,7 @@ pub fn parse(args: &[String]) -> Result<Cli> {
                     ))
                 })?;
                 if cli.video_filters.replace(desc.clone()).is_some() {
-                    return Err(Error::InvalidArgument(format!(
-                        "option {arg} given twice"
-                    )));
+                    return Err(Error::InvalidArgument(format!("option {arg} given twice")));
                 }
             }
             "-r" | "-ss" => {
@@ -326,8 +335,10 @@ mod tests {
 
     #[test]
     fn basic_transcode_invocation() {
-        let cli = parse(&args(&["-i", "in.y4m", "-f", "rawvideo", "-pix_fmt", "rgb24", "out.raw"]))
-            .unwrap();
+        let cli = parse(&args(&[
+            "-i", "in.y4m", "-f", "rawvideo", "-pix_fmt", "rgb24", "out.raw",
+        ]))
+        .unwrap();
         assert_eq!(cli.input_url, "in.y4m");
         assert_eq!(cli.output_url, "out.raw");
         assert_eq!(cli.output_format.as_deref(), Some("rawvideo"));
@@ -338,11 +349,16 @@ mod tests {
     #[test]
     fn input_options_section_ordering() {
         let cli = parse(&args(&[
-            "-f", "rawvideo",
-            "-pixel_format", "yuv420p",
-            "-video_size", "128x96",
-            "-framerate", "25",
-            "-i", "in.raw",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "yuv420p",
+            "-video_size",
+            "128x96",
+            "-framerate",
+            "25",
+            "-i",
+            "in.raw",
             "out.y4m",
         ]))
         .unwrap();
@@ -357,7 +373,10 @@ mod tests {
     #[test]
     fn framerate_accepts_colon_and_decimal() {
         assert_eq!(parse_rate("25").unwrap(), Rational::new(25, 1));
-        assert_eq!(parse_rate("30000:1001").unwrap(), Rational::new(30000, 1001));
+        assert_eq!(
+            parse_rate("30000:1001").unwrap(),
+            Rational::new(30000, 1001)
+        );
         let ntsc = parse_rate("29.97").unwrap();
         assert!((ntsc.to_f64() - 29.97).abs() < 1e-6);
         assert!(parse_rate("0:0").is_err());
@@ -366,8 +385,15 @@ mod tests {
     #[test]
     fn scale_options_parse() {
         let cli = parse(&args(&[
-            "-i", "in.y4m", "-s", "320x240",
-            "-scale_algo", "bilinear", "-scale_engine", "cpu", "out.raw",
+            "-i",
+            "in.y4m",
+            "-s",
+            "320x240",
+            "-scale_algo",
+            "bilinear",
+            "-scale_engine",
+            "cpu",
+            "out.raw",
         ]))
         .unwrap();
         assert_eq!(cli.output_size, Some((320, 240)));
@@ -396,8 +422,16 @@ mod tests {
             ("lanczos", ScaleAlgorithm::Lanczos),
             ("spline", ScaleAlgorithm::Spline),
         ] {
-            let cli = parse(&args(&["-i", "in.y4m", "-s", "8x8", "-scale_algo", name, "out.raw"]))
-                .unwrap_or_else(|_| panic!("{name} should parse"));
+            let cli = parse(&args(&[
+                "-i",
+                "in.y4m",
+                "-s",
+                "8x8",
+                "-scale_algo",
+                name,
+                "out.raw",
+            ]))
+            .unwrap_or_else(|_| panic!("{name} should parse"));
             assert_eq!(cli.scale_algorithm, alg);
         }
         assert!(parse(&args(&["-i", "a", "-scale_algo", "bicublin", "b"])).is_err());

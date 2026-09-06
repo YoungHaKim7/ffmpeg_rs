@@ -7,13 +7,12 @@
 //! hooks, one plain and one fed demuxer options (the AVOptions of the C
 //! priv_data class, typed here instead).
 
-use crate::codec::packet::Packet;
-use crate::util::error::Result;
-use crate::util::pixfmt::PixelFormat;
-use crate::util::rational::Rational;
+use crate::{
+    codec::packet::Packet,
+    util::{error::Result, pixfmt::PixelFormat, rational::Rational},
+};
 
-use super::io::IoContext;
-use super::Stream;
+use super::{Stream, io::IoContext};
 
 /// `AVPROBE_SCORE_MAX`.
 pub const PROBE_SCORE_MAX: u32 = 100;

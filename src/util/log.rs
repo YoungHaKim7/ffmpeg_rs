@@ -15,8 +15,10 @@
 //! stderr — ffmpeg's own banner and per-file dumps are plain-context INFO
 //! messages, which is what our CLI prints.
 
-use std::fmt;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::{
+    fmt,
+    sync::atomic::{AtomicI32, Ordering},
+};
 
 /// `AV_LOG_*` levels (`log.h:192-236`). Discriminants match C so that
 /// `-v/-loglevel` maps 1:1.
@@ -140,7 +142,9 @@ mod tests {
     #[test]
     fn level_names_round_trip() {
         // Canonical names are accepted; "warn" is the one alias.
-        for name in ["quiet", "panic", "fatal", "error", "warning", "info", "verbose", "debug", "trace"] {
+        for name in [
+            "quiet", "panic", "fatal", "error", "warning", "info", "verbose", "debug", "trace",
+        ] {
             assert!(Level::from_name(name).is_some(), "{name}");
         }
         assert!(Level::from_name("loud").is_none());

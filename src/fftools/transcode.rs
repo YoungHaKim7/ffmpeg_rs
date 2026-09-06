@@ -16,28 +16,34 @@
 
 use std::time::Instant;
 
-use crate::codec::packet::Packet;
-use crate::codec::params::{CodecId, CodecParameters};
-use crate::codec::rawvideo::{RawVideoDecoder, RawVideoEncoder};
-use crate::codec::traits::{Decoder, Encoder};
-use crate::filter::{buffersink, FilterGraph, NodeId};
-use crate::format::demux::DemuxOptions;
-use crate::format::{InputFormatContext, OutputFormatContext, Stream};
-use crate::log_error;
-use crate::log_info;
-use crate::swscale::{ScaleContext, ScaleOptions};
-use crate::log_verbose;
-use crate::util::color::{ColorRange, ColorSpace};
-use crate::util::error::{Error, Result};
-use crate::util::frame::Frame;
-use crate::util::imgutils;
-use crate::util::log;
-use crate::util::pixdesc;
-use crate::util::pixfmt::PixelFormat;
-use crate::util::rational::Rational;
+use crate::{
+    codec::{
+        packet::Packet,
+        params::{CodecId, CodecParameters},
+        rawvideo::{RawVideoDecoder, RawVideoEncoder},
+        traits::{Decoder, Encoder},
+    },
+    filter::{FilterGraph, NodeId, buffersink},
+    format::{
+        demux::DemuxOptions,
+        {InputFormatContext, OutputFormatContext, Stream},
+    },
+    log_error, log_info, log_verbose,
+    swscale::{ScaleContext, ScaleOptions},
+    util::{
+        color::{ColorRange, ColorSpace},
+        error::{Error, Result},
+        frame::Frame,
+        imgutils, log, pixdesc,
+        pixfmt::PixelFormat,
+        rational::Rational,
+    },
+};
 
-use super::cli::{parse, Cli, Overwrite};
-use super::dump;
+use super::{
+    cli::{Cli, Overwrite, parse},
+    dump,
+};
 
 /// `main()` — parse, banner, run, and translate the pipeline-faithful
 /// `Err(Error::Eof)`-style failures into ffmpeg-like exit behavior.
@@ -46,9 +52,18 @@ pub fn run(args: &[String]) -> Result<()> {
     log::set_level(cli.log_level);
 
     // Banner (opt_common.c print_banner shape, honestly labeled).
-    log_info!(None, "ffmpeg_rs version 0.1.0 Copyright (c) 2026 the ffmpeg_rs authors");
-    log_info!(None, "  built with rustc (FFmpeg 8.0.git pipeline-faithful port, phase 1)");
-    log_info!(None, "  libavutil / libavformat / libavcodec / libswscale subsets — see the crate docs");
+    log_info!(
+        None,
+        "ffmpeg_rs version 0.1.0 Copyright (c) 2026 the ffmpeg_rs authors"
+    );
+    log_info!(
+        None,
+        "  built with rustc (FFmpeg 8.0.git pipeline-faithful port, phase 1)"
+    );
+    log_info!(
+        None,
+        "  libavutil / libavformat / libavcodec / libswscale subsets — see the crate docs"
+    );
 
     match transcode(&cli) {
         Ok(stats) => {
@@ -194,7 +209,8 @@ impl VfGraph {
     }
 
     fn sink_color_range(&self) -> ColorRange {
-        buffersink::buffersink_get_color_range(&self.g, self.sink).unwrap_or(ColorRange::Unspecified)
+        buffersink::buffersink_get_color_range(&self.g, self.sink)
+            .unwrap_or(ColorRange::Unspecified)
     }
 }
 
@@ -205,8 +221,11 @@ fn transcode(cli: &Cli) -> Result<Stats> {
         match cli.overwrite {
             Overwrite::Always => {}
             Overwrite::Never | Overwrite::Prompt => {
-                log_error!(None, "File '{}' exists. Exiting (use -y to overwrite).",
-                    cli.output_url);
+                log_error!(
+                    None,
+                    "File '{}' exists. Exiting (use -y to overwrite).",
+                    cli.output_url
+                );
                 return Err(Error::InvalidArgument("output exists".into()));
             }
         }
@@ -220,7 +239,8 @@ fn transcode(cli: &Cli) -> Result<Stats> {
             framerate: cli.input_framerate.unwrap_or(Rational::new(25, 1)),
         },
     };
-    let mut ictx = InputFormatContext::open(&cli.input_url, cli.input_format.as_deref(), &demux_opts)?;
+    let mut ictx =
+        InputFormatContext::open(&cli.input_url, cli.input_format.as_deref(), &demux_opts)?;
     ictx.find_stream_info()?;
     dump::dump_input(&ictx);
 
@@ -273,16 +293,23 @@ fn transcode(cli: &Cli) -> Result<Stats> {
     if let Some(v) = vf.as_ref() {
         out_par.color_range = v.sink_color_range();
     } else if out_pix_fmt != in_st.codecpar.format
-        && pixdesc::descriptor(out_pix_fmt).flags.contains(pixdesc::PixFmtFlags::RGB)
+        && pixdesc::descriptor(out_pix_fmt)
+            .flags
+            .contains(pixdesc::PixFmtFlags::RGB)
     {
         out_par.color_range = crate::util::color::ColorRange::Jpeg;
     }
     // ff_guess_coded_bitrate: frame bytes · 8 · fps (rounded like C's
     // av_rescale_q nearest).
-    let frame_bytes = imgutils::get_buffer_size(out_pix_fmt, out_par.width, out_par.height, 1)? as i64;
+    let frame_bytes =
+        imgutils::get_buffer_size(out_pix_fmt, out_par.width, out_par.height, 1)? as i64;
     let fps = out_par.framerate;
     out_par.bit_rate = if fps.den > 0 {
-        crate::util::mathematics::rescale_q(frame_bytes * 8, Rational::new(fps.num, fps.den), Rational::ONE)
+        crate::util::mathematics::rescale_q(
+            frame_bytes * 8,
+            Rational::new(fps.num, fps.den),
+            Rational::ONE,
+        )
     } else {
         0
     };
@@ -293,14 +320,21 @@ fn transcode(cli: &Cli) -> Result<Stats> {
     // Output timebase follows the framerate (what ffmpeg does without
     // -video_track_timescale).
     if in_st.avg_frame_rate.num > 0 {
-        out_st.set_pts_info(in_st.avg_frame_rate.den as i64, in_st.avg_frame_rate.num as i64);
+        out_st.set_pts_info(
+            in_st.avg_frame_rate.den as i64,
+            in_st.avg_frame_rate.num as i64,
+        );
     } else {
         out_st.set_pts_info(1, 25);
     }
 
     dump::dump_stream_mapping();
 
-    let mut octx = OutputFormatContext::create(&cli.output_url, cli.output_format.as_deref(), out_st.clone())?;
+    let mut octx = OutputFormatContext::create(
+        &cli.output_url,
+        cli.output_format.as_deref(),
+        out_st.clone(),
+    )?;
     octx.write_header()?;
     dump::dump_output(&octx);
     log_info!(None, "Press [q] to stop, [?] for help");
@@ -319,7 +353,11 @@ fn transcode(cli: &Cli) -> Result<Stats> {
             || (in_st.codecpar.width, in_st.codecpar.height) != (out_w, out_h));
     let mut scaler = if needs_scale {
         Some(ScaleContext::new(
-            (in_st.codecpar.format, in_st.codecpar.width, in_st.codecpar.height),
+            (
+                in_st.codecpar.format,
+                in_st.codecpar.width,
+                in_st.codecpar.height,
+            ),
             (out_pix_fmt, out_w, out_h),
             ScaleOptions {
                 algorithm: cli.scale_algorithm,
@@ -330,11 +368,21 @@ fn transcode(cli: &Cli) -> Result<Stats> {
         None
     };
     if let Some(scaler) = scaler.as_ref() {
-        log_verbose!(None, "auto-inserted scale filter: {}x{} {} -> {}x{} {} ({}, {} engine)",
-            in_st.codecpar.width, in_st.codecpar.height, in_st.codecpar.format.name(),
-            out_w, out_h, out_pix_fmt.name(),
+        log_verbose!(
+            None,
+            "auto-inserted scale filter: {}x{} {} -> {}x{} {} ({}, {} engine)",
+            in_st.codecpar.width,
+            in_st.codecpar.height,
+            in_st.codecpar.format.name(),
+            out_w,
+            out_h,
+            out_pix_fmt.name(),
             cli.scale_algorithm.name(),
-            match scaler_engine_used(scaler) { true => "vulkan", false => "cpu" });
+            match scaler_engine_used(scaler) {
+                true => "vulkan",
+                false => "cpu",
+            }
+        );
     }
 
     // ---- the loop ----------------------------------------------------------
@@ -434,11 +482,19 @@ fn scaler_engine_used(scaler: &ScaleContext) -> bool {
 
 /// The filter-graph stand-in: insert the scale filter only when format or
 /// size differs, else pass the frame through untouched (Arc-shared planes).
-fn convert_frame(frame: &Frame, scaler: &mut Option<ScaleContext>, out_st: &Stream) -> Result<Frame> {
+fn convert_frame(
+    frame: &Frame,
+    scaler: &mut Option<ScaleContext>,
+    out_st: &Stream,
+) -> Result<Frame> {
     match scaler {
         None => Ok(frame.clone()),
         Some(ctx) => {
-            let mut dst = Frame::alloc(out_st.codecpar.format, out_st.codecpar.width, out_st.codecpar.height)?;
+            let mut dst = Frame::alloc(
+                out_st.codecpar.format,
+                out_st.codecpar.width,
+                out_st.codecpar.height,
+            )?;
             ctx.scale(frame, &mut dst)?;
             // av_frame_copy_props: everything but the pixels.
             dst.pts = frame.pts;
@@ -468,16 +524,29 @@ fn write_packet(octx: &mut OutputFormatContext, pkt: &Packet, stats: &mut Stats)
 /// `frame=   10 fps=0.0 q=-0.0 Lsize=     180KiB time=00:00:01.00 bitrate=1475.5kbits/s speed=591x`
 fn print_summary(stats: &Stats) {
     let elapsed = stats.started.elapsed().as_secs_f64();
-    let fps = if elapsed > 0.0 { stats.frames as f64 / elapsed } else { 0.0 };
+    let fps = if elapsed > 0.0 {
+        stats.frames as f64 / elapsed
+    } else {
+        0.0
+    };
     // Progress time counts through the END of the last frame (pts+duration),
     // which is why ffmpeg prints 00:00:01.00 for 10 frames at 10 fps.
     let end_pts = stats.last_pts + stats.last_duration;
     let secs = end_pts as f64 * stats.time_base.to_f64();
     // print_report: `size=%8.0fKiB` (rounded, width 8).
     let kib = stats.bytes as f64 / 1024.0;
-    let bitrate = if secs > 0.0 { stats.bytes as f64 * 8.0 / secs / 1000.0 } else { 0.0 };
-    let speed = if secs > 0.0 { secs / elapsed.max(1e-9) } else { 0.0 };
-    log_info!(None,
+    let bitrate = if secs > 0.0 {
+        stats.bytes as f64 * 8.0 / secs / 1000.0
+    } else {
+        0.0
+    };
+    let speed = if secs > 0.0 {
+        secs / elapsed.max(1e-9)
+    } else {
+        0.0
+    };
+    log_info!(
+        None,
         "frame={:5} fps={:4.1} q=-0.0 Lsize={kib:8.0}KiB time={} bitrate={bitrate:.1}kbits/s speed={speed:.0}x",
         stats.frames,
         fps,

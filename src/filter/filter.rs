@@ -23,15 +23,16 @@
 //! avfilter.c:1111-1115 — default `SIZE_MAX`, i.e. unbounded, in C too
 //! unless `max_buffered_frames` is set).
 
-use crate::util::error::Error;
-use crate::util::frame::Frame;
-use crate::util::rational::Rational;
-use crate::util::{mathematics, NOPTS};
-use crate::log_warning;
+use crate::{
+    log_warning,
+    util::{NOPTS, error::Error, frame::Frame, mathematics, rational::Rational},
+};
 
-use super::graph::FilterGraph;
-use super::link::{clone_status, status_eq, LinkId, NodeId};
-use super::Options;
+use super::{
+    Options,
+    graph::FilterGraph,
+    link::{LinkId, NodeId, clone_status, status_eq},
+};
 
 // ---------------------------------------------------------------------------
 // Static filter definitions (avfilter.c:631-986, filters.h:267-462)
@@ -183,7 +184,6 @@ pub trait FilterImpl {
     fn as_any(&mut self) -> Option<&mut dyn std::any::Any> {
         None
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +284,11 @@ pub(crate) fn link_set_out_status(g: &mut FilterGraph, link: LinkId, status: Err
 /// audio branch (1089-1105) is not ported.
 pub fn filter_frame(g: &mut FilterGraph, link: LinkId, frame: Frame) -> Result<(), Error> {
     let dst = g.links[link.0].dst;
-    if !g.nodes[dst.0].def.flags.contains(FilterFlags::ALLOWS_RECONFIGURE) {
+    if !g.nodes[dst.0]
+        .def
+        .flags
+        .contains(FilterFlags::ALLOWS_RECONFIGURE)
+    {
         let l = &g.links[link.0];
         if let Some(f) = l.format {
             debug_assert_eq!(frame.format, f, "frame format does not match link format");
@@ -450,11 +454,7 @@ fn guess_status_pts(
             link_time_base,
         ));
     }
-    if r < i64::MAX {
-        r
-    } else {
-        NOPTS
-    }
+    if r < i64::MAX { r } else { NOPTS }
 }
 
 /// `request_frame_to_filter` (avfilter.c:532-551) — ask the source of
@@ -620,9 +620,9 @@ pub fn default_activate<I: FilterImpl + ?Sized>(
     // Stage A (1268-1274): EOF back-propagation.
     let nb_outputs = outputs.len();
     if nb_outputs > 0
-        && outputs.iter().all(|o| {
-            o.is_some_and(|l| matches!(g.links[l.0].status_in, Some(Error::Eof)))
-        })
+        && outputs
+            .iter()
+            .all(|o| o.is_some_and(|l| matches!(g.links[l.0].status_in, Some(Error::Eof))))
     {
         for i in &inputs {
             if let Some(l) = i {
@@ -648,7 +648,11 @@ pub fn default_activate<I: FilterImpl + ?Sized>(
         if let Some(l) = i {
             let (has_in, has_out, queued) = {
                 let li = &g.links[l.0];
-                (li.status_in.is_some(), li.status_out.is_some(), !li.fifo.is_empty())
+                (
+                    li.status_in.is_some(),
+                    li.status_out.is_some(),
+                    !li.fifo.is_empty(),
+                )
             };
             if has_in && !has_out {
                 debug_assert!(!queued, "status_in forwarding with frames still queued");
@@ -749,7 +753,10 @@ mod tests {
     }
 
     fn test_def() -> &'static FilterDef {
-        static PAD: PadDef = PadDef { name: "default", needs_writable: false };
+        static PAD: PadDef = PadDef {
+            name: "default",
+            needs_writable: false,
+        };
         static DEF: FilterDef = FilterDef {
             name: "passthrough",
             inputs: &[PAD],

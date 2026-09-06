@@ -147,9 +147,15 @@ mod tests {
     #[test]
     fn rescale_moves_between_timebases() {
         // 1 second worth of ticks: 25 fps → 90 kHz.
-        assert_eq!(rescale_q(25, Rational::new(1, 25), Rational::new(1, 90000)), 90000);
+        assert_eq!(
+            rescale_q(25, Rational::new(1, 25), Rational::new(1, 90000)),
+            90000
+        );
         // And back.
-        assert_eq!(rescale_q(90000, Rational::new(1, 90000), Rational::new(1, 25)), 25);
+        assert_eq!(
+            rescale_q(90000, Rational::new(1, 90000), Rational::new(1, 25)),
+            25
+        );
     }
 
     #[test]
@@ -177,9 +183,18 @@ mod tests {
 
     #[test]
     fn pass_minmax_flag_guards_nopts() {
-        assert_eq!(rescale_rnd(i64::MIN, 1, 1, Rounding::NearInf, true), i64::MIN);
-        assert_eq!(rescale_rnd(i64::MAX, 1, 1, Rounding::NearInf, true), i64::MAX);
-        assert_eq!(rescale_ts(i64::MIN, Rational::new(1, 25), Rational::new(1, 90000)), i64::MIN);
+        assert_eq!(
+            rescale_rnd(i64::MIN, 1, 1, Rounding::NearInf, true),
+            i64::MIN
+        );
+        assert_eq!(
+            rescale_rnd(i64::MAX, 1, 1, Rounding::NearInf, true),
+            i64::MAX
+        );
+        assert_eq!(
+            rescale_ts(i64::MIN, Rational::new(1, 25), Rational::new(1, 90000)),
+            i64::MIN
+        );
         // Without the flag, INT64_MIN computes: C negates through
         // -(uint64_t), yielding exactly -INT64_MAX (not the sentinel).
         assert_eq!(rescale(i64::MIN, 1, 1), -i64::MAX);

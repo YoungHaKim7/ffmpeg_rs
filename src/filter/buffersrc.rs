@@ -87,17 +87,26 @@
 
 use std::any::Any;
 
-use crate::util::color::{ColorRange, ColorSpace};
-use crate::util::error::{Error, Result};
-use crate::util::frame::Frame;
-use crate::util::pixfmt::PixelFormat;
-use crate::util::rational::Rational;
-use crate::{log_debug, log_error, log_verbose, log_warning, NOPTS};
+use crate::{
+    NOPTS, log_debug, log_error, log_verbose, log_warning,
+    util::{
+        color::{ColorRange, ColorSpace},
+        error::{Error, Result},
+        frame::Frame,
+        pixfmt::PixelFormat,
+        rational::Rational,
+    },
+};
 
-use super::filter::{filter_frame, outlink_set_status, set_in_status, FilterDef, FilterFlags, FilterImpl, PadDef, PadRef};
-use super::formats;
-use super::graph::FilterGraph;
-use super::link::NodeId;
+use super::{
+    filter::{
+        FilterDef, FilterFlags, FilterImpl, PadDef, PadRef, filter_frame, outlink_set_status,
+        set_in_status,
+    },
+    formats,
+    graph::FilterGraph,
+    link::NodeId,
+};
 
 // ---------------------------------------------------------------------------
 // State (buffersrc.c:44-72 BufferSourceContext, video-only subset)
@@ -162,8 +171,16 @@ impl FilterImpl for BufferSource {
         // detection to after init, so the C order is restored by scanning
         // keys up front with the same text the leftover check produces.
         const KNOWN_KEYS: &[&str] = &[
-            "width", "height", "video_size", "pix_fmt", "sar", "pixel_aspect",
-            "time_base", "frame_rate", "colorspace", "range",
+            "width",
+            "height",
+            "video_size",
+            "pix_fmt",
+            "sar",
+            "pixel_aspect",
+            "time_base",
+            "frame_rate",
+            "colorspace",
+            "range",
         ];
         if let Some((key, _)) = g.nodes[node.0]
             .opts
@@ -318,9 +335,7 @@ impl FilterImpl for BufferSource {
         _pad: usize,
         _frame: Frame,
     ) -> Result<()> {
-        Err(Error::Unsupported(
-            "buffer source has no input pads".into(),
-        ))
+        Err(Error::Unsupported("buffer source has no input pads".into()))
     }
 
     /// `activate` (buffersrc.c:593-609) — exact three-stage port.
@@ -362,11 +377,7 @@ impl BufferSource {
     /// Phase 1 of `init`: apply recognized entries from the option list, in
     /// order, removing them; a parse failure aborts immediately (C's
     /// av_opt_set return), leaving the remaining entries unapplied.
-    fn apply_options(
-        &mut self,
-        entries: &mut Vec<(String, String)>,
-        name: &str,
-    ) -> Result<()> {
+    fn apply_options(&mut self, entries: &mut Vec<(String, String)>, name: &str) -> Result<()> {
         let mut i = 0;
         while i < entries.len() {
             let (key, val) = entries[i].clone();
@@ -460,8 +471,13 @@ impl BufferSource {
         if self.link_delta {
             // int loglevel = c->prev_delta ? AV_LOG_WARNING : AV_LOG_DEBUG
             // (buffersrc.c:80).
-            let (cw, ch, cf, cc, cr) =
-                (self.w, self.h, self.pix_fmt, self.color_space, self.color_range);
+            let (cw, ch, cf, cc, cr) = (
+                self.w,
+                self.h,
+                self.pix_fmt,
+                self.color_space,
+                self.color_range,
+            );
             // (81) then (82-85), same level. The `fmt:` fields print the
             // numeric pixel format — the PixelFormat::ALL index here, which
             // coincides with C's AVPixelFormat value only for yuv420p (0);
@@ -521,7 +537,10 @@ impl BufferSource {
 /// failure) — used for bad width/height ints, bad rationals and unknown
 /// colorspace/range CONST names.
 fn parse_failed(name: &str, key: &str, val: &str) -> Error {
-    log_error!(Some(name), "Unable to parse \"{key}\" option value \"{val}\"\n");
+    log_error!(
+        Some(name),
+        "Unable to parse \"{key}\" option value \"{val}\"\n"
+    );
     Error::InvalidArgument(format!("Unable to parse \"{key}\" option value \"{val}\""))
 }
 
@@ -547,11 +566,9 @@ fn strtol_i32(s: &str) -> (i32, usize) {
         return (0, 0);
     }
     let text = std::str::from_utf8(&b[start..i]).expect("ascii scan produced ascii slice");
-    let n: i64 = text.parse().unwrap_or(if b[start] == b'-' {
-        i64::MIN
-    } else {
-        i64::MAX
-    });
+    let n: i64 = text
+        .parse()
+        .unwrap_or(if b[start] == b'-' { i64::MIN } else { i64::MAX });
     (n.clamp(i32::MIN as i64, i32::MAX as i64) as i32, i)
 }
 
@@ -839,14 +856,8 @@ fn with_buffer_source<T>(
 ///
 /// KEEP_REF for our Arc-backed `Frame` is a plain `clone()` — plane refcount
 /// bumps, never a pixel copy; there is no non-refcounted copy path to port.
-pub fn buffersrc_add_frame(
-    g: &mut FilterGraph,
-    node: NodeId,
-    frame: Option<&Frame>,
-) -> Result<()> {
-    with_buffer_source(g, node, |g, s| {
-        buffersrc_add_frame_inner(g, s, node, frame)
-    })
+pub fn buffersrc_add_frame(g: &mut FilterGraph, node: NodeId, frame: Option<&Frame>) -> Result<()> {
+    with_buffer_source(g, node, |g, s| buffersrc_add_frame_inner(g, s, node, frame))
 }
 
 /// The body of `av_buffersrc_add_frame_flags` (buffersrc.c:210-289),
@@ -990,11 +1001,7 @@ pub fn buffersrc_get_status(g: &mut FilterGraph, node: NodeId) -> Result<()> {
             }
         }
         // buffersrc.c:307 — s->eof ? AVERROR(EOF) : 0
-        if s.eof {
-            Err(Error::Eof)
-        } else {
-            Ok(())
-        }
+        if s.eof { Err(Error::Eof) } else { Ok(()) }
     })
 }
 
@@ -1112,10 +1119,7 @@ mod tests {
     fn init_invalid_time_base() {
         let mut g = FilterGraph::new();
         let err = g
-            .create_filter(
-                "buffer",
-                "pix_fmt=yuv420p:video_size=320x240:time_base=0/1",
-            )
+            .create_filter("buffer", "pix_fmt=yuv420p:video_size=320x240:time_base=0/1")
             .unwrap_err();
         assert!(matches!(err, Error::InvalidArgument(_)));
         assert!(err.to_string().contains("Invalid time base 0/1"));
@@ -1218,11 +1222,20 @@ mod tests {
         let mut g = FilterGraph::new();
         for (args, needle) in [
             ("width=abc:height=1:pix_fmt=gray:time_base=1/1", "width"),
-            ("pix_fmt=nosuchfmt:video_size=1x1:time_base=1/1", "pixel format"),
+            (
+                "pix_fmt=nosuchfmt:video_size=1x1:time_base=1/1",
+                "pixel format",
+            ),
             ("video_size=1x1:pix_fmt=gray:time_base=25/", "time_base"),
             ("video_size=320:pix_fmt=gray:time_base=1/1", "image size"),
-            ("video_size=1x1:pix_fmt=gray:time_base=1/1:colorspace=ycgco", "colorspace"),
-            ("video_size=1x1:pix_fmt=gray:time_base=1/1:range=widescreen", "range"),
+            (
+                "video_size=1x1:pix_fmt=gray:time_base=1/1:colorspace=ycgco",
+                "colorspace",
+            ),
+            (
+                "video_size=1x1:pix_fmt=gray:time_base=1/1:range=widescreen",
+                "range",
+            ),
         ] {
             let err = g.create_filter("buffer", args).unwrap_err();
             assert!(matches!(err, Error::InvalidArgument(_)), "{args}");
@@ -1371,7 +1384,10 @@ mod tests {
         f.plane(0); // readable
         buffersrc_add_frame(&mut g, src, Some(&f)).unwrap();
         let front = g.links[l.0].fifo.front().unwrap();
-        assert!(std::sync::Arc::ptr_eq(&f.planes[0].buf, &front.planes[0].buf));
+        assert!(std::sync::Arc::ptr_eq(
+            &f.planes[0].buf,
+            &front.planes[0].buf
+        ));
         assert_eq!(front.plane(0), f.plane(0));
     }
 
@@ -1408,7 +1424,11 @@ mod tests {
         let err = buffersrc_add_frame(&mut g, src, Some(&f)).unwrap_err();
         assert!(matches!(err, Error::Eof));
         assert_eq!(buffersrc_get_nb_failed_requests(&mut g, src), 0);
-        assert_eq!(buffersrc_last_pts(&mut g, src), 140, "rejected add must not touch last_pts");
+        assert_eq!(
+            buffersrc_last_pts(&mut g, src),
+            140,
+            "rejected add must not touch last_pts"
+        );
     }
 
     /// The BUFFERSRC_EMPTY shape (buffersrc.c:607-608): request → activate
@@ -1424,7 +1444,10 @@ mod tests {
 
         g.run_once().unwrap(); // activate: BUFFERSRC_EMPTY → Ok(())
         assert_eq!(buffersrc_get_nb_failed_requests(&mut g, src), 1);
-        assert!(g.links[l.0].frame_wanted_out, "C leaves the request standing");
+        assert!(
+            g.links[l.0].frame_wanted_out,
+            "C leaves the request standing"
+        );
         assert!(matches!(g.run_once(), Err(Error::Again)));
 
         // Feeding the source resets the counter and clears the want.
@@ -1566,7 +1589,10 @@ mod tests {
             Rational::new(-1, 25)
         );
         // "1/0" is ACCEPTED (C sscanf takes it; init's av_q2d check passes)
-        assert_eq!(parse_rational("n", "k", "1/0").unwrap(), Rational::new(1, 0));
+        assert_eq!(
+            parse_rational("n", "k", "1/0").unwrap(),
+            Rational::new(1, 0)
+        );
         assert!(parse_rational("n", "k", "25/").is_err());
         assert!(parse_rational("n", "k", "abc").is_err());
         assert!(parse_rational("n", "k", "").is_err());

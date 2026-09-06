@@ -64,8 +64,10 @@
 //! * MMX vertical-filter packing, FAST_BILINEAR `xInc ± 20` hacks
 //!   (`utils.c:1441-1451`), `emms_c()` — SIMD-only.
 
-use crate::util::color::ChromaLocation;
-use crate::util::error::{Error, Result};
+use crate::util::{
+    color::ChromaLocation,
+    error::{Error, Result},
+};
 
 use super::ScaleAlgorithm;
 
@@ -104,7 +106,7 @@ impl TableScaler {
     /// `ceil(2·3.0) = 6`.
     pub(crate) const fn size_factor(self) -> i32 {
         match self {
-            TableScaler::Area => 1,    // "downscale only, for upscale it is bilinear"
+            TableScaler::Area => 1, // "downscale only, for upscale it is bilinear"
             TableScaler::Gauss => 8,
             TableScaler::Sinc => 20,
             TableScaler::Lanczos => 6,
@@ -284,62 +286,64 @@ pub(crate) fn init_filter(
     let mut filter_pos = vec![0i32; dst_len];
 
     // ---- coefficient generation ----------------------------------------
-    let (mut filter2, filter2_size): (Vec<i64>, usize) =
-        if (x_inc - 0x10000).abs() < 10 && src_pos == dst_pos {
-            // utils.c:219-228 — unscaled: single fone tap at identity.
-            filter_pos.iter_mut().enumerate().for_each(|(i, p)| *p = i as i32);
-            (vec![fone; dst_len], 1)
-        } else if x_inc <= 1 << 16 && scaler == TableScaler::Area {
-            // utils.c:244-267 — area upscale / fast-bilinear 2-tap loop
-            // (fast_bilinear itself is not ported; area reaches this).
-            let filter_size = 2usize;
-            let mut f = vec![0i64; dst_len * filter_size];
-            // Note the asymmetric shifts: dstPos term >>8, srcPos term >>7
-            // (utils.c:246) — a >>7 here mirrors every row.
-            let mut x_dst_in_src = ((dst_pos as i64 * x_inc) >> 8) - ((src_pos as i64 * 0x8000) >> 7);
-            for i in 0..dst_len {
-                let mut xx = (x_dst_in_src - ((filter_size as i64 - 1) << 15) + (1 << 15)) >> 16;
-                filter_pos[i] = xx as i32;
-                for j in 0..filter_size {
-                    let mut coeff =
-                        fone - (xx * (1 << 16) - x_dst_in_src).abs() * (fone >> 16);
-                    if coeff < 0 {
-                        coeff = 0;
-                    }
-                    f[i * filter_size + j] = coeff;
-                    xx += 1;
+    let (mut filter2, filter2_size): (Vec<i64>, usize) = if (x_inc - 0x10000).abs() < 10
+        && src_pos == dst_pos
+    {
+        // utils.c:219-228 — unscaled: single fone tap at identity.
+        filter_pos
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, p)| *p = i as i32);
+        (vec![fone; dst_len], 1)
+    } else if x_inc <= 1 << 16 && scaler == TableScaler::Area {
+        // utils.c:244-267 — area upscale / fast-bilinear 2-tap loop
+        // (fast_bilinear itself is not ported; area reaches this).
+        let filter_size = 2usize;
+        let mut f = vec![0i64; dst_len * filter_size];
+        // Note the asymmetric shifts: dstPos term >>8, srcPos term >>7
+        // (utils.c:246) — a >>7 here mirrors every row.
+        let mut x_dst_in_src = ((dst_pos as i64 * x_inc) >> 8) - ((src_pos as i64 * 0x8000) >> 7);
+        for i in 0..dst_len {
+            let mut xx = (x_dst_in_src - ((filter_size as i64 - 1) << 15) + (1 << 15)) >> 16;
+            filter_pos[i] = xx as i32;
+            for j in 0..filter_size {
+                let mut coeff = fone - (xx * (1 << 16) - x_dst_in_src).abs() * (fone >> 16);
+                if coeff < 0 {
+                    coeff = 0;
                 }
-                x_dst_in_src += x_inc;
+                f[i * filter_size + j] = coeff;
+                xx += 1;
             }
-            (f, filter_size)
-        } else {
-            // utils.c:268-381 — general branch (all five kernels on
-            // downscale; everything but area on upscale).
-            let filter_size = general_branch_size(scaler, x_inc, src_len, dst_len as i32);
-            let mut f = vec![0i64; dst_len * filter_size];
-            let mut x_dst_in_src =
-                ((dst_pos as i64 * x_inc) >> 7) - ((src_pos as i64 * 0x10000) >> 7);
-            for i in 0..dst_len {
-                // Division (truncates toward zero), NOT a floor shift — they
-                // differ on the negative border values (utils.c:299).
-                let xx0 = (x_dst_in_src - (filter_size as i64 - 2) * (1 << 16)) / (1 << 17);
-                filter_pos[i] = xx0 as i32;
-                let mut xx = xx0;
-                for j in 0..filter_size {
-                    let mut d = (xx * (1 << 17) - x_dst_in_src).abs() << 13;
-                    if x_inc > 1 << 16 {
-                        // One i64 multiply then ONE truncating division
-                        // (utils.c:308-309) — do not pre-divide.
-                        d = d * dst_len as i64 / src_len as i64;
-                    }
-                    let floatd = d as f64 * (1.0 / (1 << 30) as f64);
-                    f[i * filter_size + j] = kernel_coefficient(scaler, d, floatd, x_inc, fone);
-                    xx += 1;
+            x_dst_in_src += x_inc;
+        }
+        (f, filter_size)
+    } else {
+        // utils.c:268-381 — general branch (all five kernels on
+        // downscale; everything but area on upscale).
+        let filter_size = general_branch_size(scaler, x_inc, src_len, dst_len as i32);
+        let mut f = vec![0i64; dst_len * filter_size];
+        let mut x_dst_in_src = ((dst_pos as i64 * x_inc) >> 7) - ((src_pos as i64 * 0x10000) >> 7);
+        for i in 0..dst_len {
+            // Division (truncates toward zero), NOT a floor shift — they
+            // differ on the negative border values (utils.c:299).
+            let xx0 = (x_dst_in_src - (filter_size as i64 - 2) * (1 << 16)) / (1 << 17);
+            filter_pos[i] = xx0 as i32;
+            let mut xx = xx0;
+            for j in 0..filter_size {
+                let mut d = (xx * (1 << 17) - x_dst_in_src).abs() << 13;
+                if x_inc > 1 << 16 {
+                    // One i64 multiply then ONE truncating division
+                    // (utils.c:308-309) — do not pre-divide.
+                    d = d * dst_len as i64 / src_len as i64;
                 }
-                x_dst_in_src += 2 * x_inc;
+                let floatd = d as f64 * (1.0 / (1 << 30) as f64);
+                f[i * filter_size + j] = kernel_coefficient(scaler, d, floatd, x_inc, fone);
+                xx += 1;
             }
-            (f, filter_size)
-        };
+            x_dst_in_src += 2 * x_inc;
+        }
+        (f, filter_size)
+    };
     // srcFilter/dstFilter convolution (utils.c:385-415) skipped: the graph
     // API always passes NULL, so filter2 == filter and the position
     // recenter `(filterSize-1)/2 - (filter2Size-1)/2` is 0.
@@ -394,8 +398,11 @@ pub(crate) fn init_filter(
     let mut filter = vec![0i64; dst_len * filter_size];
     for i in 0..dst_len {
         for j in 0..filter_size {
-            filter[i * filter_size + j] =
-                if j < filter2_size { filter2[i * filter2_size + j] } else { 0 };
+            filter[i * filter_size + j] = if j < filter2_size {
+                filter2[i * filter2_size + j]
+            } else {
+                0
+            };
         }
         // (SWS_BITEXACT zeroing of j >= minFilterSize skipped: flag not set.)
     }
@@ -462,7 +469,11 @@ pub(crate) fn init_filter(
     // The +3 SIMD tail rows (utils.c:590-599) are skipped — reads are
     // index-bounded here.
 
-    Ok(SwsFilter { filter: out, filter_pos, size: filter_size })
+    Ok(SwsFilter {
+        filter: out,
+        filter_pos,
+        size: filter_size,
+    })
 }
 
 /// `ROUNDED_DIV` (`libavutil/common.h:58`): round-half-away-from-zero.
@@ -499,7 +510,11 @@ fn rounded_div(a: i64, b: i64) -> i64 {
 /// (`sample_plane`) treats Unspecified as LEFT-sited; this table path is the
 /// C-faithful mapping (a documented inconsistency between the two paths).
 pub(crate) fn chroma_pos(loc: ChromaLocation, horizontal: bool) -> i32 {
-    let loc = if loc == ChromaLocation::Unspecified { ChromaLocation::Center } else { loc };
+    let loc = if loc == ChromaLocation::Unspecified {
+        ChromaLocation::Center
+    } else {
+        loc
+    };
     let pos = loc as i32 - 1;
     let (x, y) = ((pos & 1) * 128, ((pos >> 1) ^ i32::from(pos < 4)) * 128);
     let raw = if horizontal { x } else { y };
@@ -604,7 +619,11 @@ pub(crate) fn scale_plane(
             }
             lines.push(&inter[y * dst_w..(y + 1) * dst_w]);
         }
-        yuv2plane_x_8(&mut dst_plane[yy * dst_ls..yy * dst_ls + dst_w], &lines, v.row(yy));
+        yuv2plane_x_8(
+            &mut dst_plane[yy * dst_ls..yy * dst_ls + dst_w],
+            &lines,
+            v.row(yy),
+        );
     }
 }
 
@@ -613,7 +632,13 @@ mod tests {
     use super::*;
 
     fn all_scalers() -> [TableScaler; 5] {
-        [TableScaler::Area, TableScaler::Gauss, TableScaler::Sinc, TableScaler::Lanczos, TableScaler::Spline]
+        [
+            TableScaler::Area,
+            TableScaler::Gauss,
+            TableScaler::Sinc,
+            TableScaler::Lanczos,
+            TableScaler::Spline,
+        ]
     }
 
     /// The anchor, fully hand-derived from the C formulas (verified against
@@ -671,7 +696,11 @@ mod tests {
     /// 0.002 cumulative cutoff).
     #[test]
     fn final_sizes_match_c_reference() {
-        let size = |s, sw, dw| init_filter(x_inc(sw, dw), sw, dw, ONE_H, s, 128, 128).unwrap().size;
+        let size = |s, sw, dw| {
+            init_filter(x_inc(sw, dw), sw, dw, ONE_H, s, 128, 128)
+                .unwrap()
+                .size
+        };
         // 64→32: area 2, gauss 6, lanczos 12, sinc 41, spline 20.
         assert_eq!(size(TableScaler::Area, 64, 32), 2);
         assert_eq!(size(TableScaler::Gauss, 64, 32), 6);
@@ -711,8 +740,14 @@ mod tests {
         // lanczos 13→7 left-sited: 11 taps, negative lobes present.
         let f = init_filter(x_inc(13, 7), 13, 7, ONE_H, TableScaler::Lanczos, 64, 128).unwrap();
         assert_eq!(f.size, 11);
-        assert_eq!(f.row(0), &[6428, 8479, 2871, -1191, -501, 279, 19, 0, 0, 0, 0]);
-        assert_eq!(f.row(1), &[-1527, 1574, 7686, 7997, 1991, -1305, -299, 264, 3, 0, 0]);
+        assert_eq!(
+            f.row(0),
+            &[6428, 8479, 2871, -1191, -501, 279, 19, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            f.row(1),
+            &[-1527, 1574, 7686, 7997, 1991, -1305, -299, 264, 3, 0, 0]
+        );
     }
 
     /// The error-diffusion invariant: every H row sums to exactly 16384 and
@@ -730,7 +765,10 @@ mod tests {
                     for i in 0..dw as usize {
                         let sum: i32 = f.row(i).iter().map(|&c| c as i32).sum();
                         assert_eq!(sum, one as i32, "{scaler:?} {sw}->{dw} {name} row {i}");
-                        assert!((0..sw).contains(&f.filter_pos[i]), "{scaler:?} pos in range");
+                        assert!(
+                            (0..sw).contains(&f.filter_pos[i]),
+                            "{scaler:?} pos in range"
+                        );
                         for (j, &c) in f.row(i).iter().enumerate() {
                             if f.filter_pos[i] as usize + j >= sw as usize {
                                 assert_eq!(c, 0, "{scaler:?} out-of-range tap must be zero");
@@ -765,7 +803,13 @@ mod tests {
         assert!((v2 - shifted).abs() < 1e-12);
 
         // gauss is exp2: 2^(−3·0.25) = 2^−0.75 = 0.5946035575013605…
-        let g = kernel_coefficient(TableScaler::Gauss, (0.5 * (1 << 30) as f64) as i64, 0.5, 0x20000, f2);
+        let g = kernel_coefficient(
+            TableScaler::Gauss,
+            (0.5 * (1 << 30) as f64) as i64,
+            0.5,
+            0x20000,
+            f2,
+        );
         assert_eq!(g, (2f64.powf(-0.75) * f2 as f64) as i64);
         assert!((2f64.powf(-0.75) - 0.5946035575013605).abs() < 1e-15);
 
@@ -777,10 +821,22 @@ mod tests {
         }
 
         // lanczos zeroes floatd > 3.0 after the product.
-        let l = kernel_coefficient(TableScaler::Lanczos, (3.5 * (1 << 30) as f64) as i64, 3.5, 0x20000, f2);
+        let l = kernel_coefficient(
+            TableScaler::Lanczos,
+            (3.5 * (1 << 30) as f64) as i64,
+            3.5,
+            0x20000,
+            f2,
+        );
         assert_eq!(l, 0);
         // …but keeps the small nonzero at 2.5.
-        let l = kernel_coefficient(TableScaler::Lanczos, (2.5 * (1 << 30) as f64) as i64, 2.5, 0x20000, f2);
+        let l = kernel_coefficient(
+            TableScaler::Lanczos,
+            (2.5 * (1 << 30) as f64) as i64,
+            2.5,
+            0x20000,
+            f2,
+        );
         assert!(l > 0 && l < f2 / 4, "{l}");
 
         // sinc at integer floatd (sin(n·π) ≈ 0 in double) quantizes tiny.
@@ -820,14 +876,31 @@ mod tests {
             for (sw, sh, dw, dh) in [(9, 7, 17, 13), (32, 24, 16, 12)] {
                 let src = vec![137u8; sw * sh];
                 let mut dst = vec![0u8; dw * dh];
-                let plan = build_plan(scaler, (sw as i32, sh as i32), (dw as i32, dh as i32), ChromaLocation::Unspecified)
-                    .unwrap_or_else(|e| panic!("{scaler:?}: {e}"));
-                scale_plane(&src, sw, (sw as i32, sh as i32), &mut dst, dw, &plan.h_lum, &plan.v_lum);
-                assert!(dst.iter().all(|&b| b == 137), "{scaler:?} {sw}x{sh}->{dw}x{dh}: {:?}", {
-                    let min = *dst.iter().min().unwrap();
-                    let max = *dst.iter().max().unwrap();
-                    (min, max)
-                });
+                let plan = build_plan(
+                    scaler,
+                    (sw as i32, sh as i32),
+                    (dw as i32, dh as i32),
+                    ChromaLocation::Unspecified,
+                )
+                .unwrap_or_else(|e| panic!("{scaler:?}: {e}"));
+                scale_plane(
+                    &src,
+                    sw,
+                    (sw as i32, sh as i32),
+                    &mut dst,
+                    dw,
+                    &plan.h_lum,
+                    &plan.v_lum,
+                );
+                assert!(
+                    dst.iter().all(|&b| b == 137),
+                    "{scaler:?} {sw}x{sh}->{dw}x{dh}: {:?}",
+                    {
+                        let min = *dst.iter().min().unwrap();
+                        let max = *dst.iter().max().unwrap();
+                        (min, max)
+                    }
+                );
             }
         }
     }
@@ -857,14 +930,33 @@ mod tests {
     #[test]
     fn cascade_ratio_errors() {
         // sinc 1920→120: raw size 1+ceil(20·16)=321, post-reduction ≥ 256.
-        let err = init_filter(x_inc(1920, 120), 1920, 120, ONE_H, TableScaler::Sinc, 128, 128)
-            .unwrap_err();
+        let err = init_filter(
+            x_inc(1920, 120),
+            1920,
+            120,
+            ONE_H,
+            TableScaler::Sinc,
+            128,
+            128,
+        )
+        .unwrap_err();
         match err {
             Error::Unsupported(msg) => assert!(msg.contains("cascaded"), "{msg}"),
             other => panic!("expected Unsupported, got {other:?}"),
         }
         // …while ordinary ratios stay well clear.
-        assert!(init_filter(x_inc(1920, 480), 1920, 480, ONE_H, TableScaler::Sinc, 128, 128).is_ok());
+        assert!(
+            init_filter(
+                x_inc(1920, 480),
+                1920,
+                480,
+                ONE_H,
+                TableScaler::Sinc,
+                128,
+                128
+            )
+            .is_ok()
+        );
     }
 
     /// Chroma siting positions — the §`chroma_pos` table.
@@ -904,4 +996,3 @@ mod tests {
         assert_eq!(f.row(0), &[12240, 4144, 0]);
     }
 }
-

@@ -128,7 +128,11 @@ impl Rational {
         let tmp = self.num as i64 * other.den as i64 - other.num as i64 * self.den as i64;
         if tmp != 0 {
             let negative = (tmp < 0) ^ (self.den < 0) ^ (other.den < 0);
-            Some(if negative { Ordering::Less } else { Ordering::Greater })
+            Some(if negative {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            })
         } else if self.den != 0 && other.den != 0 {
             Some(Ordering::Equal)
         } else if self.num != 0 && other.num != 0 {
@@ -151,7 +155,10 @@ impl Rational {
     /// `av_inv_q` — `{den, num}`. `0/0` and infinities swap into themselves
     /// and their negations respectively, exactly as in C.
     pub const fn inv(self) -> Rational {
-        Rational { num: self.den, den: self.num }
+        Rational {
+            num: self.den,
+            den: self.num,
+        }
     }
 
     /// `av_d2q(d, max)` — approximate a double with a rational whose parts
@@ -163,7 +170,10 @@ impl Rational {
             return Rational { num: 0, den: 0 };
         }
         if d.abs() > i32::MAX as f64 + 3.0 {
-            return Rational { num: if d < 0.0 { -1 } else { 1 }, den: 0 };
+            return Rational {
+                num: if d < 0.0 { -1 } else { 1 },
+                den: 0,
+            };
         }
         let (mantissa, exponent) = frexp(d);
         let _ = mantissa; // C's av_d2q only uses the exponent for scaling
@@ -241,7 +251,10 @@ impl Div for Rational {
 impl Neg for Rational {
     type Output = Rational;
     fn neg(self) -> Rational {
-        Rational { num: -self.num, den: self.den }
+        Rational {
+            num: -self.num,
+            den: self.den,
+        }
     }
 }
 
@@ -300,18 +313,36 @@ mod tests {
     #[test]
     fn cmp_q_orders_and_rejects_unknown() {
         use std::cmp::Ordering;
-        assert_eq!(Rational::new(1, 2).cmp_q(Rational::new(2, 3)), Some(Ordering::Less));
-        assert_eq!(Rational::new(-1, 2).cmp_q(Rational::new(1, -2)), Some(Ordering::Equal));
+        assert_eq!(
+            Rational::new(1, 2).cmp_q(Rational::new(2, 3)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            Rational::new(-1, 2).cmp_q(Rational::new(1, -2)),
+            Some(Ordering::Equal)
+        );
         // Negative denominator flips the visible sign.
-        assert_eq!(Rational::new(1, 2).cmp_q(Rational::new(1, -2)), Some(Ordering::Greater));
+        assert_eq!(
+            Rational::new(1, 2).cmp_q(Rational::new(1, -2)),
+            Some(Ordering::Greater)
+        );
         // Infinities compare by sign.
-        assert_eq!(Rational::new(1, 0).cmp_q(Rational::new(1, 0)), Some(Ordering::Equal));
-        assert_eq!(Rational::new(1, 0).cmp_q(Rational::new(-1, 0)), Some(Ordering::Greater));
+        assert_eq!(
+            Rational::new(1, 0).cmp_q(Rational::new(1, 0)),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            Rational::new(1, 0).cmp_q(Rational::new(-1, 0)),
+            Some(Ordering::Greater)
+        );
         // Unknown (0/0) vs a value is incomparable (INT_MIN in C)…
         assert_eq!(Rational::UNKNOWN.cmp_q(Rational::ONE), None);
         assert_eq!(Rational::UNKNOWN.cmp_q(Rational::UNKNOWN), None);
         // …but zero vs infinity is a normal comparison (tmp != 0).
-        assert_eq!(Rational::ZERO.cmp_q(Rational::new(1, 0)), Some(Ordering::Less));
+        assert_eq!(
+            Rational::ZERO.cmp_q(Rational::new(1, 0)),
+            Some(Ordering::Less)
+        );
     }
 
     #[test]

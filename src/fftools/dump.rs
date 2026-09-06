@@ -17,13 +17,12 @@
 //! blocks, and the `gbr/unknown/unknown` colorspace triplet — our port only
 //! carries range + field order into the parenthetical.
 
-use crate::codec::params::{CodecId, FieldOrder};
-use crate::format::{InputFormatContext, OutputFormatContext, Stream};
-use crate::log_info;
-use crate::util::color::ColorRange;
-use crate::util::mathematics;
-use crate::util::pixfmt::PixelFormat;
-use crate::util::rational::Rational;
+use crate::{
+    codec::params::{CodecId, FieldOrder},
+    format::{InputFormatContext, OutputFormatContext, Stream},
+    log_info,
+    util::{color::ColorRange, mathematics, pixfmt::PixelFormat, rational::Rational},
+};
 
 /// `avcodec_pix_fmt_to_codec_tag` subset — the FIRST matching row of
 /// `libavcodec/raw_pix_fmt_tags.h` per format (formats absent here have no
@@ -157,24 +156,37 @@ pub fn dump_input(ctx: &InputFormatContext) {
     // Bitrate from the file size when the duration is known.
     let size = ctx.io().size();
     let bitrate = if duration_secs > 0.0 {
-        format!("{} kb/s", (size as f64 * 8.0 / duration_secs / 1000.0) as i64)
+        format!(
+            "{} kb/s",
+            (size as f64 * 8.0 / duration_secs / 1000.0) as i64
+        )
     } else {
         "N/A".into()
     };
-    log_info!(None, "  Duration: {}, start: 0.000000, bitrate: {}",
-        time_string(duration_secs), bitrate);
+    log_info!(
+        None,
+        "  Duration: {}, start: 0.000000, bitrate: {}",
+        time_string(duration_secs),
+        bitrate
+    );
 
     let mut extras: Vec<String> = Vec::new();
     if let Some(sar) = dar_string(st) {
         extras.push(sar);
     }
     let fps = fps_string(st.avg_frame_rate);
-    log_info!(None, "  Stream #0:0: Video: {}, {}, {}x{}{}, {} fps, {} tbr, {} tbn",
+    log_info!(
+        None,
+        "  Stream #0:0: Video: {}, {}, {}x{}{}, {} fps, {} tbr, {} tbn",
         codec_prefix(st),
         pixfmt_parenthetical(st),
         st.codecpar.width,
         st.codecpar.height,
-        if extras.is_empty() { String::new() } else { format!(", {}", extras.join(" ")) },
+        if extras.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", extras.join(" "))
+        },
         fps,
         fps,
         st.time_base.den,
@@ -200,7 +212,9 @@ pub fn dump_output(ctx: &OutputFormatContext) {
         Some(first) if first.starts_with('[') => format!(" {}", extras.join(", ")),
         Some(_) => format!(", {}", extras.join(", ")),
     };
-    log_info!(None, "  Stream #0:0: Video: {}, {}, {}x{}{}, {} fps, {} tbn",
+    log_info!(
+        None,
+        "  Stream #0:0: Video: {}, {}, {}x{}{}, {} fps, {} tbn",
         codec_prefix(st),
         pixfmt_parenthetical(st),
         st.codecpar.width,
@@ -214,7 +228,10 @@ pub fn dump_output(ctx: &OutputFormatContext) {
 /// ffmpeg's mapping banner.
 pub fn dump_stream_mapping() {
     log_info!(None, "Stream mapping:");
-    log_info!(None, "  Stream #0:0 -> #0:0 (rawvideo (native) -> rawvideo (native))");
+    log_info!(
+        None,
+        "  Stream #0:0 -> #0:0 (rawvideo (native) -> rawvideo (native))"
+    );
 }
 
 /// Progress/summary time (`time=00:00:01.00` in `print_report`), from an

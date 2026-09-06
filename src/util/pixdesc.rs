@@ -112,7 +112,13 @@ pub fn descriptor(fmt: PixelFormat) -> &'static PixFmtDescriptor {
 
 // Component shorthand: (plane, step, offset, shift, depth).
 const fn c(plane: u8, step: u8, offset: u8, shift: u8, depth: u8) -> ComponentDescriptor {
-    ComponentDescriptor { plane, step, offset, shift, depth }
+    ComponentDescriptor {
+        plane,
+        step,
+        offset,
+        shift,
+        depth,
+    }
 }
 
 const DESC_YUV420P: PixFmtDescriptor = PixFmtDescriptor {
@@ -120,7 +126,12 @@ const DESC_YUV420P: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 1,
     log2_chroma_h: 1,
-    comp: [c(0, 1, 0, 0, 8), c(1, 1, 0, 0, 8), c(2, 1, 0, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 1, 0, 0, 8),
+        c(1, 1, 0, 0, 8),
+        c(2, 1, 0, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -129,7 +140,12 @@ const DESC_YUV422P: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 1,
     log2_chroma_h: 0,
-    comp: [c(0, 1, 0, 0, 8), c(1, 1, 0, 0, 8), c(2, 1, 0, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 1, 0, 0, 8),
+        c(1, 1, 0, 0, 8),
+        c(2, 1, 0, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -138,7 +154,12 @@ const DESC_YUV444P: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 0,
     log2_chroma_h: 0,
-    comp: [c(0, 1, 0, 0, 8), c(1, 1, 0, 0, 8), c(2, 1, 0, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 1, 0, 0, 8),
+        c(1, 1, 0, 0, 8),
+        c(2, 1, 0, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -147,7 +168,12 @@ const DESC_YUV420P10LE: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 1,
     log2_chroma_h: 1,
-    comp: [c(0, 2, 0, 0, 10), c(1, 2, 0, 0, 10), c(2, 2, 0, 0, 10), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 2, 0, 0, 10),
+        c(1, 2, 0, 0, 10),
+        c(2, 2, 0, 0, 10),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -156,7 +182,12 @@ const DESC_YUV422P10LE: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 1,
     log2_chroma_h: 0,
-    comp: [c(0, 2, 0, 0, 10), c(1, 2, 0, 0, 10), c(2, 2, 0, 0, 10), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 2, 0, 0, 10),
+        c(1, 2, 0, 0, 10),
+        c(2, 2, 0, 0, 10),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -165,7 +196,12 @@ const DESC_YUV444P10LE: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 0,
     log2_chroma_h: 0,
-    comp: [c(0, 2, 0, 0, 10), c(1, 2, 0, 0, 10), c(2, 2, 0, 0, 10), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 2, 0, 0, 10),
+        c(1, 2, 0, 0, 10),
+        c(2, 2, 0, 0, 10),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -174,7 +210,12 @@ const DESC_YUV420P16LE: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 1,
     log2_chroma_h: 1,
-    comp: [c(0, 2, 0, 0, 16), c(1, 2, 0, 0, 16), c(2, 2, 0, 0, 16), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 2, 0, 0, 16),
+        c(1, 2, 0, 0, 16),
+        c(2, 2, 0, 0, 16),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -183,7 +224,12 @@ const DESC_YUV444P16LE: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 0,
     log2_chroma_h: 0,
-    comp: [c(0, 2, 0, 0, 16), c(1, 2, 0, 0, 16), c(2, 2, 0, 0, 16), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 2, 0, 0, 16),
+        c(1, 2, 0, 0, 16),
+        c(2, 2, 0, 0, 16),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -193,7 +239,12 @@ const DESC_NV12: PixFmtDescriptor = PixFmtDescriptor {
     log2_chroma_w: 1,
     log2_chroma_h: 1,
     // U and V share plane 1, interleaved at 2-byte steps.
-    comp: [c(0, 1, 0, 0, 8), c(1, 2, 0, 0, 8), c(1, 2, 1, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 1, 0, 0, 8),
+        c(1, 2, 0, 0, 8),
+        c(1, 2, 1, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -202,7 +253,12 @@ const DESC_NV21: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 1,
     log2_chroma_h: 1,
-    comp: [c(0, 1, 0, 0, 8), c(1, 2, 1, 0, 8), c(1, 2, 0, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 1, 0, 0, 8),
+        c(1, 2, 1, 0, 8),
+        c(1, 2, 0, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR,
 };
 
@@ -211,7 +267,12 @@ const DESC_YUYV422: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 1,
     log2_chroma_h: 0,
-    comp: [c(0, 2, 0, 0, 8), c(0, 4, 1, 0, 8), c(0, 4, 3, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 2, 0, 0, 8),
+        c(0, 4, 1, 0, 8),
+        c(0, 4, 3, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags(0),
 };
 
@@ -220,7 +281,12 @@ const DESC_UYVY422: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 1,
     log2_chroma_h: 0,
-    comp: [c(0, 2, 1, 0, 8), c(0, 4, 0, 0, 8), c(0, 4, 2, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 2, 1, 0, 8),
+        c(0, 4, 0, 0, 8),
+        c(0, 4, 2, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags(0),
 };
 
@@ -229,7 +295,12 @@ const DESC_GRAY8: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 1,
     log2_chroma_w: 0,
     log2_chroma_h: 0,
-    comp: [c(0, 1, 0, 0, 8), c(0, 0, 0, 0, 0), c(0, 0, 0, 0, 0), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 1, 0, 0, 8),
+        c(0, 0, 0, 0, 0),
+        c(0, 0, 0, 0, 0),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags(0),
 };
 
@@ -238,7 +309,12 @@ const DESC_GRAY16LE: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 1,
     log2_chroma_w: 0,
     log2_chroma_h: 0,
-    comp: [c(0, 2, 0, 0, 16), c(0, 0, 0, 0, 0), c(0, 0, 0, 0, 0), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 2, 0, 0, 16),
+        c(0, 0, 0, 0, 0),
+        c(0, 0, 0, 0, 0),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags(0),
 };
 
@@ -247,7 +323,12 @@ const DESC_RGB24: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 0,
     log2_chroma_h: 0,
-    comp: [c(0, 3, 0, 0, 8), c(0, 3, 1, 0, 8), c(0, 3, 2, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 3, 0, 0, 8),
+        c(0, 3, 1, 0, 8),
+        c(0, 3, 2, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::RGB,
 };
 
@@ -256,7 +337,12 @@ const DESC_BGR24: PixFmtDescriptor = PixFmtDescriptor {
     nb_components: 3,
     log2_chroma_w: 0,
     log2_chroma_h: 0,
-    comp: [c(0, 3, 2, 0, 8), c(0, 3, 1, 0, 8), c(0, 3, 0, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 3, 2, 0, 8),
+        c(0, 3, 1, 0, 8),
+        c(0, 3, 0, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::RGB,
 };
 
@@ -323,7 +409,12 @@ const DESC_RGB565LE: PixFmtDescriptor = PixFmtDescriptor {
     log2_chroma_h: 0,
     // Sub-byte layout: R at bit 3 of byte 1 (5 bits), G at bit 5 of byte 0
     // (6 bits), B at bit 0 of byte 0 (5 bits).
-    comp: [c(0, 2, 1, 3, 5), c(0, 2, 0, 5, 6), c(0, 2, 0, 0, 5), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(0, 2, 1, 3, 5),
+        c(0, 2, 0, 5, 6),
+        c(0, 2, 0, 0, 5),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::RGB,
 };
 
@@ -333,7 +424,12 @@ const DESC_GBRP: PixFmtDescriptor = PixFmtDescriptor {
     log2_chroma_w: 0,
     log2_chroma_h: 0,
     // Memory plane order is G, B, R — components name planes 2/0/1.
-    comp: [c(2, 1, 0, 0, 8), c(0, 1, 0, 0, 8), c(1, 1, 0, 0, 8), c(0, 0, 0, 0, 0)],
+    comp: [
+        c(2, 1, 0, 0, 8),
+        c(0, 1, 0, 0, 8),
+        c(1, 1, 0, 0, 8),
+        c(0, 0, 0, 0, 0),
+    ],
     flags: PixFmtFlags::PLANAR.union(PixFmtFlags::RGB),
 };
 
@@ -348,7 +444,9 @@ const DESC_GBRAP: PixFmtDescriptor = PixFmtDescriptor {
         c(1, 1, 0, 0, 8),
         c(3, 1, 0, 0, 8),
     ],
-    flags: PixFmtFlags::PLANAR.union(PixFmtFlags::RGB).union(PixFmtFlags::ALPHA),
+    flags: PixFmtFlags::PLANAR
+        .union(PixFmtFlags::RGB)
+        .union(PixFmtFlags::ALPHA),
 };
 
 /// `av_pix_fmt_count_planes` — highest plane index in use, +1.
@@ -403,11 +501,35 @@ mod tests {
 
     #[test]
     fn flags() {
-        assert!(descriptor(PixelFormat::Yuv420p).flags.contains(PixFmtFlags::PLANAR));
-        assert!(!descriptor(PixelFormat::Yuv420p).flags.contains(PixFmtFlags::RGB));
-        assert!(descriptor(PixelFormat::Gbrp).flags.contains(PixFmtFlags::PLANAR));
-        assert!(descriptor(PixelFormat::Gbrp).flags.contains(PixFmtFlags::RGB));
-        assert!(descriptor(PixelFormat::Rgba).flags.contains(PixFmtFlags::ALPHA));
-        assert!(!descriptor(PixelFormat::Yuyv422).flags.contains(PixFmtFlags::PLANAR));
+        assert!(
+            descriptor(PixelFormat::Yuv420p)
+                .flags
+                .contains(PixFmtFlags::PLANAR)
+        );
+        assert!(
+            !descriptor(PixelFormat::Yuv420p)
+                .flags
+                .contains(PixFmtFlags::RGB)
+        );
+        assert!(
+            descriptor(PixelFormat::Gbrp)
+                .flags
+                .contains(PixFmtFlags::PLANAR)
+        );
+        assert!(
+            descriptor(PixelFormat::Gbrp)
+                .flags
+                .contains(PixFmtFlags::RGB)
+        );
+        assert!(
+            descriptor(PixelFormat::Rgba)
+                .flags
+                .contains(PixFmtFlags::ALPHA)
+        );
+        assert!(
+            !descriptor(PixelFormat::Yuyv422)
+                .flags
+                .contains(PixFmtFlags::PLANAR)
+        );
     }
 }

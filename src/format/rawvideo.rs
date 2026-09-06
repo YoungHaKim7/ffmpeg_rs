@@ -12,18 +12,25 @@
 //! packet is passed through; the rawvideo *decoder* rejects it, matching
 //! C's effective behavior through raw_decode's size check).
 
-use crate::codec::packet::{Packet, PacketFlags};
-use crate::codec::params::{CodecId, MediaType};
-use crate::imgutils;
-use crate::log_error;
-use crate::util::error::{Error, Result};
-use crate::util::mathematics;
-use crate::util::rational::Rational;
+use crate::{
+    codec::{
+        packet::{Packet, PacketFlags},
+        params::{CodecId, MediaType},
+    },
+    imgutils, log_error,
+    util::{
+        error::{Error, Result},
+        mathematics,
+        rational::Rational,
+    },
+};
 
-use super::demux::{Demuxer, RawVideoDemuxOptions};
-use super::io::IoContext;
-use super::mux::Muxer;
-use super::Stream;
+use super::{
+    Stream,
+    demux::{Demuxer, RawVideoDemuxOptions},
+    io::IoContext,
+    mux::Muxer,
+};
 
 /// `ff_rawvideo_demuxer`'s private state (`RawVideoDemuxerContext`).
 pub struct RawVideoDemuxer {
@@ -68,19 +75,20 @@ impl Demuxer for RawVideoDemuxer {
 
         let packet_size = imgutils::get_buffer_size(self.pix_fmt, self.width, self.height, 1)?;
         if packet_size == 0 {
-            log_error!(Some("rawvideo"), "Invalid frame size {}x{}.",
-                self.width, self.height);
+            log_error!(
+                Some("rawvideo"),
+                "Invalid frame size {}x{}.",
+                self.width,
+                self.height
+            );
             return Err(Error::InvalidArgument("invalid frame size".into()));
         }
         self.packet_size = packet_size;
         self.time_base = st.time_base;
 
         // bit_rate = size·8 / time_base (rawvideodec.c:96).
-        st.codecpar.bit_rate = mathematics::rescale_q(
-            packet_size as i64 * 8,
-            Rational::ONE,
-            st.time_base,
-        );
+        st.codecpar.bit_rate =
+            mathematics::rescale_q(packet_size as i64 * 8, Rational::ONE, st.time_base);
 
         // Duration is knowable for seekable inputs; C leaves it unset for
         // pipes. We set it when the size is real (regular files).
@@ -128,7 +136,12 @@ impl Muxer for RawVideoMuxer {
         Ok(())
     }
 
-    fn write_packet(&mut self, io: &mut IoContext, _streams: &[Stream], pkt: &Packet) -> Result<()> {
+    fn write_packet(
+        &mut self,
+        io: &mut IoContext,
+        _streams: &[Stream],
+        pkt: &Packet,
+    ) -> Result<()> {
         io.write_all(pkt.as_slice())
     }
 }

@@ -25,16 +25,20 @@
 //! The port is faithful *for the subset the Y4M/rawvideo pipeline can
 //! reach*, which is the Phase 1 contract.
 
-use crate::codec::packet::{Packet, PacketFlags};
-use crate::codec::params::{CodecId, CodecParameters, MediaType};
-use crate::codec::traits::{Decoder, Encoder};
-use crate::imgutils;
-use crate::log_error;
-use crate::mathematics;
-use crate::util::error::{Error, Result};
-use crate::util::rational::Rational;
-use crate::util::frame::{Frame, FrameFlags, PictureType};
-use crate::NOPTS;
+use crate::{
+    NOPTS,
+    codec::{
+        packet::{Packet, PacketFlags},
+        params::{CodecId, CodecParameters, MediaType},
+        traits::{Decoder, Encoder},
+    },
+    imgutils, log_error, mathematics,
+    util::{
+        error::{Error, Result},
+        frame::{Frame, FrameFlags, PictureType},
+        rational::Rational,
+    },
+};
 
 /// `ff_rawvideo_decoder` — decode rawvideo packets into frames.
 #[derive(Debug, Default)]
@@ -283,9 +287,21 @@ mod tests {
         enc.init(&params).unwrap();
 
         let mut frame = Frame::alloc(PixelFormat::Yuv420p, 64, 48).unwrap();
-        frame.plane_mut(0).iter_mut().enumerate().for_each(|(i, b)| *b = (i % 251) as u8);
-        frame.plane_mut(1).iter_mut().enumerate().for_each(|(i, b)| *b = (i % 13) as u8);
-        frame.plane_mut(2).iter_mut().enumerate().for_each(|(i, b)| *b = (i % 7) as u8);
+        frame
+            .plane_mut(0)
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, b)| *b = (i % 251) as u8);
+        frame
+            .plane_mut(1)
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, b)| *b = (i % 13) as u8);
+        frame
+            .plane_mut(2)
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, b)| *b = (i % 7) as u8);
         frame.pts = 3;
         frame.duration = 1;
         frame.time_base = Rational::new(1, 25);

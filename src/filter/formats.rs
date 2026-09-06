@@ -20,12 +20,16 @@
 //! alpha-mode negotiation axis is out of scope; the debug `PRINT_NAME`
 //! dump helpers (formats.c:350-381).
 
-use crate::util::color::{ColorRange, ColorSpace};
-use crate::util::pixdesc::{descriptor, PixFmtDescriptor, PixFmtFlags};
-use crate::util::pixfmt::PixelFormat;
+use crate::util::{
+    color::{ColorRange, ColorSpace},
+    pixdesc::{PixFmtDescriptor, PixFmtFlags, descriptor},
+    pixfmt::PixelFormat,
+};
 
-use super::graph::FilterGraph;
-use super::link::{FormatsConfig, ListIdx};
+use super::{
+    graph::FilterGraph,
+    link::{FormatsConfig, ListIdx},
+};
 
 // ---------------------------------------------------------------------------
 // "all" lists (formats.c:603-734)
@@ -53,11 +57,11 @@ pub fn all_color_spaces() -> Vec<ColorSpace> {
         Bt709,       // 1
         // Unspecified (2) skipped — already pushed
         // Reserved (3) skipped
-        Fcc,        // 4
-        Bt470bg,    // 5
-        Smpte170m,  // 6
-        Smpte240m,  // 7
-        Bt2020Ncl,  // 9
+        Fcc,       // 4
+        Bt470bg,   // 5
+        Smpte170m, // 6
+        Smpte240m, // 7
+        Bt2020Ncl, // 9
     ]
 }
 
@@ -386,12 +390,7 @@ fn padded_bits_per_pixel(desc: &PixFmtDescriptor) -> i32 {
 /// Not ported: the HWACCEL early-outs (3600-3606 — no hw formats here); the
 /// two `AV_PIX_FMT_PAL8` special cases (3621-3622, 3627, 3718-3722 — no
 /// palette formats here).
-fn get_pix_fmt_score(
-    dst: PixelFormat,
-    src: PixelFormat,
-    loss: &mut u32,
-    consider: u32,
-) -> i32 {
+fn get_pix_fmt_score(dst: PixelFormat, src: PixelFormat, loss: &mut u32, consider: u32) -> i32 {
     let src_desc = descriptor(src);
     let dst_desc = descriptor(dst);
     let mut score: i32 = i32::MAX - 1;
@@ -407,9 +406,7 @@ fn get_pix_fmt_score(
 
     let src_color = get_color_type(src_desc);
     let dst_color = get_color_type(dst_desc);
-    let nb_components = src_desc
-        .nb_components
-        .min(dst_desc.nb_components) as usize;
+    let nb_components = src_desc.nb_components.min(dst_desc.nb_components) as usize;
 
     // Depth per component (3626-3639): shallower dst loses DEPTH (big
     // penalty), deeper dst loses EXCESS_DEPTH (tiny preference for exact).
@@ -504,7 +501,9 @@ fn get_pix_fmt_score(
     }
 
     // Chroma loss: dst gray, src colored (3709-3713).
-    if dst_color == ColorType::Gray && src_color != ColorType::Gray && (consider & Loss::CHROMA) != 0
+    if dst_color == ColorType::Gray
+        && src_color != ColorType::Gray
+        && (consider & Loss::CHROMA) != 0
     {
         *loss |= Loss::CHROMA;
         score -= 2 * 65536;
@@ -556,11 +555,7 @@ pub fn find_best_pix_fmt_of_2(
         let pb1 = padded_bits_per_pixel(desc1);
         let pb2 = padded_bits_per_pixel(desc2);
         if pb2 != pb1 {
-            if pb2 < pb1 {
-                dst2
-            } else {
-                d1
-            }
+            if pb2 < pb1 { dst2 } else { d1 }
         } else if desc2.nb_components < desc1.nb_components {
             dst2
         } else {
@@ -605,7 +600,10 @@ mod tests {
     // ---- chroma/alpha guard (formats.c:108-131) ----------------------------
 
     /// Build a graph with two links whose halves carry the two lists.
-    fn graph_with_links(a: Vec<PixelFormat>, b: Vec<PixelFormat>) -> (FilterGraph, ListIdx, ListIdx) {
+    fn graph_with_links(
+        a: Vec<PixelFormat>,
+        b: Vec<PixelFormat>,
+    ) -> (FilterGraph, ListIdx, ListIdx) {
         let mut g = FilterGraph::new();
         let ia = g.alloc_pix_list(a);
         let ib = g.alloc_pix_list(b);
@@ -622,8 +620,7 @@ mod tests {
         // (chroma1 false) while both sides carry chroma formats (chroma2
         // true) — merging would silently drop chroma, so it must refuse and
         // leave both lists untouched.
-        let (mut g, ia, ib) =
-            graph_with_links(vec![Rgb24, Gray8], vec![Yuv420p, Gray8]);
+        let (mut g, ia, ib) = graph_with_links(vec![Rgb24, Gray8], vec![Yuv420p, Gray8]);
         assert!(!can_merge_pix_fmts(&g, ia, ib));
         assert!(!merge_pix_fmts(&mut g, ia, ib));
         assert_eq!(g.fmt_lists[ia as usize], vec![Rgb24, Gray8]);
@@ -636,8 +633,7 @@ mod tests {
     #[test]
     fn merge_intersects_in_a_order_and_sweeps() {
         // a = incfg = src's list; survivor keeps a's order.
-        let (mut g, ia, ib) =
-            graph_with_links(vec![Rgb24, Yuv420p, Gray8], vec![Yuv420p, Gray8]);
+        let (mut g, ia, ib) = graph_with_links(vec![Rgb24, Yuv420p, Gray8], vec![Yuv420p, Gray8]);
         assert!(can_merge_pix_fmts(&g, ia, ib));
         assert!(merge_pix_fmts(&mut g, ia, ib));
         // Intersection preserving a's element order.
@@ -697,10 +693,7 @@ mod tests {
 
     #[test]
     fn best_of_2_seeding_none_returns_dst2() {
-        assert_eq!(
-            find_best_pix_fmt_of_2(None, Rgb24, Yuv420p, false),
-            Rgb24
-        );
+        assert_eq!(find_best_pix_fmt_of_2(None, Rgb24, Yuv420p, false), Rgb24);
     }
 
     #[test]

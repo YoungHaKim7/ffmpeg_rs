@@ -24,10 +24,10 @@ use crate::util::frame::Frame;
 use crate::util::pixfmt::PixelFormat;
 use crate::{log_error, log_verbose};
 
+use super::Options;
 use super::filter::{FilterDef, FilterNode, PadRef};
 use super::formats;
 use super::link::{Link, LinkId, LinkInitState, ListIdx, NodeId};
-use super::Options;
 use crate::util::rational::Rational;
 
 /// One negotiation axis — C's `AVFilterFormatsMerger.offset` field selection
@@ -138,9 +138,8 @@ impl FilterGraph {
     /// `ff_filter_alloc` (avfilter.c:701-798): allocate an UNINITIALIZED
     /// instance from the registry. Thread init (174-184) dropped.
     pub fn alloc_filter(&mut self, name: &str) -> Result<NodeId> {
-        let def: &'static FilterDef = super::filter_def(name).ok_or_else(|| {
-            Error::NotFound(format!("No such filter: '{name}'"))
-        })?;
+        let def: &'static FilterDef = super::filter_def(name)
+            .ok_or_else(|| Error::NotFound(format!("No such filter: '{name}'")))?;
         self.nodes.push(FilterNode {
             def,
             name: def.name.to_string(),
@@ -225,7 +224,10 @@ impl FilterGraph {
             let n = &self.nodes[dst.0];
             (n.inputs.len(), n.inputs.get(dstpad).copied().flatten())
         };
-        if srcpad >= src_out_len || dstpad >= dst_in_len || src_taken.is_some() || dst_taken.is_some()
+        if srcpad >= src_out_len
+            || dstpad >= dst_in_len
+            || src_taken.is_some()
+            || dst_taken.is_some()
         {
             return Err(Error::InvalidArgument(format!(
                 "cannot link {}:{} -> {}:{} (pad out of range or already linked)",
@@ -429,8 +431,8 @@ impl FilterGraph {
 
                     // (649-701) preemptively settle the converter's own
                     // links on every scale-bearing axis.
-                    let inlink = self.nodes[conv.0].inputs[0]
-                        .expect("inserted converter has an input link");
+                    let inlink =
+                        self.nodes[conv.0].inputs[0].expect("inserted converter has an input link");
                     let outlink = self.nodes[conv.0].outputs[0]
                         .expect("inserted converter has an output link");
                     let (src_name, dst_name) = {
@@ -755,8 +757,7 @@ impl FilterGraph {
             // reference format. has_alpha: C's FIXME keeps the
             // nb_components-even approximation.
             let ref_fmt = self.links[refl.0].format.expect("reference link picked");
-            let has_alpha =
-                crate::util::pixdesc::descriptor(ref_fmt).nb_components % 2 == 0;
+            let has_alpha = crate::util::pixdesc::descriptor(ref_fmt).nb_components % 2 == 0;
             let mut best: Option<PixelFormat> = None;
             for &p in &self.fmt_lists[list as usize] {
                 best = Some(formats::find_best_pix_fmt_of_2(best, p, ref_fmt, has_alpha));
@@ -772,18 +773,18 @@ impl FilterGraph {
         if !formats::regular_yuv(fmt) {
             // Explicitly YUV-only fields get sane values otherwise.
             let desc = crate::util::pixdesc::descriptor(fmt);
-            self.links[link.0].color_range = if desc.flags.contains(crate::util::pixdesc::PixFmtFlags::FLOAT) {
+            self.links[link.0].color_range = if desc
+                .flags
+                .contains(crate::util::pixdesc::PixFmtFlags::FLOAT)
+            {
                 ColorRange::Unspecified
             } else {
                 ColorRange::Jpeg
             };
-            self.links[link.0].colorspace = if desc
-                .flags
-                .intersects(
-                    crate::util::pixdesc::PixFmtFlags::RGB
-                        .union(crate::util::pixdesc::PixFmtFlags::XYZ),
-                )
-            {
+            self.links[link.0].colorspace = if desc.flags.intersects(
+                crate::util::pixdesc::PixFmtFlags::RGB
+                    .union(crate::util::pixdesc::PixFmtFlags::XYZ),
+            ) {
                 ColorSpace::Rgb
             } else {
                 ColorSpace::Unspecified
@@ -839,7 +840,10 @@ impl FilterGraph {
 
     fn link_endpoints(&self, link: LinkId) -> (String, String) {
         let l = &self.links[link.0];
-        (self.nodes[l.src.0].name.clone(), self.nodes[l.dst.0].name.clone())
+        (
+            self.nodes[l.src.0].name.clone(),
+            self.nodes[l.dst.0].name.clone(),
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -865,7 +869,10 @@ impl FilterGraph {
         let n_inputs = self.nodes[filter.0].def.inputs.len();
         for j in 0..n_inputs {
             let Some(link) = self.nodes[filter.0].inputs[j] else {
-                log_error!(None, "Not all input and output are properly linked ({j}).\n");
+                log_error!(
+                    None,
+                    "Not all input and output are properly linked ({j}).\n"
+                );
                 return Err(Error::InvalidArgument(
                     "Not all input and output are properly linked".into(),
                 ));
@@ -919,9 +926,7 @@ impl FilterGraph {
                 });
                 let l = &mut self.links[link.0];
                 if l.time_base == Rational::UNKNOWN {
-                    l.time_base = upstream
-                        .map(|u| u.0)
-                        .unwrap_or(Rational::new(1, 1_000_000)); // AV_TIME_BASE_Q
+                    l.time_base = upstream.map(|u| u.0).unwrap_or(Rational::new(1, 1_000_000)); // AV_TIME_BASE_Q
                 }
                 if l.sample_aspect_ratio == Rational::UNKNOWN {
                     l.sample_aspect_ratio = upstream.map(|u| u.1).unwrap_or(Rational::ONE);
@@ -942,8 +947,7 @@ impl FilterGraph {
                         "Video source filters must set their output link's width and height\n"
                     );
                     return Err(Error::InvalidArgument(
-                        "Video source filters must set their output link's width and height"
-                            .into(),
+                        "Video source filters must set their output link's width and height".into(),
                     ));
                 }
             }
@@ -997,12 +1001,10 @@ impl FilterGraph {
             for (j, pad) in filt.def.inputs.iter().enumerate() {
                 // C checks `filt->inputs[j] && filt->inputs[j]->src` — the
                 // stored link must be attached to THIS node on its dst side.
-                let connected = filt
-                    .inputs
-                    .get(j)
-                    .copied()
-                    .flatten()
-                    .is_some_and(|l| self.links[l.0].dst == node && self.links[l.0].dstpad == j);
+                let connected =
+                    filt.inputs.get(j).copied().flatten().is_some_and(|l| {
+                        self.links[l.0].dst == node && self.links[l.0].dstpad == j
+                    });
                 if !connected {
                     let msg = format!(
                         "Input pad \"{}\" with type video of the filter instance \"{}\" of {} not connected to any source",
@@ -1013,12 +1015,10 @@ impl FilterGraph {
                 }
             }
             for (j, pad) in filt.def.outputs.iter().enumerate() {
-                let connected = filt
-                    .outputs
-                    .get(j)
-                    .copied()
-                    .flatten()
-                    .is_some_and(|l| self.links[l.0].src == node && self.links[l.0].srcpad == j);
+                let connected =
+                    filt.outputs.get(j).copied().flatten().is_some_and(|l| {
+                        self.links[l.0].src == node && self.links[l.0].srcpad == j
+                    });
                 if !connected {
                     let msg = format!(
                         "Output pad \"{}\" with type video of the filter instance \"{}\" of {} not connected to any destination",
@@ -1219,9 +1219,9 @@ fn parse_args_simple(args: &str, def: &FilterDef) -> Result<Options> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::graph::engine_test_helpers::*;
-    use crate::filter::filter;
     use crate::filter::FilterImpl;
+    use crate::filter::filter;
+    use crate::filter::graph::engine_test_helpers::*;
 
     fn null_pair() -> (FilterGraph, NodeId, NodeId, LinkId) {
         let mut g = FilterGraph::new();
@@ -1510,7 +1510,7 @@ mod tests {
 /// arrive in wave 2; these provide the minimum a source/sink must do.
 #[cfg(test)]
 pub(crate) mod engine_test_helpers {
-    use super::super::filter::{FilterDef, FilterImpl, FilterFlags, FilterNode, PadDef};
+    use super::super::filter::{FilterDef, FilterFlags, FilterImpl, FilterNode, PadDef};
     use super::super::link::NodeId;
     use super::*;
 
@@ -1533,12 +1533,7 @@ pub(crate) mod engine_test_helpers {
         }
         /// What buffersrc does: a source sets its output geometry in
         /// config_props (avfilter.c:424-429 requires it).
-        fn config_props(
-            &mut self,
-            g: &mut FilterGraph,
-            node: NodeId,
-            pad: PadRef,
-        ) -> Result<()> {
+        fn config_props(&mut self, g: &mut FilterGraph, node: NodeId, pad: PadRef) -> Result<()> {
             if let PadRef::Out(_) = pad {
                 let l = g.outlink(node, 0);
                 g.links[l.0].w = 8;
@@ -1562,7 +1557,10 @@ pub(crate) mod engine_test_helpers {
         }
     }
 
-    const PAD: PadDef = PadDef { name: "default", needs_writable: false };
+    const PAD: PadDef = PadDef {
+        name: "default",
+        needs_writable: false,
+    };
 
     static TEST_SRC_DEF: FilterDef = FilterDef {
         name: "testsrc_impl",
@@ -1616,4 +1614,3 @@ pub(crate) mod engine_test_helpers {
         panic!("graph did not reach quiescence in 1000 activations");
     }
 }
-

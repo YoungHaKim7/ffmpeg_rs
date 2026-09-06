@@ -16,9 +16,11 @@
 //!   corrupt; rawvideo: passes short packets downstream).
 //! * `seek()` drops the buffer — reads after a seek refill from the handler.
 
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    path::Path,
+};
 
 use crate::util::error::{Error, Result};
 
@@ -105,13 +107,17 @@ impl IoContext {
     /// `avio_open(path, AVIO_FLAG_READ)`.
     pub fn open_input<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path).map_err(Error::Io)?;
-        Ok(IoContext::new(Box::new(FileHandler::Input(BufReader::new(file)))))
+        Ok(IoContext::new(Box::new(FileHandler::Input(
+            BufReader::new(file),
+        ))))
     }
 
     /// `avio_open(path, AVIO_FLAG_WRITE)`.
     pub fn open_output<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::create(path).map_err(Error::Io)?;
-        Ok(IoContext::new(Box::new(FileHandler::Output(BufWriter::new(file)))))
+        Ok(IoContext::new(Box::new(FileHandler::Output(
+            BufWriter::new(file),
+        ))))
     }
 
     /// `avio_alloc_context` over custom callbacks.
@@ -311,7 +317,10 @@ mod tests {
     }
 
     fn mem_io(data: &[u8]) -> IoContext {
-        IoContext::new(Box::new(Mem { data: data.to_vec(), pos: 0 }))
+        IoContext::new(Box::new(Mem {
+            data: data.to_vec(),
+            pos: 0,
+        }))
     }
 
     #[test]

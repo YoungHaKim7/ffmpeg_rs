@@ -1,12 +1,12 @@
 //! Muxer registry — port of `libavformat/mux.h` (`FFOutputFormat`) and the
 //! static list in `muxer_list.c`.
 
-use crate::codec::packet::Packet;
-use crate::codec::params::CodecId;
-use crate::util::error::Result;
+use crate::{
+    codec::{packet::Packet, params::CodecId},
+    util::error::Result,
+};
 
-use super::io::IoContext;
-use super::Stream;
+use super::{Stream, io::IoContext};
 
 /// `FFOutputFormat` — one row of the muxer registry.
 pub struct OutputFormat {

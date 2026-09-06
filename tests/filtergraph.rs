@@ -11,14 +11,20 @@
 //! arrive with the vf_scale module; the parser-driven `-vf` string path
 //! arrives with the parser module.
 
-use ffmpeg_rs::filter::FilterGraph;
-use ffmpeg_rs::util::frame::Frame;
-use ffmpeg_rs::util::pixfmt::PixelFormat;
-use ffmpeg_rs::util::rational::Rational;
+use ffmpeg_rs::{
+    filter::FilterGraph,
+    util::{frame::Frame, pixfmt::PixelFormat, rational::Rational},
+};
 
 /// buffer(yuv420p 64x48, tb 1/25) → null → format=yuv420p → buffersink,
 /// fully configured — the smallest honest `-vf` graph.
-fn graph_with(desc: &str) -> (FilterGraph, ffmpeg_rs::filter::NodeId, ffmpeg_rs::filter::NodeId) {
+fn graph_with(
+    desc: &str,
+) -> (
+    FilterGraph,
+    ffmpeg_rs::filter::NodeId,
+    ffmpeg_rs::filter::NodeId,
+) {
     let mut g = FilterGraph::new();
     let src = g
         .create_filter(
@@ -67,7 +73,10 @@ fn frames_flow_through_the_graph_untouched() {
 
     // EOF: close propagates; the sink then reports Eof, not Again.
     g.close_source(src).unwrap();
-    assert!(matches!(g.get_frame(sink), Err(ffmpeg_rs::util::error::Error::Eof)));
+    assert!(matches!(
+        g.get_frame(sink),
+        Err(ffmpeg_rs::util::error::Error::Eof)
+    ));
 }
 
 #[test]
@@ -96,10 +105,7 @@ fn format_filter_constrains_negotiation() {
     // C's "'scale' filter not present, cannot convert formats." path).
     let mut g = FilterGraph::new();
     let src = g
-        .create_filter(
-            "buffer",
-            "video_size=64x48:pix_fmt=yuv420p:time_base=1/25",
-        )
+        .create_filter("buffer", "video_size=64x48:pix_fmt=yuv420p:time_base=1/25")
         .unwrap();
     let fmt = g.create_filter("format", "pix_fmts=gray8").unwrap();
     let sink = g.create_filter("buffersink", "").unwrap();

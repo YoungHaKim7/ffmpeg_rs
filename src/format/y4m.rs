@@ -21,19 +21,26 @@
 //! BE-format note: `mono16` is GRAY16BE in C and stays un-ported (LE-only
 //! subset).
 
-use crate::codec::packet::{Packet, PacketFlags};
-use crate::codec::params::{CodecId, FieldOrder};
-use crate::imgutils;
-use crate::log_error;
-use crate::util::color::{ChromaLocation, ColorRange};
-use crate::util::error::{Error, Result};
-use crate::util::pixfmt::PixelFormat;
-use crate::util::rational::Rational;
+use crate::{
+    codec::{
+        packet::{Packet, PacketFlags},
+        params::{CodecId, FieldOrder},
+    },
+    imgutils, log_error,
+    util::{
+        color::{ChromaLocation, ColorRange},
+        error::{Error, Result},
+        pixfmt::PixelFormat,
+        rational::Rational,
+    },
+};
 
-use super::demux::{Demuxer, PROBE_SCORE_MAX};
-use super::io::IoContext;
-use super::mux::Muxer;
-use super::Stream;
+use super::{
+    Stream,
+    demux::{Demuxer, PROBE_SCORE_MAX},
+    io::IoContext,
+    mux::Muxer,
+};
 
 /// `Y4M_MAGIC` (yuv4mpeg.h).
 const Y4M_MAGIC: &[u8] = b"YUV4MPEG2";
@@ -50,34 +57,67 @@ const MAX_FRAME_HEADER: usize = 80;
 /// subset, in C order (order matters: `av_strstart` prefix matching).
 /// `None` rows are the guard entries explained in the module docs.
 const COLORSPACE_TABLE: &[(&str, Option<(PixelFormat, ChromaLocation)>)] = &[
-    ("420jpeg", Some((PixelFormat::Yuv420p, ChromaLocation::Center))),
-    ("420mpeg2", Some((PixelFormat::Yuv420p, ChromaLocation::Left))),
-    ("420paldv", Some((PixelFormat::Yuv420p, ChromaLocation::TopLeft))),
-    ("420p16", Some((PixelFormat::Yuv420p16le, ChromaLocation::Unspecified))),
+    (
+        "420jpeg",
+        Some((PixelFormat::Yuv420p, ChromaLocation::Center)),
+    ),
+    (
+        "420mpeg2",
+        Some((PixelFormat::Yuv420p, ChromaLocation::Left)),
+    ),
+    (
+        "420paldv",
+        Some((PixelFormat::Yuv420p, ChromaLocation::TopLeft)),
+    ),
+    (
+        "420p16",
+        Some((PixelFormat::Yuv420p16le, ChromaLocation::Unspecified)),
+    ),
     ("422p16", None), // yuv422p16 — not in subset (guard: prefix "422" exists)
-    ("444p16", Some((PixelFormat::Yuv444p16le, ChromaLocation::Unspecified))),
+    (
+        "444p16",
+        Some((PixelFormat::Yuv444p16le, ChromaLocation::Unspecified)),
+    ),
     ("420p14", None), // guard: prefix "420"
     ("422p14", None), // guard: prefix "422"
     ("444p14", None), // guard: prefix "444"
     ("420p12", None), // guard
     ("422p12", None), // guard
     ("444p12", None), // guard
-    ("420p10", Some((PixelFormat::Yuv420p10le, ChromaLocation::Unspecified))),
-    ("422p10", Some((PixelFormat::Yuv422p10le, ChromaLocation::Unspecified))),
-    ("444p10", Some((PixelFormat::Yuv444p10le, ChromaLocation::Unspecified))),
+    (
+        "420p10",
+        Some((PixelFormat::Yuv420p10le, ChromaLocation::Unspecified)),
+    ),
+    (
+        "422p10",
+        Some((PixelFormat::Yuv422p10le, ChromaLocation::Unspecified)),
+    ),
+    (
+        "444p10",
+        Some((PixelFormat::Yuv444p10le, ChromaLocation::Unspecified)),
+    ),
     ("420p9", None), // guard
     ("422p9", None), // guard
     ("444p9", None), // guard
     ("420", Some((PixelFormat::Yuv420p, ChromaLocation::Center))),
     ("411", None), // yuv411p — unambiguous, plain "unknown" error
-    ("422", Some((PixelFormat::Yuv422p, ChromaLocation::Unspecified))),
+    (
+        "422",
+        Some((PixelFormat::Yuv422p, ChromaLocation::Unspecified)),
+    ),
     ("444alpha", None), // yuva444p — guard: prefix "444"
-    ("444", Some((PixelFormat::Yuv444p, ChromaLocation::Unspecified))),
+    (
+        "444",
+        Some((PixelFormat::Yuv444p, ChromaLocation::Unspecified)),
+    ),
     ("mono16", None), // gray16be — guard: prefix "mono"
     ("mono12", None), // guard
     ("mono10", None), // guard
     ("mono9", None),  // guard
-    ("mono", Some((PixelFormat::Gray8, ChromaLocation::Unspecified))),
+    (
+        "mono",
+        Some((PixelFormat::Gray8, ChromaLocation::Unspecified)),
+    ),
 ];
 
 /// `YSCSS=` legacy table (uppercase names), subset.
@@ -107,13 +147,20 @@ pub struct Y4mDemuxer {
 
 impl Y4mDemuxer {
     pub fn new() -> Self {
-        Y4mDemuxer { packet_size: 0, data_offset: 0, time_base: Rational::UNKNOWN }
+        Y4mDemuxer {
+            packet_size: 0,
+            data_offset: 0,
+            time_base: Rational::UNKNOWN,
+        }
     }
 }
 
 /// Leading decimal integer of a string, `sscanf("%d")` style (0 when absent).
 fn leading_int(s: &str) -> i32 {
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+    let digits: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
     digits.parse().unwrap_or(0)
 }
 
@@ -131,7 +178,10 @@ fn parse_ratio(tok: &[u8]) -> (i32, i32) {
 /// the caller keeps its -1 sentinel, like an untouched C out-param).
 fn parse_i32(tok: &[u8]) -> Option<i32> {
     let s = std::str::from_utf8(tok).ok()?;
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+    let digits: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
     digits.parse().ok()
 }
 
@@ -170,7 +220,9 @@ impl Demuxer for Y4mDemuxer {
 
         if &header[..Y4M_MAGIC.len()] != Y4M_MAGIC {
             log_error!(Some("yuv4mpegpipe"), "Invalid magic number for yuv4mpeg.");
-            return Err(Error::InvalidData("invalid magic number for yuv4mpeg".into()));
+            return Err(Error::InvalidData(
+                "invalid magic number for yuv4mpeg".into(),
+            ));
         }
 
         // Token walk: `tokstart` scans option characters; each option's value
@@ -205,9 +257,12 @@ impl Demuxer for Y4mDemuxer {
                                     }
                                 }
                                 None => {
-                                    log_error!(Some("yuv4mpegpipe"),
+                                    log_error!(
+                                        Some("yuv4mpegpipe"),
                                         "YUV4MPEG stream contains an unsupported pixel \
-                                         format ({} is outside the ffmpeg_rs subset).", name);
+                                         format ({} is outside the ffmpeg_rs subset).",
+                                        name
+                                    );
                                     return Err(Error::Unsupported(format!(
                                         "colorspace '{name}' not in the ported subset"
                                     )));
@@ -218,8 +273,10 @@ impl Demuxer for Y4mDemuxer {
                         }
                     }
                     if !matched {
-                        log_error!(Some("yuv4mpegpipe"),
-                            "YUV4MPEG stream contains an unknown pixel format.");
+                        log_error!(
+                            Some("yuv4mpegpipe"),
+                            "YUV4MPEG stream contains an unknown pixel format."
+                        );
                         return Err(Error::InvalidData(
                             "YUV4MPEG stream contains an unknown pixel format.".into(),
                         ));
@@ -235,9 +292,11 @@ impl Demuxer for Y4mDemuxer {
                         b't' => FieldOrder::Tt,
                         b'b' => FieldOrder::Bb,
                         b'm' => {
-                            log_error!(Some("yuv4mpegpipe"),
+                            log_error!(
+                                Some("yuv4mpegpipe"),
                                 "YUV4MPEG stream contains mixed interlaced and \
-                                 non-interlaced frames.");
+                                 non-interlaced frames."
+                            );
                             return Err(Error::Unsupported(
                                 "mixed interlaced and non-interlaced frames".into(),
                             ));
@@ -331,11 +390,12 @@ impl Demuxer for Y4mDemuxer {
         st.codecpar.color_range = color_range;
         st.codecpar.field_order = field_order;
 
-        self.packet_size =
-            imgutils::get_buffer_size(pix_fmt, width as u32, height as u32, 1)? + Y4M_FRAME_MAGIC_LEN;
+        self.packet_size = imgutils::get_buffer_size(pix_fmt, width as u32, height as u32, 1)?
+            + Y4M_FRAME_MAGIC_LEN;
         self.data_offset = io.tell();
         self.time_base = st.time_base;
-        st.duration = ((io.size() as i64 - self.data_offset as i64) / self.packet_size as i64).max(0);
+        st.duration =
+            ((io.size() as i64 - self.data_offset as i64) / self.packet_size as i64).max(0);
 
         Ok(st)
     }
@@ -416,18 +476,19 @@ impl Muxer for Y4mMuxer {
         let par = &streams[0].codecpar;
         if par.codec_id != CodecId::WrappedAvframe && par.codec_id != CodecId::Rawvideo {
             log_error!(Some("yuv4mpegpipe"), "ERROR: Codec not supported.");
-            return Err(Error::InvalidData("codec not supported by yuv4mpegpipe".into()));
+            return Err(Error::InvalidData(
+                "codec not supported by yuv4mpegpipe".into(),
+            ));
         }
         let unofficial = !matches!(
             par.format,
-            PixelFormat::Gray8
-                | PixelFormat::Yuv420p
-                | PixelFormat::Yuv422p
-                | PixelFormat::Yuv444p
+            PixelFormat::Gray8 | PixelFormat::Yuv420p | PixelFormat::Yuv422p | PixelFormat::Yuv444p
         );
         if unofficial {
-            crate::log_warning!(Some("yuv4mpegpipe"),
-                "Warning: generating non standard YUV stream. Mjpegtools will not work.");
+            crate::log_warning!(
+                Some("yuv4mpegpipe"),
+                "Warning: generating non standard YUV stream. Mjpegtools will not work."
+            );
         }
         Ok(())
     }
@@ -476,14 +537,22 @@ impl Muxer for Y4mMuxer {
             colorrange,
         );
         io.write_all(header.as_bytes()).map_err(|e| {
-            log_error!(Some("yuv4mpegpipe"), "Error. YUV4MPEG stream header write failed.");
+            log_error!(
+                Some("yuv4mpegpipe"),
+                "Error. YUV4MPEG stream header write failed."
+            );
             e
         })
     }
 
     /// `yuv4_write_packet` (yuv4mpegenc.c:181) — rawvideo path only
     /// (the WRAPPED_AVFRAME plane-walking path is unused by this pipeline).
-    fn write_packet(&mut self, io: &mut IoContext, _streams: &[Stream], pkt: &Packet) -> Result<()> {
+    fn write_packet(
+        &mut self,
+        io: &mut IoContext,
+        _streams: &[Stream],
+        pkt: &Packet,
+    ) -> Result<()> {
         io.write_all(b"FRAME\n")?;
         io.write_all(pkt.as_slice())?;
         Ok(())
@@ -536,10 +605,8 @@ mod tests {
 
     #[test]
     fn parses_full_featured_header() {
-        let st = demux_header(
-            "YUV4MPEG2 W128 H96 F10:1 Ip A1:1 C420mpeg2 XCOLORRANGE=LIMITED\n",
-        )
-        .unwrap();
+        let st = demux_header("YUV4MPEG2 W128 H96 F10:1 Ip A1:1 C420mpeg2 XCOLORRANGE=LIMITED\n")
+            .unwrap();
         assert_eq!((st.codecpar.width, st.codecpar.height), (128, 96));
         assert_eq!(st.codecpar.format, PixelFormat::Yuv420p);
         assert_eq!(st.time_base, Rational::new(1, 10));

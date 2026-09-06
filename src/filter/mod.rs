@@ -52,7 +52,9 @@ pub mod vf_null;
 
 // Crate-root re-exports mirror how C code includes libavfilter headers:
 // `use crate::filter::{FilterGraph, NodeId, LinkId};`
-pub use filter::{default_activate, FilterDef, FilterFlags, FilterImpl, FilterNode, PadDef, PadRef};
+pub use filter::{
+    FilterDef, FilterFlags, FilterImpl, FilterNode, PadDef, PadRef, default_activate,
+};
 pub use graph::{Axis, FilterGraph, InOut};
 pub use link::{FormatsConfig, Link, LinkId, LinkInitState, ListIdx, NodeId};
 

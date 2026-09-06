@@ -55,16 +55,22 @@
 //!   out-of-range text where C would carry the raw discriminant into
 //!   negotiation.
 
-use crate::util::color::{ColorRange, ColorSpace};
-use crate::util::error::{Error, Result};
-use crate::util::frame::Frame;
-use crate::util::pixfmt::PixelFormat;
-use crate::util::rational::Rational;
-use crate::{log_error, log_warning};
+use crate::{
+    log_error, log_warning,
+    util::{
+        color::{ColorRange, ColorSpace},
+        error::{Error, Result},
+        frame::Frame,
+        pixfmt::PixelFormat,
+        rational::Rational,
+    },
+};
 
-use super::filter::{self, FilterDef, FilterFlags, FilterImpl, PadDef};
-use super::graph::FilterGraph;
-use super::link::{clone_status, NodeId};
+use super::{
+    filter::{self, FilterDef, FilterFlags, FilterImpl, PadDef},
+    graph::FilterGraph,
+    link::{NodeId, clone_status},
+};
 
 // ---------------------------------------------------------------------------
 // Context (buffersink.c:43-72)
@@ -142,7 +148,10 @@ impl std::ops::BitOr for BuffersinkFlags {
 // Filter definition (buffersink.c:382-393)
 // ---------------------------------------------------------------------------
 
-const DEFAULT_PAD: PadDef = PadDef { name: "default", needs_writable: false };
+const DEFAULT_PAD: PadDef = PadDef {
+    name: "default",
+    needs_writable: false,
+};
 
 /// `ff_vsink_buffer` (buffersink.c:382-393).
 ///
@@ -189,9 +198,7 @@ impl FilterImpl for BufferSinkContext {
         let mut leftovers: Vec<(String, String)> = Vec::new();
         for (key, value) in entries {
             let assigned = match key.as_str() {
-                "pixel_formats" => {
-                    parse_pixel_formats(&value).map(|v| self.pixel_formats = v)
-                }
+                "pixel_formats" => parse_pixel_formats(&value).map(|v| self.pixel_formats = v),
                 "colorspaces" => parse_enum_array(&value, "colorspaces", colorspace_from_i64)
                     .map(|v| self.colorspaces = v),
                 "colorranges" => parse_enum_array(&value, "colorranges", colorrange_from_i64)
@@ -367,7 +374,7 @@ fn parse_pixel_formats(value: &str) -> Result<Vec<PixelFormat>> {
             None => {
                 return Err(Error::InvalidArgument(format!(
                     "Unable to parse \"pixel_formats\" option value \"{tok}\" as pixel format"
-                )))
+                )));
             }
         }
     }
@@ -394,7 +401,7 @@ fn parse_enum_array<T>(
             Err(_) => {
                 return Err(Error::InvalidArgument(format!(
                     "Unable to parse \"{opt_name}\" option value \"{tok}\""
-                )))
+                )));
             }
         };
         match from_i64(n) {
@@ -403,7 +410,7 @@ fn parse_enum_array<T>(
                 return Err(Error::InvalidArgument(format!(
                     "Value {:.6} for parameter '{opt_name}' out of range [0 - 2147483647]",
                     n as f64
-                )))
+                )));
             }
         }
     }
@@ -572,7 +579,7 @@ pub fn buffersink_get_frame_flags(
                     filter::inlink_request_frame(g, inlink); // C:125
                 }
                 Err(e) => return Err(e), // C:126-127
-                Ok(()) => {}              // C:128 — loop continues
+                Ok(()) => {}             // C:128 — loop continues
             }
         } else {
             filter::inlink_request_frame(g, inlink); // C:129-130
@@ -688,9 +695,9 @@ pub fn buffersink_get_frame_rate(g: &FilterGraph, sink: NodeId) -> Result<Ration
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::Options;
     use crate::filter::filter::FilterNode;
     use crate::filter::link::LinkId;
-    use crate::filter::Options;
     use std::cell::Cell;
     use std::sync::Arc;
 
@@ -742,14 +749,21 @@ mod tests {
         }
     }
 
-    static COUNTING_SRC_PAD: PadDef = PadDef { name: "default", needs_writable: false };
+    static COUNTING_SRC_PAD: PadDef = PadDef {
+        name: "default",
+        needs_writable: false,
+    };
     static COUNTING_SRC_DEF: FilterDef = FilterDef {
         name: "countingsrc",
         inputs: &[],
         outputs: &[COUNTING_SRC_PAD],
         flags: FilterFlags(0),
         shorthand: &[],
-        make: || Box::new(CountingSrc { activations: Arc::new(Cell::new(0)) }),
+        make: || {
+            Box::new(CountingSrc {
+                activations: Arc::new(Cell::new(0)),
+            })
+        },
     };
 
     fn push_counting_src(g: &mut FilterGraph) -> (NodeId, Arc<Cell<u32>>) {
@@ -759,7 +773,9 @@ mod tests {
             name: COUNTING_SRC_DEF.name.to_string(),
             inputs: vec![],
             outputs: vec![None],
-            imp: Some(Box::new(CountingSrc { activations: counter.clone() })),
+            imp: Some(Box::new(CountingSrc {
+                activations: counter.clone(),
+            })),
             ready: 0,
             initialized: true,
             opts: Options::default(),
@@ -783,7 +799,11 @@ mod tests {
         // .p.outputs = NULL (buffersink.c:386) — the graph endpoint.
         assert!(BUFFERSINK_DEF.outputs.is_empty());
         // ff_filter_frame's skip-validation name list (avfilter.c:1076-1082).
-        assert!(BUFFERSINK_DEF.flags.contains(FilterFlags::ALLOWS_RECONFIGURE));
+        assert!(
+            BUFFERSINK_DEF
+                .flags
+                .contains(FilterFlags::ALLOWS_RECONFIGURE)
+        );
         // ff_filter_opt_parse walks the priv_class options in declaration
         // order (avfilter.c:863-866); alphamodes dropped.
         assert_eq!(
@@ -798,7 +818,9 @@ mod tests {
     fn init_parses_named_and_positional_options() {
         let mut g = FilterGraph::new();
         // Named, comma list: order preserved (opt.c:805-895 split).
-        let sink = g.create_filter("buffersink", "pixel_formats=yuv420p,rgb24").unwrap();
+        let sink = g
+            .create_filter("buffersink", "pixel_formats=yuv420p,rgb24")
+            .unwrap();
         assert_eq!(
             with_sink_ctx(&mut g, sink, |c| c.pixel_formats.clone()),
             vec![PixelFormat::Yuv420p, PixelFormat::Rgb24]
@@ -813,7 +835,9 @@ mod tests {
         );
 
         // Aliases resolve (av_get_pix_fmt).
-        let sink = g.create_filter("buffersink", "pixel_formats=gray8").unwrap();
+        let sink = g
+            .create_filter("buffersink", "pixel_formats=gray8")
+            .unwrap();
         assert_eq!(
             with_sink_ctx(&mut g, sink, |c| c.pixel_formats.clone()),
             vec![PixelFormat::Gray8]
@@ -835,7 +859,9 @@ mod tests {
 
         // Duplicates WITHIN one value are KEPT — ff_add_format appends
         // unconditionally (formats.c:572-577).
-        let sink = g.create_filter("buffersink", "pixel_formats=gray,gray").unwrap();
+        let sink = g
+            .create_filter("buffersink", "pixel_formats=gray,gray")
+            .unwrap();
         assert_eq!(
             with_sink_ctx(&mut g, sink, |c| c.pixel_formats.clone()),
             vec![PixelFormat::Gray8, PixelFormat::Gray8]
@@ -873,7 +899,9 @@ mod tests {
         let mut g = FilterGraph::new();
         // Unknown pixel format name — set_string_fmt's text (opt.c:628-629,
         // desc "pixel format"), val is the failing TOKEN.
-        let err = g.create_filter("buffersink", "pixel_formats=bogus").unwrap_err();
+        let err = g
+            .create_filter("buffersink", "pixel_formats=bogus")
+            .unwrap_err();
         match &err {
             Error::InvalidArgument(msg) => assert_eq!(
                 msg,
@@ -891,14 +919,18 @@ mod tests {
         }
 
         // Non-numeric int element — set_string_number's text (opt.c:500-501).
-        let err = g.create_filter("buffersink", "colorspaces=xyz").unwrap_err();
+        let err = g
+            .create_filter("buffersink", "colorspaces=xyz")
+            .unwrap_err();
         match &err {
             Error::InvalidArgument(msg) => {
                 assert_eq!(msg, "Unable to parse \"colorspaces\" option value \"xyz\"")
             }
             other => panic!("expected InvalidArgument, got {other}"),
         }
-        let err = g.create_filter("buffersink", "colorranges=xyz").unwrap_err();
+        let err = g
+            .create_filter("buffersink", "colorranges=xyz")
+            .unwrap_err();
         match &err {
             Error::InvalidArgument(msg) => {
                 assert_eq!(msg, "Unable to parse \"colorranges\" option value \"xyz\"")
@@ -988,7 +1020,10 @@ mod tests {
         // (avfiltergraph.c:410 — the trait contract; the impl never calls it
         // itself). Mirrors graph.rs:602-620's null test.
         g.default_query_formats(sink).unwrap();
-        let csp = g.links[l.0].outcfg.color_spaces.expect("csp filled by default");
+        let csp = g.links[l.0]
+            .outcfg
+            .color_spaces
+            .expect("csp filled by default");
         assert_eq!(
             g.csp_lists[csp as usize],
             crate::filter::formats::all_color_spaces()
@@ -1058,7 +1093,10 @@ mod tests {
         assert_eq!(g.links[l.0].frame_count_out, 1);
         assert_eq!(g.links[l.0].current_pts, 7);
         // Starved sink: drives the graph, then Err(Again) (C:101, 120-125).
-        assert!(matches!(buffersink_get_frame(&mut g, sink), Err(Error::Again)));
+        assert!(matches!(
+            buffersink_get_frame(&mut g, sink),
+            Err(Error::Again)
+        ));
     }
 
     #[test]
@@ -1095,7 +1133,10 @@ mod tests {
         assert!(with_sink_ctx(&mut g, sink, |c| c.peeked_frame.is_none()));
         let got2 = buffersink_get_frame(&mut g, sink).unwrap();
         assert_eq!(got2.pts, 10);
-        assert!(matches!(buffersink_get_frame(&mut g, sink), Err(Error::Again)));
+        assert!(matches!(
+            buffersink_get_frame(&mut g, sink),
+            Err(Error::Again)
+        ));
     }
 
     #[test]
@@ -1112,13 +1153,19 @@ mod tests {
         // Drained: the acknowledge transition fires → Err(Eof), status_out
         // now set (avfilter.c:1477-1479; the ack's pts is 100, not 3 —
         // current_pts is set from status_in_pts inside the ack).
-        assert!(matches!(buffersink_get_frame(&mut g, sink), Err(Error::Eof)));
+        assert!(matches!(
+            buffersink_get_frame(&mut g, sink),
+            Err(Error::Eof)
+        ));
         assert!(matches!(g.links[l.0].status_out, Some(Error::Eof)));
         assert_eq!(g.links[l.0].current_pts, 100);
         // Idempotent: the status_out re-check stands in for C's truthy
         // negative (avfilter.c:1472-1474) — and must not touch the request
         // path (frame_wanted_out stays false).
-        assert!(matches!(buffersink_get_frame(&mut g, sink), Err(Error::Eof)));
+        assert!(matches!(
+            buffersink_get_frame(&mut g, sink),
+            Err(Error::Eof)
+        ));
         assert!(!g.links[l.0].frame_wanted_out);
     }
 
@@ -1131,12 +1178,19 @@ mod tests {
         // Nothing queued, no status: the loop must TERMINATE (latch) and
         // surface EAGAIN like C (C:101, 120-125; divergence D1 arms the latch
         // on the re-request instead of FFERROR_BUFFERSRC_EMPTY).
-        assert!(matches!(buffersink_get_frame(&mut g, sink), Err(Error::Again)));
+        assert!(matches!(
+            buffersink_get_frame(&mut g, sink),
+            Err(Error::Again)
+        ));
         // The request was registered and the source was driven: run_once
         // activated it at least once at priority 100 (inlink_request_frame,
         // C:125/130).
         assert!(g.links[l.0].frame_wanted_out);
-        assert!(counter.get() >= 1, "source activated {} times", counter.get());
+        assert!(
+            counter.get() >= 1,
+            "source activated {} times",
+            counter.get()
+        );
     }
 
     #[test]
@@ -1198,25 +1252,43 @@ mod tests {
         g.links[l.0].color_range = ColorRange::Mpeg;
         g.links[l.0].frame_rate = Rational::new(25, 1);
 
-        assert_eq!(buffersink_get_time_base(&g, sink).unwrap(), Rational::new(1, 25));
-        assert_eq!(buffersink_get_format(&g, sink).unwrap(), Some(PixelFormat::Yuv420p));
+        assert_eq!(
+            buffersink_get_time_base(&g, sink).unwrap(),
+            Rational::new(1, 25)
+        );
+        assert_eq!(
+            buffersink_get_format(&g, sink).unwrap(),
+            Some(PixelFormat::Yuv420p)
+        );
         assert_eq!(buffersink_get_w(&g, sink).unwrap(), 64);
         assert_eq!(buffersink_get_h(&g, sink).unwrap(), 48);
         assert_eq!(
             buffersink_get_sample_aspect_ratio(&g, sink).unwrap(),
             Rational::new(16, 9)
         );
-        assert_eq!(buffersink_get_colorspace(&g, sink).unwrap(), ColorSpace::Bt709);
-        assert_eq!(buffersink_get_color_range(&g, sink).unwrap(), ColorRange::Mpeg);
+        assert_eq!(
+            buffersink_get_colorspace(&g, sink).unwrap(),
+            ColorSpace::Bt709
+        );
+        assert_eq!(
+            buffersink_get_color_range(&g, sink).unwrap(),
+            ColorRange::Mpeg
+        );
         // frame_rate reads the FilterLink field (C:254-259) — same flat
         // expression in the port.
-        assert_eq!(buffersink_get_frame_rate(&g, sink).unwrap(), Rational::new(25, 1));
+        assert_eq!(
+            buffersink_get_frame_rate(&g, sink).unwrap(),
+            Rational::new(25, 1)
+        );
 
         // Pre-config zero values on a fresh link: the Option format is the
         // AV_PIX_FMT_NONE sentinel encoding.
         let (g2, _s, sink2, _l) = sink_graph("");
         assert_eq!(buffersink_get_format(&g2, sink2).unwrap(), None);
-        assert_eq!(buffersink_get_colorspace(&g2, sink2).unwrap(), ColorSpace::Unspecified);
+        assert_eq!(
+            buffersink_get_colorspace(&g2, sink2).unwrap(),
+            ColorSpace::Unspecified
+        );
     }
 
     // -- filter_frame unreachable -------------------------------------------------

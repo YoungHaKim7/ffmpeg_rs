@@ -59,11 +59,13 @@
 pub mod filter;
 pub mod vulkan;
 
-use crate::util::color::{ChromaLocation, ColorRange};
-use crate::util::error::{Error, Result};
-use crate::util::frame::Frame;
-use crate::util::pixdesc;
-use crate::util::pixfmt::PixelFormat;
+use crate::util::{
+    color::{ChromaLocation, ColorRange},
+    error::{Error, Result},
+    frame::Frame,
+    pixdesc,
+    pixfmt::PixelFormat,
+};
 
 /// The packed-RGB outputs `scale` can emit.
 const RGB_OUTPUTS: &[PixelFormat] = &[
@@ -221,7 +223,11 @@ impl ScaleAlgorithm {
     pub fn weight(self, x: f32) -> f32 {
         match self {
             ScaleAlgorithm::Nearest => {
-                if x < 0.5 { 1.0 } else { 0.0 }
+                if x < 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
             }
             ScaleAlgorithm::Bilinear => (1.0 - x).max(0.0),
             ScaleAlgorithm::Bicubic => {
@@ -338,9 +344,11 @@ impl ScaleContext {
                     )));
                 }
                 _ => {
-                    crate::log_verbose!(None,
+                    crate::log_verbose!(
+                        None,
                         "scaling algorithm '{}' has no Vulkan kernel, using CPU",
-                        options.algorithm.name());
+                        options.algorithm.name()
+                    );
                     None
                 }
             }
@@ -352,8 +360,11 @@ impl ScaleContext {
                     Err(e) if engine == ScaleEngine::Vulkan => return Err(e),
                     Err(e) => {
                         // Auto: fall back, saying why at verbose level.
-                        crate::log_verbose!(None,
-                            "Vulkan scaler unavailable ({}), using CPU kernels", e);
+                        crate::log_verbose!(
+                            None,
+                            "Vulkan scaler unavailable ({}), using CPU kernels",
+                            e
+                        );
                         None
                     }
                 },
@@ -532,8 +543,9 @@ impl ScaleContext {
                                 dst_to_src(xx, sw, dw) + shift,
                                 dst_to_src(yy, sh, dh) + shift,
                             );
-                            out_row[xx] =
-                                sample_plane(s, ls_s, (sw, sh), pos, alg).round().clamp(0.0, 255.0) as u8;
+                            out_row[xx] = sample_plane(s, ls_s, (sw, sh), pos, alg)
+                                .round()
+                                .clamp(0.0, 255.0) as u8;
                         }
                     }
                 }
@@ -593,7 +605,10 @@ impl ScaleContext {
             let (sw, sh) = if luma {
                 (src.width as usize, src.height as usize)
             } else {
-                (src.width.div_ceil(2) as usize, src.height.div_ceil(2) as usize)
+                (
+                    src.width.div_ceil(2) as usize,
+                    src.height.div_ceil(2) as usize,
+                )
             };
             let dst_ls = dst.linesize(plane);
             filter::scale_plane(
@@ -657,7 +672,9 @@ impl ScaleContext {
                     let out_row = &mut out[yy * out_ls..];
                     let g_row = &inter.plane(0)[yy * dw..];
                     for xx in 0..dw {
-                        let c = range_expand(g_row[xx] as f32, full).round().clamp(0.0, 255.0) as u8;
+                        let c = range_expand(g_row[xx] as f32, full)
+                            .round()
+                            .clamp(0.0, 255.0) as u8;
                         let px = xx * step;
                         out_row[px + r_off] = c;
                         out_row[px + g_off] = c;
@@ -682,7 +699,13 @@ impl ScaleContext {
         let (cw, ch) = (src.width.div_ceil(2), src.height.div_ceil(2));
         let sx = dst_to_src(xx, src.width, self.dst.1);
         let sy = dst_to_src(yy, src.height, self.dst.2);
-        let y = sample_plane(src.plane(0), src.linesize(0), (src.width, src.height), (sx, sy), alg);
+        let y = sample_plane(
+            src.plane(0),
+            src.linesize(0),
+            (src.width, src.height),
+            (sx, sy),
+            alg,
+        );
 
         // Chroma position in the chroma-plane grid, honoring siting: a
         // CENTER-sited chroma sample i lives at luma position 2i+0.5, so the
@@ -808,7 +831,11 @@ pub(crate) fn sample_plane(
 /// Component byte offsets of R/G/B inside one pixel of a packed RGB format.
 pub(crate) fn rgb_offsets(fmt: PixelFormat) -> (usize, usize, usize) {
     let d = pixdesc::descriptor(fmt);
-    (d.comp[0].offset as usize, d.comp[1].offset as usize, d.comp[2].offset as usize)
+    (
+        d.comp[0].offset as usize,
+        d.comp[1].offset as usize,
+        d.comp[2].offset as usize,
+    )
 }
 
 #[cfg(test)]
@@ -818,7 +845,10 @@ mod tests {
     use crate::util::frame::Frame;
 
     fn cpu_opts(alg: ScaleAlgorithm) -> ScaleOptions {
-        ScaleOptions { algorithm: alg, engine: ScaleEngine::Cpu }
+        ScaleOptions {
+            algorithm: alg,
+            engine: ScaleEngine::Cpu,
+        }
     }
 
     /// 2×1 yuv420p, black then white (limited range): known RGB results at
@@ -831,12 +861,20 @@ mod tests {
         src.plane_mut(1)[..1].copy_from_slice(&[128]);
         src.plane_mut(2)[..1].copy_from_slice(&[128]);
 
-        for alg in [ScaleAlgorithm::Nearest, ScaleAlgorithm::Bilinear, ScaleAlgorithm::Bicubic] {
+        for alg in [
+            ScaleAlgorithm::Nearest,
+            ScaleAlgorithm::Bilinear,
+            ScaleAlgorithm::Bicubic,
+        ] {
             let mut dst = Frame::alloc(PixelFormat::Rgb24, 2, 1).unwrap();
-            ScaleContext::new((PixelFormat::Yuv420p, 2, 1), (PixelFormat::Rgb24, 2, 1), cpu_opts(alg))
-                .unwrap()
-                .scale(&src, &mut dst)
-                .unwrap();
+            ScaleContext::new(
+                (PixelFormat::Yuv420p, 2, 1),
+                (PixelFormat::Rgb24, 2, 1),
+                cpu_opts(alg),
+            )
+            .unwrap()
+            .scale(&src, &mut dst)
+            .unwrap();
             let out = dst.plane(0);
             assert_eq!(&out[..3], &[0, 0, 0], "{alg:?} black");
             assert_eq!(&out[3..6], &[255, 255, 255], "{alg:?} white");
@@ -852,10 +890,14 @@ mod tests {
         src.plane_mut(2)[..1].copy_from_slice(&[128]);
 
         let mut dst = Frame::alloc(PixelFormat::Rgb24, 2, 1).unwrap();
-        ScaleContext::new((PixelFormat::Yuv420p, 2, 1), (PixelFormat::Rgb24, 2, 1), cpu_opts(ScaleAlgorithm::Bicubic))
-            .unwrap()
-            .scale(&src, &mut dst)
-            .unwrap();
+        ScaleContext::new(
+            (PixelFormat::Yuv420p, 2, 1),
+            (PixelFormat::Rgb24, 2, 1),
+            cpu_opts(ScaleAlgorithm::Bicubic),
+        )
+        .unwrap()
+        .scale(&src, &mut dst)
+        .unwrap();
         let out = dst.plane(0);
         assert_eq!(&out[..3], &[0, 0, 0]);
         assert_eq!(&out[3..6], &[255, 255, 255]);
@@ -875,10 +917,14 @@ mod tests {
         src.plane_mut(2)[..1].copy_from_slice(&[90]);
 
         let mut dst = Frame::alloc(PixelFormat::Rgb24, 2, 2).unwrap();
-        ScaleContext::new((PixelFormat::Yuv420p, 2, 2), (PixelFormat::Rgb24, 2, 2), cpu_opts(ScaleAlgorithm::Bicubic))
-            .unwrap()
-            .scale(&src, &mut dst)
-            .unwrap();
+        ScaleContext::new(
+            (PixelFormat::Yuv420p, 2, 2),
+            (PixelFormat::Rgb24, 2, 2),
+            cpu_opts(ScaleAlgorithm::Bicubic),
+        )
+        .unwrap()
+        .scale(&src, &mut dst)
+        .unwrap();
         let out = dst.plane(0);
         for px in out.chunks_exact(3) {
             assert_eq!(px, &[37, 79, 255]);
@@ -898,10 +944,14 @@ mod tests {
         src.plane_mut(2).copy_from_slice(&[128, 128]);
 
         let mut dst = Frame::alloc(PixelFormat::Rgb24, 4, 2).unwrap();
-        ScaleContext::new((PixelFormat::Yuv420p, 4, 2), (PixelFormat::Rgb24, 4, 2), cpu_opts(ScaleAlgorithm::Bicubic))
-            .unwrap()
-            .scale(&src, &mut dst)
-            .unwrap();
+        ScaleContext::new(
+            (PixelFormat::Yuv420p, 4, 2),
+            (PixelFormat::Rgb24, 4, 2),
+            cpu_opts(ScaleAlgorithm::Bicubic),
+        )
+        .unwrap()
+        .scale(&src, &mut dst)
+        .unwrap();
         // Both luma columns of a chroma column see the SAME U (replication):
         // pixel 0 and 1 identical, 2 and 3 identical, no intermediate value.
         let out = dst.plane(0);
@@ -913,8 +963,12 @@ mod tests {
         // pixels 0-1 ← chroma col 0 (U=80), pixels 2-3 ← chroma col 1 (U=200).
         let b_col0 = out[2] as i32; // pixel 0 blue — tracks U
         let b_col1 = out[8] as i32; // pixel 2 blue
-        let expected_col0 = (100.0f32 + 1.772 * (80.0 - 128.0)).round().clamp(0.0, 255.0) as i32;
-        let expected_col1 = (100.0f32 + 1.772 * (200.0 - 128.0)).round().clamp(0.0, 255.0) as i32;
+        let expected_col0 = (100.0f32 + 1.772 * (80.0 - 128.0))
+            .round()
+            .clamp(0.0, 255.0) as i32;
+        let expected_col1 = (100.0f32 + 1.772 * (200.0 - 128.0))
+            .round()
+            .clamp(0.0, 255.0) as i32;
         assert_eq!((b_col0, b_col1), (expected_col0, expected_col1));
     }
 
@@ -931,10 +985,14 @@ mod tests {
         src.plane_mut(2)[..1].copy_from_slice(&[128]);
 
         let mut dst = Frame::alloc(PixelFormat::Rgb24, 2, 2).unwrap();
-        ScaleContext::new((PixelFormat::Yuv420p, 2, 2), (PixelFormat::Rgb24, 2, 2), cpu_opts(ScaleAlgorithm::Bicubic))
-            .unwrap()
-            .scale(&src, &mut dst)
-            .unwrap();
+        ScaleContext::new(
+            (PixelFormat::Yuv420p, 2, 2),
+            (PixelFormat::Rgb24, 2, 2),
+            cpu_opts(ScaleAlgorithm::Bicubic),
+        )
+        .unwrap()
+        .scale(&src, &mut dst)
+        .unwrap();
         let out = dst.plane(0);
         for px in out.chunks_exact(3) {
             assert_eq!(px[0], 128, "R");
@@ -950,10 +1008,14 @@ mod tests {
         src.plane_mut(1)[..1].copy_from_slice(&[255]);
         src.plane_mut(2)[..1].copy_from_slice(&[128]);
         let mut dst = Frame::alloc(PixelFormat::Bgr24, 2, 1).unwrap();
-        ScaleContext::new((PixelFormat::Yuv420p, 2, 1), (PixelFormat::Bgr24, 2, 1), cpu_opts(ScaleAlgorithm::Bicubic))
-            .unwrap()
-            .scale(&src, &mut dst)
-            .unwrap();
+        ScaleContext::new(
+            (PixelFormat::Yuv420p, 2, 1),
+            (PixelFormat::Bgr24, 2, 1),
+            cpu_opts(ScaleAlgorithm::Bicubic),
+        )
+        .unwrap()
+        .scale(&src, &mut dst)
+        .unwrap();
         let out = dst.plane(0);
         assert_eq!(out[0], 255, "B first in bgr24");
     }
@@ -961,12 +1023,19 @@ mod tests {
     #[test]
     fn identity_copies_planes() {
         let mut src = Frame::alloc(PixelFormat::Yuv420p, 4, 2).unwrap();
-        src.plane_mut(0).iter_mut().enumerate().for_each(|(i, b)| *b = i as u8);
+        src.plane_mut(0)
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, b)| *b = i as u8);
         let mut dst = Frame::alloc(PixelFormat::Yuv420p, 4, 2).unwrap();
-        ScaleContext::new((PixelFormat::Yuv420p, 4, 2), (PixelFormat::Yuv420p, 4, 2), cpu_opts(ScaleAlgorithm::Bicubic))
-            .unwrap()
-            .scale(&src, &mut dst)
-            .unwrap();
+        ScaleContext::new(
+            (PixelFormat::Yuv420p, 4, 2),
+            (PixelFormat::Yuv420p, 4, 2),
+            cpu_opts(ScaleAlgorithm::Bicubic),
+        )
+        .unwrap()
+        .scale(&src, &mut dst)
+        .unwrap();
         assert_eq!(src.plane(0), dst.plane(0));
     }
 
@@ -976,10 +1045,14 @@ mod tests {
         src.color_range = ColorRange::Jpeg;
         src.plane_mut(0)[..2].copy_from_slice(&[0, 200]);
         let mut dst = Frame::alloc(PixelFormat::Rgba, 2, 1).unwrap();
-        ScaleContext::new((PixelFormat::Gray8, 2, 1), (PixelFormat::Rgba, 2, 1), cpu_opts(ScaleAlgorithm::Bicubic))
-            .unwrap()
-            .scale(&src, &mut dst)
-            .unwrap();
+        ScaleContext::new(
+            (PixelFormat::Gray8, 2, 1),
+            (PixelFormat::Rgba, 2, 1),
+            cpu_opts(ScaleAlgorithm::Bicubic),
+        )
+        .unwrap()
+        .scale(&src, &mut dst)
+        .unwrap();
         let out = dst.plane(0);
         assert_eq!(&out[..4], &[0, 0, 0, 0]);
         assert_eq!(&out[4..8], &[200, 200, 200, 0]);
@@ -993,12 +1066,18 @@ mod tests {
         src.color_range = ColorRange::Jpeg;
         src.plane_mut(0).copy_from_slice(&[10, 20, 30, 40]);
         let mut dst = Frame::alloc(PixelFormat::Gray8, 4, 4).unwrap();
-        ScaleContext::new((PixelFormat::Gray8, 2, 2), (PixelFormat::Gray8, 4, 4), cpu_opts(ScaleAlgorithm::Nearest))
-            .unwrap()
-            .scale(&src, &mut dst)
-            .unwrap();
+        ScaleContext::new(
+            (PixelFormat::Gray8, 2, 2),
+            (PixelFormat::Gray8, 4, 4),
+            cpu_opts(ScaleAlgorithm::Nearest),
+        )
+        .unwrap()
+        .scale(&src, &mut dst)
+        .unwrap();
         // dst→src: (x+0.5)/2−0.5 → x=0→−0.25→0, x=1→0.25→0, x=2→0.75→1, x=3→1.25→1.
-        let expect = [10, 10, 20, 20, 10, 10, 20, 20, 30, 30, 40, 40, 30, 30, 40, 40];
+        let expect = [
+            10, 10, 20, 20, 10, 10, 20, 20, 30, 30, 40, 40, 30, 30, 40, 40,
+        ];
         assert_eq!(dst.plane(0), &expect);
     }
 
@@ -1010,10 +1089,14 @@ mod tests {
         src.color_range = ColorRange::Jpeg;
         src.plane_mut(0).copy_from_slice(&[0, 100, 200, 0]);
         let mut dst = Frame::alloc(PixelFormat::Gray8, 4, 4).unwrap();
-        ScaleContext::new((PixelFormat::Gray8, 2, 2), (PixelFormat::Gray8, 4, 4), cpu_opts(ScaleAlgorithm::Bilinear))
-            .unwrap()
-            .scale(&src, &mut dst)
-            .unwrap();
+        ScaleContext::new(
+            (PixelFormat::Gray8, 2, 2),
+            (PixelFormat::Gray8, 4, 4),
+            cpu_opts(ScaleAlgorithm::Bilinear),
+        )
+        .unwrap()
+        .scale(&src, &mut dst)
+        .unwrap();
         // dst x=1 → src 0.25 → 0.75·0 + 0.25·100 = 25 (row 0).
         assert_eq!(dst.plane(0)[0..4], [0, 25, 75, 100]);
     }
@@ -1022,7 +1105,11 @@ mod tests {
     /// the normalized-kernel invariant (and kernel weights sum to 1).
     #[test]
     fn constant_color_is_preserved_by_resampling() {
-        for alg in [ScaleAlgorithm::Nearest, ScaleAlgorithm::Bilinear, ScaleAlgorithm::Bicubic] {
+        for alg in [
+            ScaleAlgorithm::Nearest,
+            ScaleAlgorithm::Bilinear,
+            ScaleAlgorithm::Bicubic,
+        ] {
             let mut src = Frame::alloc(PixelFormat::Yuv420p, 9, 7).unwrap();
             for p in 0..3 {
                 for b in src.plane_mut(p).iter_mut() {
@@ -1078,12 +1165,14 @@ mod tests {
 
     #[test]
     fn unsupported_pairs_rejected() {
-        assert!(ScaleContext::new(
-            (PixelFormat::Yuv422p, 8, 8),
-            (PixelFormat::Rgb24, 8, 8),
-            cpu_opts(ScaleAlgorithm::Bicubic),
-        )
-        .is_err());
+        assert!(
+            ScaleContext::new(
+                (PixelFormat::Yuv422p, 8, 8),
+                (PixelFormat::Rgb24, 8, 8),
+                cpu_opts(ScaleAlgorithm::Bicubic),
+            )
+            .is_err()
+        );
     }
 
     /// Kernel sanity: bicubic weights at 0 = 1 and symmetric; negative lobes
@@ -1150,7 +1239,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("{alg:?}: {e}"));
             for p in 0..3 {
                 let want = (77 + p * 11) as u8;
-                assert!(dst.plane(p).iter().all(|&b| b == want), "{alg:?} down plane {p}");
+                assert!(
+                    dst.plane(p).iter().all(|&b| b == want),
+                    "{alg:?} down plane {p}"
+                );
             }
         }
     }
@@ -1205,9 +1297,14 @@ mod tests {
         let mut dst_left = Frame::alloc(PixelFormat::Yuv420p, 26, 14).unwrap();
         src.chroma_location = ChromaLocation::Left;
         ctx.scale(&src, &mut dst_left).unwrap();
-        assert_eq!(dst_center.plane(0), dst_left.plane(0), "luma independent of siting");
+        assert_eq!(
+            dst_center.plane(0),
+            dst_left.plane(0),
+            "luma independent of siting"
+        );
         assert_ne!(
-            dst_center.plane(1), dst_left.plane(1),
+            dst_center.plane(1),
+            dst_left.plane(1),
             "chroma siting must shift the resample"
         );
     }
@@ -1223,7 +1320,10 @@ mod tests {
         let err = ScaleContext::new(
             (PixelFormat::Yuv420p, 9, 7),
             (PixelFormat::Rgb24, 17, 13),
-            ScaleOptions { algorithm: table, engine: ScaleEngine::Vulkan },
+            ScaleOptions {
+                algorithm: table,
+                engine: ScaleEngine::Vulkan,
+            },
         )
         .unwrap_err();
         match err {
@@ -1236,7 +1336,10 @@ mod tests {
         let ctx = ScaleContext::new(
             (PixelFormat::Yuv420p, 9, 7),
             (PixelFormat::Rgb24, 17, 13),
-            ScaleOptions { algorithm: table, engine: ScaleEngine::Auto },
+            ScaleOptions {
+                algorithm: table,
+                engine: ScaleEngine::Auto,
+            },
         )
         .unwrap();
         assert!(!ctx.uses_gpu());
@@ -1246,7 +1349,10 @@ mod tests {
         ScaleContext::new(
             (PixelFormat::Yuv420p, 9, 7),
             (PixelFormat::Rgb24, 9, 7),
-            ScaleOptions { algorithm: table, engine: ScaleEngine::Auto },
+            ScaleOptions {
+                algorithm: table,
+                engine: ScaleEngine::Auto,
+            },
         )
         .unwrap();
         // Known corner (documented in the module docs): identity-geometry
@@ -1255,7 +1361,10 @@ mod tests {
         let err = ScaleContext::new(
             (PixelFormat::Gray8, 9, 7),
             (PixelFormat::Rgb24, 9, 7),
-            ScaleOptions { algorithm: table, engine: ScaleEngine::Vulkan },
+            ScaleOptions {
+                algorithm: table,
+                engine: ScaleEngine::Vulkan,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)));
@@ -1280,5 +1389,4 @@ mod tests {
         assert_eq!(ScaleAlgorithm::Bicubic.size_factor(), 0);
         assert!(!ScaleAlgorithm::Bicubic.is_table_driven());
     }
-
 }
