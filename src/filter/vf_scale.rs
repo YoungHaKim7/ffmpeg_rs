@@ -101,7 +101,7 @@
 //! `dB` or the scale2ref variables fail at parse with C's `Cannot parse
 //! expression for width/height: '...'` text — an honest degradation.
 
-mod expr;
+pub(crate) mod expr;
 
 use crate::{
     NOPTS, log_error, log_verbose, log_warning,

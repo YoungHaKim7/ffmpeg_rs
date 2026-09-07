@@ -56,7 +56,7 @@ pub static NULL_DEF: FilterDef = FilterDef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::link::Link;
+    // use crate::filter::link::Link;
     use crate::util::pixfmt::PixelFormat;
 
     #[test]
