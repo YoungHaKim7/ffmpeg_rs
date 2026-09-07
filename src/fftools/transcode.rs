@@ -29,7 +29,7 @@ use crate::{
         {InputFormatContext, OutputFormatContext, Stream},
     },
     log_error, log_info, log_verbose,
-    swscale::{ScaleContext, ScaleOptions},
+    swscale::{ScaleAlgorithm, ScaleContext, ScaleEngine, ScaleOptions},
     util::{
         color::{ColorRange, ColorSpace},
         error::{Error, Result},
@@ -144,8 +144,18 @@ fn buffersrc_args(in_st: &Stream) -> String {
 impl VfGraph {
     /// `configure_filtergraph` (ffmpeg_filter.c): create the endpoints,
     /// parse the description, attach the open pads, negotiate formats.
-    fn new(desc: &str, in_st: &Stream) -> Result<VfGraph> {
+    fn new(
+        desc: &str,
+        in_st: &Stream,
+        scale_algorithm: ScaleAlgorithm,
+        scale_engine: ScaleEngine,
+    ) -> Result<VfGraph> {
         let mut g = FilterGraph::new();
+        // `-scale_algo`/`-scale_engine` reach the graph like ffmpeg's
+        // `-sws_flags` flows through graph scale_sws_opts (the graph's
+        // scale filters read them when their own `flags` is unset).
+        g.scale_algorithm = scale_algorithm;
+        g.scale_engine = scale_engine;
         let src = g.create_filter("buffer", &buffersrc_args(in_st))?;
         let (open_inputs, open_outputs) = g.parse_ptr(desc)?;
         let sink = g.create_filter("buffersink", "")?;
@@ -259,7 +269,12 @@ fn transcode(cli: &Cli) -> Result<Stats> {
                 full += &format!(",format={}", fmt.name());
             }
             log_verbose!(None, "filtergraph description: {full}");
-            Some(VfGraph::new(&full, &in_st)?)
+            Some(VfGraph::new(
+                &full,
+                &in_st,
+                cli.scale_algorithm,
+                cli.scale_engine,
+            )?)
         }
         None => None,
     };

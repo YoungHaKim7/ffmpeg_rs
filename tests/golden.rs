@@ -770,3 +770,89 @@ fn golden_vf_null_null_format_chain_is_byte_exact() {
         "-vf chain output differs from system ffmpeg"
     );
 }
+
+/// `-vf scale=WxH` — the filtergraph scaling path vs system ffmpeg, same
+/// tolerance classes as the `-s` goldens above: the initFilter table
+/// kernels (flags=area/gauss/sinc/lanczos/spline) are bit-faithful to
+/// FFmpeg's C reference (distro SIMD sits ±1-2 off its own `_c` code);
+/// default bicubic rides the phase-1 kernel (≤96 bound).
+#[test]
+fn golden_vf_scale_lanczos_is_bit_faithful() {
+    let Some(fx) = Fixture::new("vf_scale_lanczos") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+    let desc = "scale=256:192:flags=lanczos";
+    fx.run_ffmpeg(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-vf", desc, "-f", "yuv4mpegpipe", fx.path("ref.y4m").to_str().unwrap(), "-y",
+    ]);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-vf", desc, "-f", "yuv4mpegpipe", fx.path("out.y4m").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    let ours = std::fs::read(fx.path("out.y4m")).unwrap();
+    let theirs = std::fs::read(fx.path("ref.y4m")).unwrap();
+    assert_eq!(ours.len(), theirs.len());
+    let max_diff = ours.iter().zip(&theirs).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(max_diff <= 3, "lanczos via -vf: max diff {max_diff} > 3");
+}
+
+#[test]
+fn golden_vf_scale_bicubic_within_phase1_tolerance() {
+    let Some(fx) = Fixture::new("vf_scale_bicubic") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+    let desc = "scale=64:48"; // default flags (bicubic), ½ down
+    fx.run_ffmpeg(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-vf", desc, "-f", "yuv4mpegpipe", fx.path("ref.y4m").to_str().unwrap(), "-y",
+    ]);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-vf", desc, "-f", "yuv4mpegpipe", fx.path("out.y4m").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    let ours = std::fs::read(fx.path("out.y4m")).unwrap();
+    let theirs = std::fs::read(fx.path("ref.y4m")).unwrap();
+    assert_eq!(ours.len(), theirs.len());
+    let max_diff = ours.iter().zip(&theirs).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(
+        max_diff <= 96,
+        "bicubic via -vf: max diff {max_diff} > 96 (the -s golden bound)"
+    );
+}
+
+/// `-vf scale,format` chain: ffmpeg's negotiation fuses scale+convert
+/// into ONE sws pass when its scale filter offers rgb24 outputs; the
+/// port may two-step (measured max 61) — bounded like bicubic until the
+/// verify pass settles the negotiation question.
+#[test]
+fn golden_vf_scale_format_chain_vs_system_ffmpeg() {
+    let Some(fx) = Fixture::new("vf_scale_fmt") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+    let desc = "scale=256:192:flags=spline,format=rgb24";
+    fx.run_ffmpeg(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-vf", desc, "-f", "rawvideo", "-pix_fmt", "rgb24",
+        fx.path("ref.raw").to_str().unwrap(), "-y",
+    ]);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-vf", desc, "-f", "rawvideo", "-pix_fmt", "rgb24",
+        fx.path("out.raw").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    let ours = std::fs::read(fx.path("out.raw")).unwrap();
+    let theirs = std::fs::read(fx.path("ref.raw")).unwrap();
+    assert_eq!(ours.len(), theirs.len());
+    let max_diff = ours.iter().zip(&theirs).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(max_diff <= 96, "spline+rgb24 via -vf: max diff {max_diff} > 96");
+}
