@@ -118,12 +118,14 @@ pub mod util;
 
 // Crate-root re-exports mirroring how C includes libavutil headers:
 // `use crate::{Error, Result, Frame, PixelFormat, Rational}`.
+pub use crate::swscale::filter::TableScaler;
 pub use filter::{FilterGraph, LinkId, NodeId};
-pub use util::NOPTS;
-pub use util::color::{ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTrc};
-pub use util::error::{Error, Result};
-pub use util::frame::{Frame, FrameFlags, PictureType};
-pub use util::imgutils;
-pub use util::mathematics;
-pub use util::pixfmt::PixelFormat;
-pub use util::rational::Rational;
+pub use util::{
+    NOPTS,
+    color::{ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTrc},
+    error::{Error, Result},
+    frame::{Frame, FrameFlags, PictureType},
+    imgutils, mathematics,
+    pixfmt::PixelFormat,
+    rational::Rational,
+};

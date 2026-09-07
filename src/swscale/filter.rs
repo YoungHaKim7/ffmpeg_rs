@@ -81,7 +81,7 @@ pub(crate) const MAX_FILTER_SIZE: usize = 256;
 
 /// The table-driven `SWS_*` scalers — the five kernels this module generates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TableScaler {
+pub enum TableScaler {
     /// `SWS_AREA` (1<<5) — downscale trapezoid; upscale takes the 2-tap
     /// bilinear loop (`utils.c:244-267`).
     Area,
