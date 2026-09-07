@@ -1,4 +1,4 @@
-mod codec;
+pub mod codec;
 mod filtergraph;
 pub mod format;
 mod golden;

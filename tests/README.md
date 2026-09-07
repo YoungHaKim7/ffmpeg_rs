@@ -14,6 +14,9 @@ cargo t --test mod
 
 # cargo nextest
 cargo nextest run --test mod
+
+# 내가 원하는 모듈만 test
+cargo t --lib codec::packet
 ```
 
 # private 너무 많아서 test코드 안에 넣음
