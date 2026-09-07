@@ -1638,7 +1638,9 @@ mod tests {
     fn parse_video_size_forms() {
         assert_eq!(parse_video_size("320x240").unwrap(), (320, 240));
         assert_eq!(parse_video_size("320X240").unwrap(), (320, 240)); // any ONE separator
-        assert_eq!(parse_video_size(" 320x240 ").unwrap(), (320, 240));
+        // Leading whitespace is skipped (strtol); a TRAILING space is
+        // "extraneous data" — C rejects it (parseutils.c:171-175).
+        assert!(parse_video_size(" 320x240 ").is_err());
         assert!(parse_video_size("320").is_err()); // height 0
         assert!(parse_video_size("320x240junk").is_err()); // trailing data
         assert!(parse_video_size("320x").is_err());
@@ -1663,10 +1665,15 @@ mod tests {
         assert_eq!((g.links[lout.0].w, g.links[lout.0].h), (64, 48));
         let (g, _s, _k, _i, lout) = scale_graph("w=0.4:h=ih", (100, 20));
         assert_eq!(g.links[lout.0].w, 100, "(int)0.4 == 0 -> in_w");
-        // Expressions can reference ow (set by the first pass) from the
-        // height (594-600 evaluates h AFTER publishing w).
-        let (g, _s, _k, _i, lout) = scale_graph("w=100:h=oh/2", (64, 48));
-        assert_eq!((g.links[lout.0].w, g.links[lout.0].h), (100, 50));
+        // w/h expressions may NEVER reference ow/oh — check_exprs rejects
+        // at INIT (vf_scale.c:197-204; verified against system ffmpeg),
+        // WITH the trailing period (unlike "Cannot parse expression", 280).
+        match scale_err("w=100:h=oh/2") {
+            Error::InvalidArgument(msg) => {
+                assert_eq!(msg, "Height expression cannot be self-referencing: 'oh/2'.")
+            }
+            other => panic!("unexpected error: {other}"),
+        }
         // hsub/vsub/ohsub/ovsub (560-563): yuv420p -> 2 in and out.
         let (g, _s, _k, _i, lout) = scale_graph("w=iw/hsub*4:h=ih/vsub*4", (64, 48));
         assert_eq!((g.links[lout.0].w, g.links[lout.0].h), (128, 96));
@@ -1800,16 +1807,21 @@ mod tests {
         // reset_sar=1: outlink SAR is 1/1 (658-659) and the frame takes it.
         let (mut g, src, sink, _lin, lout) = scale_graph("w=128:h=ih:reset_sar=1", (64, 48));
         assert_eq!(g.links[lout.0].sample_aspect_ratio, Rational::ONE);
-        g.add_frame(src, &yuv_frame(64, 48, 0)).unwrap();
+        let mut f = yuv_frame(64, 48, 0);
+        f.sample_aspect_ratio = Rational::new(1, 1); // decoded frames carry SAR
+        g.add_frame(src, &f).unwrap();
         let out = g.get_frame(sink).unwrap();
         assert_eq!(out.sample_aspect_ratio, Rational::ONE);
 
         // Without reset (660-663): q = (64/48)/(128/48) = 1/2, times in_sar
         // 1/1 -> outlink 1/2. Frame SAR via av_reduce (866-869):
-        // (1*48*64)/(1*128*48) = 1/2.
+        // (1*48*64)/(1*128*48) = 1/2. The av_reduce reads the FRAME's SAR
+        // (what the decoder stamped), never the link's.
         let (mut g, src, sink, _lin, lout) = scale_graph("w=128:h=ih", (64, 48));
         assert_eq!(g.links[lout.0].sample_aspect_ratio, Rational::new(1, 2));
-        g.add_frame(src, &yuv_frame(64, 48, 0)).unwrap();
+        let mut f = yuv_frame(64, 48, 0);
+        f.sample_aspect_ratio = Rational::new(1, 1);
+        g.add_frame(src, &f).unwrap();
         let out = g.get_frame(sink).unwrap();
         assert_eq!(out.sample_aspect_ratio, Rational::new(1, 2));
     }
@@ -1944,19 +1956,19 @@ mod tests {
         // parse errors with C's text (280).
         match scale_err("w=main_w:h=ih") {
             Error::InvalidArgument(msg) => {
-                assert_eq!(msg, "Cannot parse expression for width: 'main_w'.")
+                assert_eq!(msg, "Cannot parse expression for width: 'main_w'")
             }
             other => panic!("unexpected error: {other}"),
         }
         match scale_err("h=rw") {
             Error::InvalidArgument(msg) => {
-                assert_eq!(msg, "Cannot parse expression for height: 'rw'.")
+                assert_eq!(msg, "Cannot parse expression for height: 'rw'")
             }
             other => panic!("unexpected error: {other}"),
         }
         match scale_err("w=sin(iw):h=ih") {
             Error::InvalidArgument(msg) => {
-                assert_eq!(msg, "Cannot parse expression for width: 'sin(iw)'.")
+                assert_eq!(msg, "Cannot parse expression for width: 'sin(iw)'")
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -2255,19 +2267,21 @@ mod tests {
         // A tag-only mismatch on the RANGE defeats the noop AND trips the
         // conversion gate (both compare in vs out range for yuv420p): the
         // limited<->full conversion the port does not implement errors —
-        // see color_range_and_matrix_gates. The reachable "not noop but
-        // convertible" case is a chroma-location mismatch: the identity
-        // Scaler copy runs, pixels bit-equal, tags corrected to the link's.
+        // see color_range_and_matrix_gates. A chroma-location "mismatch"
+        // does NOT defeat the noop: the unconditional in_chroma_loc stamp
+        // (vf_scale.c:829) rewrites the input tag to Unspecified BEFORE
+        // the noop comparison, so C (and the port) pass the SAME frame
+        // through with the tag corrected.
         let (mut g, src, sink, _lin, _lout) = scale_graph("", (64, 48));
         let mut f = yuv_frame(64, 48, 5);
         f.chroma_location = ChromaLocation::Left; // in_chroma_loc stamps Unspecified
         g.add_frame(src, &f).unwrap();
         let out = g.get_frame(sink).unwrap();
         assert!(
-            !std::sync::Arc::ptr_eq(&out.planes[0].buf, &f.planes[0].buf),
-            "copied"
+            std::sync::Arc::ptr_eq(&out.planes[0].buf, &f.planes[0].buf),
+            "noop pass-through shares the buffer (C returns the same AVFrame)"
         );
-        assert_eq!(out.plane(0), f.plane(0), "identity copy: bit-equal pixels");
+        assert_eq!(out.plane(0), f.plane(0), "bit-equal pixels");
         assert_eq!(out.chroma_location, ChromaLocation::Unspecified);
     }
 
@@ -2591,20 +2605,19 @@ mod tests {
         );
         g.add_frame(src, &yuv_frame(16, 16, 3)).unwrap();
         let out = g.get_frame(sink).unwrap();
-        eprintln!(
-            "DBG auto: fmt={:?} w={} h={} first16={:?}",
-            out.format,
-            out.width,
-            out.height,
-            &out.plane(0)[..16.min(out.plane(0).len())]
-        );
         assert_eq!(out.format, PixelFormat::Rgb24);
         assert_eq!((out.width, out.height), (16, 16));
         assert_eq!(out.pts, 3);
-        // The identity-geometry yuv420p->RGB table converter produced a
-        // constant, non-trivial pixel.
-        let first = out.plane(0)[0];
-        assert!(out.plane(0).iter().all(|&b| b == first));
-        assert!(first != 0 || out.plane(0)[1] != 0);
+        // The identity-geometry yuv420p→RGB table converter turned the
+        // constant-color frame into a constant-color rgb24 frame: PACKED,
+        // so plane 0 is the repeating 3-byte pattern [R, G, B].
+        let px = &out.plane(0);
+        assert!(px.len() % 3 == 0, "packed rgb24: 3 bytes per pixel");
+        let [r, g, b] = [px[0], px[1], px[2]];
+        assert!(
+            px.chunks_exact(3).all(|c| c == [r, g, b]),
+            "constant in, constant out: every pixel equals [{r}, {g}, {b}]"
+        );
+        assert!(r != 0 || g != 0 || b != 0, "non-trivial conversion");
     }
 }
