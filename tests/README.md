@@ -20,4 +20,5 @@ cargo nextest run --test mod
 
 ```bash
 swscale/
+format/rawvideo.rs
 ```
