@@ -15,3 +15,9 @@ cargo t --test mod
 # cargo nextest
 cargo nextest run --test mod
 ```
+
+# private 너무 많아서 test코드 안에 넣음
+
+```bash
+swscale/
+```

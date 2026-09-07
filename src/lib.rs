@@ -118,7 +118,6 @@ pub mod util;
 
 // Crate-root re-exports mirroring how C includes libavutil headers:
 // `use crate::{Error, Result, Frame, PixelFormat, Rational}`.
-pub use crate::swscale::filter::TableScaler;
 pub use filter::{FilterGraph, LinkId, NodeId};
 pub use util::{
     NOPTS,
