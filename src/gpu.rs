@@ -14,8 +14,6 @@
 
 use std::sync::Arc;
 
-pub(crate) mod usage;
-
 use vulkano::{
     VulkanLibrary,
     command_buffer::{
@@ -32,6 +30,8 @@ use vulkano::{
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
     sync::{self, GpuFuture},
 };
+
+pub(crate) mod usage;
 
 use crate::util::error::{Error, Result};
 
