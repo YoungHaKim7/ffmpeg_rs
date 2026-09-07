@@ -101,9 +101,10 @@
 //! `dB` or the scale2ref variables fail at parse with C's `Cannot parse
 //! expression for width/height: '...'` text — an honest degradation.
 
+mod expr;
+
 use crate::{
-    NOPTS,
-    log_error, log_verbose, log_warning,
+    NOPTS, log_error, log_verbose, log_warning,
     swscale::{self, ScaleAlgorithm, ScaleContext as SwsScaler, ScaleEngine, ScaleOptions},
     util::{
         color::{ChromaLocation, ColorRange, ColorSpace},
@@ -122,448 +123,6 @@ use super::{
     graph::FilterGraph,
     link::NodeId,
 };
-
-// ---------------------------------------------------------------------------
-// The expression evaluator (libavutil/eval.c subset — see module doc)
-// ---------------------------------------------------------------------------
-
-mod expr {
-    //! Mini recursive-descent evaluator for the `av_expr` subset vf_scale
-    //! needs. Grammar (eval.c:560-690), LOWEST binder first:
-    //!
-    //! ```text
-    //! expr    := subexpr                      (';' sequences not ported)
-    //! subexpr := term (('+'|'-') term)*
-    //! term    := factor (('*'|'/') factor)*
-    //! factor  := ['-'|'+'] primary ('^' ['-'|'+'] primary)*   (LEFT fold)
-    //! primary := number | var | '(' expr ')' | func '(' expr (',' expr)* ')'
-    //! ```
-    //!
-    //! The C trick for `-2^2 == -4` (eval.c:587-611): a leading sign applies
-    //! to the WHOLE `^` chain (as a `-1` node multiplier), while each
-    //! exponent's own sign applies to that operand only. Whitespace is
-    //! stripped up front exactly like `av_expr_parse` (eval.c:748-750).
-
-    /// One AST node (C's `AVExpr`, reduced to the retained types). Variable
-    /// and function names are canonicalized `&'static str`s (the alias pairs
-    /// `in_w`/`iw`, `out_w`/`ow`, ... share one slot), so [`uses`] matches a
-    /// canonical name and covers both aliases.
-    #[derive(Clone, Debug, PartialEq)]
-    pub(crate) enum Expr {
-        Num(f64),
-        Var(&'static str),
-        /// `-x`: C models the leading sign as a node `value` multiplier; the
-        /// negation node is the same thing.
-        Neg(Box<Expr>),
-        /// `+ - * / % ^` (the op char; evaluation at [`eval`]).
-        Bin(char, Box<Expr>, Box<Expr>),
-        /// `min/max/floor/ceil/trunc/round/abs/clip`.
-        Call(&'static str, Vec<Expr>),
-    }
-
-    impl Default for Expr {
-        fn default() -> Self {
-            Expr::Num(0.0)
-        }
-    }
-
-    /// The `var_values` slots of vf_scale.c:151 the retained subset uses
-    /// (vf_scale.c:552-563 fill). `n`/`t` live in the filter context (C keeps
-    /// them in the persistent array; only the frame path writes them).
-    #[derive(Clone, Copy, Debug, Default)]
-    pub(crate) struct Vars {
-        pub in_w: f64,
-        pub in_h: f64,
-        pub out_w: f64,
-        pub out_h: f64,
-        pub a: f64,
-        pub sar: f64,
-        pub dar: f64,
-        pub hsub: f64,
-        pub vsub: f64,
-        pub ohsub: f64,
-        pub ovsub: f64,
-        pub n: f64,
-        pub t: f64,
-    }
-
-    /// Canonical variable slot of a name, if it is one of the retained 13
-    /// (`var_names`, vf_scale.c:46-59 minus the ref/scale2ref entries).
-    /// A known variable binds even when followed by `(` — eval.c checks
-    /// `const_names` before functions (eval.c:388-397) and then fails on the
-    /// leftover `(`, so `iw(2)` is a parse error, not a call.
-    fn var_slot(name: &str) -> Option<&'static str> {
-        Some(match name {
-            "in_w" | "iw" => "in_w",
-            "in_h" | "ih" => "in_h",
-            "out_w" | "ow" => "out_w",
-            "out_h" | "oh" => "out_h",
-            "a" => "a",
-            "sar" => "sar",
-            "dar" => "dar",
-            "hsub" => "hsub",
-            "vsub" => "vsub",
-            "ohsub" => "ohsub",
-            "ovsub" => "ovsub",
-            "n" => "n",
-            "t" => "t",
-            _ => return None,
-        })
-    }
-
-    /// eval.c's recursion guard (`p.stack_index = 100`, 762-764).
-    const MAX_DEPTH: usize = 100;
-
-    struct Parser<'a> {
-        s: &'a [u8],
-        pos: usize,
-    }
-
-    impl<'a> Parser<'a> {
-        fn peek(&self) -> u8 {
-            if self.pos < self.s.len() {
-                self.s[self.pos]
-            } else {
-                0
-            }
-        }
-
-        fn eat(&mut self, c: u8) -> bool {
-            if self.peek() == c {
-                self.pos += 1;
-                true
-            } else {
-                false
-            }
-        }
-
-        fn parse_expr(&mut self, depth: usize) -> std::result::Result<Expr, String> {
-            if depth > MAX_DEPTH {
-                return Err("expression nesting too deep".into());
-            }
-            // The top-level ';' chain (e_last, eval.c:666-680) is not
-            // ported: a ';' is an invalid character here.
-            self.parse_subexpr(depth)
-        }
-
-        fn parse_subexpr(&mut self, depth: usize) -> std::result::Result<Expr, String> {
-            let mut e = self.parse_term(depth)?;
-            loop {
-                let c = self.peek();
-                if c == b'+' || c == b'-' {
-                    self.pos += 1;
-                    let rhs = self.parse_term(depth)?;
-                    e = Expr::Bin(c as char, Box::new(e), Box::new(rhs));
-                } else {
-                    break;
-                }
-            }
-            Ok(e)
-        }
-
-        fn parse_term(&mut self, depth: usize) -> std::result::Result<Expr, String> {
-            let mut e = self.parse_factor(depth)?;
-            loop {
-                let c = self.peek();
-                if c == b'*' || c == b'/' {
-                    self.pos += 1;
-                    let rhs = self.parse_factor(depth)?;
-                    e = Expr::Bin(c as char, Box::new(e), Box::new(rhs));
-                } else {
-                    break;
-                }
-            }
-            Ok(e)
-        }
-
-        /// `parse_factor` (eval.c:587-611): optional sign, primary, then a
-        /// LEFT-folded `^` chain. The FIRST sign multiplies the whole chain;
-        /// each subsequent operand's sign multiplies only that operand.
-        fn parse_factor(&mut self, depth: usize) -> std::result::Result<Expr, String> {
-            let neg = self.parse_sign();
-            let mut e = self.parse_primary(depth)?;
-            while self.eat(b'^') {
-                let neg2 = self.parse_sign();
-                let mut rhs = self.parse_primary(depth)?;
-                if neg2 {
-                    rhs = Expr::Neg(Box::new(rhs));
-                }
-                e = Expr::Bin('^', Box::new(e), Box::new(rhs));
-            }
-            if neg {
-                e = Expr::Neg(Box::new(e));
-            }
-            Ok(e)
-        }
-
-        /// The sign scan of `parse_pow`/`parse_dB` (eval.c:565-585) without
-        /// the `dB` special case: `-` negates, `+` is consumed and dropped.
-        fn parse_sign(&mut self) -> bool {
-            if self.peek() == b'-' {
-                self.pos += 1;
-                true
-            } else if self.peek() == b'+' {
-                self.pos += 1;
-                false
-            } else {
-                false
-            }
-        }
-
-        fn parse_primary(&mut self, depth: usize) -> std::result::Result<Expr, String> {
-            let c = self.peek();
-            if c == b'(' {
-                self.pos += 1;
-                let e = self.parse_expr(depth + 1)?;
-                if !self.eat(b')') {
-                    return Err("Missing ')' in expression".into());
-                }
-                return Ok(e);
-            }
-            if c.is_ascii_digit() || c == b'.' {
-                return Ok(Expr::Num(self.parse_number()?));
-            }
-            if c.is_ascii_alphabetic() || c == b'_' {
-                let start = self.pos;
-                while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
-                    self.pos += 1;
-                }
-                let ident = std::str::from_utf8(&self.s[start..self.pos])
-                    .expect("identifier scan produced ascii slice");
-                // const_names take precedence over functions (eval.c:388-397).
-                if let Some(v) = var_slot(ident) {
-                    return Ok(Expr::Var(v));
-                }
-                if self.eat(b'(') {
-                    let mut args = vec![self.parse_expr(depth + 1)?];
-                    let mut commas = 0usize;
-                    while self.eat(b',') {
-                        commas += 1;
-                        args.push(self.parse_expr(depth + 1)?);
-                    }
-                    if !self.eat(b')') {
-                        return Err("Missing ')' or too many args in expression".into());
-                    }
-                    let name: &'static str = match ident {
-                        "min" => "min",
-                        "max" => "max",
-                        "mod" => "mod",
-                        "floor" => "floor",
-                        "ceil" => "ceil",
-                        "trunc" => "trunc",
-                        "round" => "round",
-                        "abs" => "abs",
-                        "clip" => "clip",
-                        _ => return Err(format!("Unknown function '{ident}' in expression")),
-                    };
-                    // verify_expr's arity rules (eval.c:701-737): min/max/mod
-                    // take exactly 2, the 1-arg functions exactly 1, clip 3.
-                    let arity = match name {
-                        "min" | "max" | "mod" => 2,
-                        "clip" => 3,
-                        _ => 1,
-                    };
-                    if args.len() != arity || commas + 1 != arity {
-                        return Err(format!(
-                            "Incorrect number of arguments to '{ident}' (need {arity})"
-                        ));
-                    }
-                    return Ok(Expr::Call(name, args));
-                }
-                // eval.c:427-430: not a constant and no '(' anywhere after.
-                return Err(format!(
-                    "Undefined constant or missing '(' in '{ident}'"
-                ));
-            }
-            Err(format!(
-                "Invalid character '{}' in expression",
-                char::from(c)
-            ))
-        }
-
-        /// Decimal number with optional fraction and exponent (the
-        /// non-hex, non-dB subset of `av_strtod`). C's `0x...` and `5dB`
-        /// spellings are deliberately not accepted.
-        fn parse_number(&mut self) -> std::result::Result<f64, String> {
-            let start = self.pos;
-            while self.peek().is_ascii_digit() {
-                self.pos += 1;
-            }
-            if self.peek() == b'.' {
-                self.pos += 1;
-                while self.peek().is_ascii_digit() {
-                    self.pos += 1;
-                }
-            }
-            if self.pos == start {
-                return Err("Invalid number in expression".into());
-            }
-            let mut end = self.pos;
-            if self.peek() == b'e' || self.peek() == b'E' {
-                let save = self.pos;
-                self.pos += 1;
-                if self.peek() == b'+' || self.peek() == b'-' {
-                    self.pos += 1;
-                }
-                let digits_start = self.pos;
-                while self.peek().is_ascii_digit() {
-                    self.pos += 1;
-                }
-                if self.pos == digits_start {
-                    self.pos = save; // a trailing 'e' belongs to no number
-                } else {
-                    end = self.pos;
-                }
-            }
-            let text = std::str::from_utf8(&self.s[start..end])
-                .expect("number scan produced ascii slice");
-            text.parse::<f64>()
-                .map_err(|_| format!("Invalid number '{text}' in expression"))
-        }
-    }
-
-    /// `av_expr_parse` (minus everything outside the subset): strip
-    /// whitespace, parse one expression, then reject trailing characters
-    /// (eval.c:768-772's "Invalid chars ... at the end of expression").
-    pub(crate) fn parse(src: &str) -> std::result::Result<Expr, String> {
-        let stripped: String = src
-            .chars()
-            .filter(|c| !c.is_ascii_whitespace())
-            .collect();
-        if stripped.is_empty() {
-            return Err("Empty expression".into());
-        }
-        let mut p = Parser {
-            s: stripped.as_bytes(),
-            pos: 0,
-        };
-        let e = p.parse_expr(0)?;
-        if p.pos != p.s.len() {
-            return Err(format!(
-                "Invalid chars '{}' at the end of expression",
-                &stripped[p.pos..]
-            ));
-        }
-        Ok(e)
-    }
-
-    /// `av_expr_eval` over the retained node types. Division by zero is
-    /// eval.c:348's `d2 ? d/d2 : d*INFINITY`; `%` is eval.c:334's
-    /// `d - floor(d2 ? d/d2 : d*INFINITY) * d2` (a floored modulo — NOT
-    /// `fmod`: `-5.5 % 2` is `0.5`); `min`/`max` are C's raw `<`/`>`
-    /// ternaries, so NaN on the LEFT propagates to the right operand.
-    pub(crate) fn eval(e: &Expr, v: &Vars) -> f64 {
-        match e {
-            Expr::Num(x) => *x,
-            Expr::Var(name) => match *name {
-                "in_w" => v.in_w,
-                "in_h" => v.in_h,
-                "out_w" => v.out_w,
-                "out_h" => v.out_h,
-                "a" => v.a,
-                "sar" => v.sar,
-                "dar" => v.dar,
-                "hsub" => v.hsub,
-                "vsub" => v.vsub,
-                "ohsub" => v.ohsub,
-                "ovsub" => v.ovsub,
-                "n" => v.n,
-                "t" => v.t,
-                _ => f64::NAN,
-            },
-            Expr::Neg(x) => -eval(x, v),
-            Expr::Bin(op, a, b) => {
-                let d = eval(a, v);
-                let d2 = eval(b, v);
-                match op {
-                    '+' => d + d2,
-                    '-' => d - d2,
-                    '*' => d * d2,
-                    '/' => {
-                        // eval.c:348: d2 ? d/d2 : d*INFINITY (5/0 = +inf,
-                        // -5/0 = -inf, 0/0 = NaN) — never panics.
-                        if d2 != 0.0 {
-                            d / d2
-                        } else {
-                            d * f64::INFINITY
-                        }
-                    }
-                    '^' => d.powf(d2),
-                    _ => f64::NAN,
-                }
-            }
-            Expr::Call(name, args) => {
-                let x = || eval(&args[0], v);
-                match *name {
-                    "floor" => x().floor(),
-                    "ceil" => x().ceil(),
-                    "trunc" => x().trunc(),
-                    "round" => x().round(),
-                    "abs" => x().abs(),
-                    "min" => {
-                        let (a, b) = (eval(&args[0], v), eval(&args[1], v));
-                        if a < b {
-                            a
-                        } else {
-                            b
-                        }
-                    }
-                    // e_mod (eval.c:337): a floored modulo — NOT fmod
-                    // (`mod(-5.5, 2)` is `0.5`).
-                    "mod" => {
-                        let d = eval(&args[0], v);
-                        let d2 = eval(&args[1], v);
-                        let quot = if d2 != 0.0 {
-                            d / d2
-                        } else {
-                            d * f64::INFINITY
-                        };
-                        d - quot.floor() * d2
-                    }
-                    "max" => {
-                        let (a, b) = (eval(&args[0], v), eval(&args[1], v));
-                        if a > b {
-                            a
-                        } else {
-                            b
-                        }
-                    }
-                    "clip" => {
-                        // eval.c:223-230: NaN anywhere or min > max → NaN,
-                        // else av_clipd.
-                        let x = eval(&args[0], v);
-                        let min = eval(&args[1], v);
-                        let max = eval(&args[2], v);
-                        if x.is_nan() || min.is_nan() || max.is_nan() || min > max {
-                            f64::NAN
-                        } else if x < min {
-                            min
-                        } else if x > max {
-                            max
-                        } else {
-                            x
-                        }
-                    }
-                    _ => f64::NAN,
-                }
-            }
-        }
-    }
-
-    /// `av_expr_count_vars` analog: does the tree reference the CANONICAL
-    /// variable `name`? (C counts per alias index; callers of old code
-    /// checked `vars[VAR_OUT_W] || vars[VAR_OW]` — the canonicalization
-    /// folds each alias pair into one name.)
-    pub(crate) fn uses(e: &Expr, name: &str) -> bool {
-        match e {
-            Expr::Var(v) => *v == name,
-            Expr::Num(_) => false,
-            Expr::Neg(x) => uses(x, name),
-            Expr::Bin(_, a, b) => uses(a, name) || uses(b, name),
-            Expr::Call(_, args) => args.iter().any(|a| uses(a, name)),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Option value parsers (opt.c / parseutils.c subsets)
@@ -606,9 +165,7 @@ fn option_parse_failed(name: &str, key: &str, val: &str) -> Error {
         Some(name),
         "Unable to parse \"{key}\" option value \"{val}\"\n"
     );
-    Error::InvalidArgument(format!(
-        "Unable to parse \"{key}\" option value \"{val}\""
-    ))
+    Error::InvalidArgument(format!("Unable to parse \"{key}\" option value \"{val}\""))
 }
 
 /// `set_string_bool` (opt.c:226-254): `auto` → -1, the true/false name
@@ -811,7 +368,8 @@ fn check_exprs(
     if eval_mode == EvalMode::Init
         && (expr::uses(w, "n") || expr::uses(w, "t") || expr::uses(h, "n") || expr::uses(h, "t"))
     {
-        let msg = "Expressions with frame variables 'n', 't', 'pos' are not valid in init eval_mode.";
+        let msg =
+            "Expressions with frame variables 'n', 't', 'pos' are not valid in init eval_mode.";
         log_error!(Some(name), "{msg}\n");
         return Err(Error::InvalidArgument(msg.to_string()));
     }
@@ -870,11 +428,7 @@ pub(crate) fn scale_adjust_dimensions(
     // av_rescale call sites (NaN is UB there; mapped to 0 — unreachable
     // without a NaN SAR).
     fn d64(x: f64) -> i64 {
-        if x.is_nan() {
-            0
-        } else {
-            x as i64
-        }
+        if x.is_nan() { 0 } else { x as i64 }
     }
 
     let factor_w = if *w < -1 { -*w } else { 1 };
@@ -1235,9 +789,7 @@ impl FilterImpl for ScaleContext {
                     }
                     "in_range" => self.in_range = parse_range_opt(&name, &key, &value)?,
                     "out_range" => self.out_range = parse_range_opt(&name, &key, &value)?,
-                    "in_chroma_loc" => {
-                        self.in_chroma_loc = parse_chroma_loc(&name, &key, &value)?
-                    }
+                    "in_chroma_loc" => self.in_chroma_loc = parse_chroma_loc(&name, &key, &value)?,
                     "out_chroma_loc" => {
                         self.out_chroma_loc = parse_chroma_loc(&name, &key, &value)?
                     }
@@ -1247,9 +799,7 @@ impl FilterImpl for ScaleContext {
                     "force_divisible_by" => {
                         self.force_divisible_by = parse_divisible_by(&name, &key, &value)?
                     }
-                    "reset_sar" => {
-                        self.reset_sar = parse_bool_val(&name, &key, &value, 0, 1)? != 0
-                    }
+                    "reset_sar" => self.reset_sar = parse_bool_val(&name, &key, &value, 0, 1)? != 0,
                     "eval" => self.eval_mode = parse_eval_mode(&name, &key, &value)?,
                     _ => leftovers.push((key, value)),
                 }
@@ -1579,11 +1129,7 @@ impl ScaleContext {
         let mut h = self.h as i64;
 
         // (3) w_adj (639-641).
-        let w_adj = if self.reset_sar {
-            self.var_sar
-        } else {
-            1.0
-        };
+        let w_adj = if self.reset_sar { self.var_sar } else { 1.0 };
 
         // (4) ff_scale_adjust_dimensions (643-648).
         let (in_w, in_h) = (g.links[inlink.0].w as i32, g.links[inlink.0].h as i32);
@@ -1632,8 +1178,8 @@ impl ScaleContext {
             } else if in_sar.num != 0 {
                 // av_div_q(av_make_q(in_w, in_h), av_make_q(out_w, out_h)) *
                 // in_sar — Rational's Div/Mul are av_div_q/av_mul_q.
-                let q =
-                    Rational::new(in_w as i32, in_h as i32) / Rational::new(ol.w as i32, ol.h as i32);
+                let q = Rational::new(in_w as i32, in_h as i32)
+                    / Rational::new(ol.w as i32, ol.h as i32);
                 ol.sample_aspect_ratio = q * in_sar;
             } else {
                 ol.sample_aspect_ratio = in_sar;
@@ -1987,10 +1533,7 @@ mod tests {
 
     /// buffer(yuv420p WxH, tb 1/25, sar 1/1) → scale(args) → buffersink,
     /// configured. CPU engine so no GPU device is touched.
-    fn scale_graph(
-        args: &str,
-        size: (u32, u32),
-    ) -> (FilterGraph, NodeId, NodeId, LinkId, LinkId) {
+    fn scale_graph(args: &str, size: (u32, u32)) -> (FilterGraph, NodeId, NodeId, LinkId, LinkId) {
         let mut g = FilterGraph::new();
         g.scale_engine = ScaleEngine::Cpu;
         let src = g
@@ -2166,16 +1709,12 @@ mod tests {
     fn force_original_aspect_ratio() {
         // 64x48 is 4:3. Hand-computed per scale_eval.c:161-184:
         // decrease, fdb=1: tmp_w=133,tmp_h=75 -> min(133,100),min(75,100).
-        let (g, _s, _k, _i, lout) = scale_graph(
-            "w=100:h=100:force_original_aspect_ratio=decrease",
-            (64, 48),
-        );
+        let (g, _s, _k, _i, lout) =
+            scale_graph("w=100:h=100:force_original_aspect_ratio=decrease", (64, 48));
         assert_eq!((g.links[lout.0].w, g.links[lout.0].h), (100, 75));
         // increase: max(133,100), max(75,100).
-        let (g, _s, _k, _i, lout) = scale_graph(
-            "w=100:h=100:force_original_aspect_ratio=increase",
-            (64, 48),
-        );
+        let (g, _s, _k, _i, lout) =
+            scale_graph("w=100:h=100:force_original_aspect_ratio=increase", (64, 48));
         assert_eq!((g.links[lout.0].w, g.links[lout.0].h), (133, 100));
         // decrease with fdb=2: tmp_w=67*2=134, tmp_h=38*2=76 ->
         // w=min(134,100)=100 (100/2*2), h=min(76,100)=76.
@@ -2192,10 +1731,8 @@ mod tests {
         );
         assert_eq!((g.links[lout.0].w, g.links[lout.0].h), (134, 100));
         // Numeric fallbacks (set_string_number over the unit CONSTs).
-        let (g, _s, _k, _i, lout) = scale_graph(
-            "w=100:h=100:force_original_aspect_ratio=1",
-            (64, 48),
-        );
+        let (g, _s, _k, _i, lout) =
+            scale_graph("w=100:h=100:force_original_aspect_ratio=1", (64, 48));
         assert_eq!((g.links[lout.0].w, g.links[lout.0].h), (100, 75));
     }
 
@@ -2204,8 +1741,16 @@ mod tests {
         // w rounds to 0 -> non-positive (scale_eval.c:190-195).
         let mut w = 0i64;
         let mut h = 100i64;
-        match scale_adjust_dimensions(1000, 1000, &mut w, &mut h, ForceOriginalAspectRatio::Disable, 1, 1.0)
-            .unwrap_err()
+        match scale_adjust_dimensions(
+            1000,
+            1000,
+            &mut w,
+            &mut h,
+            ForceOriginalAspectRatio::Disable,
+            1,
+            1.0,
+        )
+        .unwrap_err()
         {
             Error::InvalidArgument(msg) => assert_eq!(
                 msg,
@@ -2216,8 +1761,16 @@ mod tests {
         // Not representable as i32 (187-188; port-chosen message text).
         let mut w = 3_000_000_000i64;
         let mut h = 100i64;
-        match scale_adjust_dimensions(64, 48, &mut w, &mut h, ForceOriginalAspectRatio::Disable, 1, 1.0)
-            .unwrap_err()
+        match scale_adjust_dimensions(
+            64,
+            48,
+            &mut w,
+            &mut h,
+            ForceOriginalAspectRatio::Disable,
+            1,
+            1.0,
+        )
+        .unwrap_err()
         {
             Error::InvalidArgument(msg) => {
                 assert_eq!(msg, "Rescaled value for width or height is too big")
@@ -2228,16 +1781,18 @@ mod tests {
         // the i64::MIN sentinel propagates like C into the i32 check.
         let mut w = -1i64;
         let mut h = 100i64;
-        assert!(scale_adjust_dimensions(
-            64,
-            48,
-            &mut w,
-            &mut h,
-            ForceOriginalAspectRatio::Disable,
-            1,
-            -0.5
-        )
-        .is_err());
+        assert!(
+            scale_adjust_dimensions(
+                64,
+                48,
+                &mut w,
+                &mut h,
+                ForceOriginalAspectRatio::Disable,
+                1,
+                -0.5
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2294,20 +1849,25 @@ mod tests {
             let n = g.alloc_filter("scale").unwrap();
             g.nodes[n.0].opts.entries = vec![("interl".to_string(), val.to_string())];
             let mut imp = ScaleContext::default();
-            FilterImpl::init(&mut imp, &mut g, n)
-                .unwrap_or_else(|e| panic!("interl={val}: {e}"));
+            FilterImpl::init(&mut imp, &mut g, n).unwrap_or_else(|e| panic!("interl={val}: {e}"));
             assert_eq!(imp.interlaced, want, "interl={val}");
         }
         // Out of the -1..=1 range: the boolean error text.
         match scale_err("interl=2") {
             Error::InvalidArgument(msg) => {
-                assert_eq!(msg, "Unable to parse \"interl\" option value \"2\" as boolean")
+                assert_eq!(
+                    msg,
+                    "Unable to parse \"interl\" option value \"2\" as boolean"
+                )
             }
             other => panic!("unexpected error: {other}"),
         }
         match scale_err("interl=nope") {
             Error::InvalidArgument(msg) => {
-                assert_eq!(msg, "Unable to parse \"interl\" option value \"nope\" as boolean")
+                assert_eq!(
+                    msg,
+                    "Unable to parse \"interl\" option value \"nope\" as boolean"
+                )
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -2350,13 +1910,17 @@ mod tests {
         // out_w is ow's alias (197: vars_w[VAR_OUT_W] || vars_w[VAR_OW]).
         match scale_err("w=out_w+1:h=ih") {
             Error::InvalidArgument(msg) => {
-                assert_eq!(msg, "Width expression cannot be self-referencing: 'out_w+1'.")
+                assert_eq!(
+                    msg,
+                    "Width expression cannot be self-referencing: 'out_w+1'."
+                )
             }
             other => panic!("unexpected error: {other}"),
         }
         // Circular w<->h only WARNS (207-210): init succeeds.
         let mut g = FilterGraph::new();
-        g.create_filter("scale", "w=oh:h=ow").expect("circular only warns");
+        g.create_filter("scale", "w=oh:h=ow")
+            .expect("circular only warns");
         // n/t in init mode (244-252) — 'pos' stays in the text verbatim.
         match scale_err("w=iw+n:h=ih") {
             Error::InvalidArgument(msg) => assert_eq!(
@@ -2374,7 +1938,8 @@ mod tests {
         }
         // eval=frame makes them legal.
         let mut g = FilterGraph::new();
-        g.create_filter("scale", "eval=frame:w=iw+n:h=ih").expect("frame mode");
+        g.create_filter("scale", "eval=frame:w=iw+n:h=ih")
+            .expect("frame mode");
         // Unknown identifiers (incl. the dropped scale2ref variables) are
         // parse errors with C's text (280).
         match scale_err("w=main_w:h=ih") {
@@ -2635,7 +2200,9 @@ mod tests {
             )
             .unwrap();
         let scale = g.create_filter("scale", "").unwrap();
-        let sink = g.create_filter("buffersink", "pixel_formats=gray8").unwrap();
+        let sink = g
+            .create_filter("buffersink", "pixel_formats=gray8")
+            .unwrap();
         g.link(src, 0, scale, 0).unwrap();
         g.link(scale, 0, sink, 0).unwrap();
         let err = g.config().expect_err("unsupported pair must fail config");
@@ -2679,7 +2246,10 @@ mod tests {
         let sentinel = yuv_frame(64, 48, 5);
         g.add_frame(src, &sentinel).unwrap();
         let out = g.get_frame(sink).unwrap();
-        assert!(std::sync::Arc::ptr_eq(&out.planes[0].buf, &sentinel.planes[0].buf));
+        assert!(std::sync::Arc::ptr_eq(
+            &out.planes[0].buf,
+            &sentinel.planes[0].buf
+        ));
         assert_eq!(out.plane(0), sentinel.plane(0));
         assert_eq!(out.pts, 5);
         // A tag-only mismatch on the RANGE defeats the noop AND trips the
@@ -2693,7 +2263,10 @@ mod tests {
         f.chroma_location = ChromaLocation::Left; // in_chroma_loc stamps Unspecified
         g.add_frame(src, &f).unwrap();
         let out = g.get_frame(sink).unwrap();
-        assert!(!std::sync::Arc::ptr_eq(&out.planes[0].buf, &f.planes[0].buf), "copied");
+        assert!(
+            !std::sync::Arc::ptr_eq(&out.planes[0].buf, &f.planes[0].buf),
+            "copied"
+        );
         assert_eq!(out.plane(0), f.plane(0), "identity copy: bit-equal pixels");
         assert_eq!(out.chroma_location, ChromaLocation::Unspecified);
     }
@@ -3018,7 +2591,13 @@ mod tests {
         );
         g.add_frame(src, &yuv_frame(16, 16, 3)).unwrap();
         let out = g.get_frame(sink).unwrap();
-        eprintln!("DBG auto: fmt={:?} w={} h={} first16={:?}", out.format, out.width, out.height, &out.plane(0)[..16.min(out.plane(0).len())]);
+        eprintln!(
+            "DBG auto: fmt={:?} w={} h={} first16={:?}",
+            out.format,
+            out.width,
+            out.height,
+            &out.plane(0)[..16.min(out.plane(0).len())]
+        );
         assert_eq!(out.format, PixelFormat::Rgb24);
         assert_eq!((out.width, out.height), (16, 16));
         assert_eq!(out.pts, 3);
