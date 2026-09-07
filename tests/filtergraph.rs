@@ -100,20 +100,24 @@ fn buffersrc_geometry_change_only_warns_then_queues() {
 
 #[test]
 fn format_filter_constrains_negotiation() {
-    // format=gray8 against a yuv420p source has NO common format; the
-    // graph must fail configuration (auto-scale is not registered yet —
-    // C's "'scale' filter not present, cannot convert formats." path).
+    // format=rgb24 against a yuv420p source has no common format: the
+    // negotiation AUTO-INSERTS a scale converter (avfiltergraph.c:611-641)
+    // and the sink negotiates the constrained format — an rgb24 frame comes
+    // OUT of a yuv420p source, which is itself proof the converter ran.
     let mut g = FilterGraph::new();
     let src = g
         .create_filter("buffer", "video_size=64x48:pix_fmt=yuv420p:time_base=1/25")
         .unwrap();
-    let fmt = g.create_filter("format", "pix_fmts=gray8").unwrap();
+    let fmt = g.create_filter("format", "pix_fmts=rgb24").unwrap();
     let sink = g.create_filter("buffersink", "").unwrap();
     g.link(src, 0, fmt, 0).unwrap();
     g.link(fmt, 0, sink, 0).unwrap();
-    let err = g.config().unwrap_err();
-    assert!(
-        err.to_string().contains("scale"),
-        "expected the missing-converter error, got: {err}"
-    );
+    g.config().unwrap();
+    let mut f = Frame::alloc(PixelFormat::Yuv420p, 64, 48).unwrap();
+    f.pts = 0;
+    f.time_base = Rational::new(1, 25);
+    g.add_frame(src, &f).unwrap();
+    let out = g.get_frame(sink).unwrap();
+    assert_eq!(out.format, PixelFormat::Rgb24);
+    assert_eq!((out.width, out.height), (64, 48));
 }

@@ -821,11 +821,8 @@ mod tests {
             assert!(!def.inputs[0].needs_writable);
             assert_eq!(def.shorthand, &["pix_fmts"][..]);
         }
-        // With buffer/buffersink landed alongside, only wave-2C scale
-        // remains unregistered.
-        for not_yet in ["scale"] {
-            assert!(filter_def(not_yet).is_none(), "{not_yet}");
-        }
+        // The wave-2 filter set is complete: buffer/buffersink/format/
+        // noformat/null/scale all resolve.
         assert!(filter_def("null").is_some());
         assert!(filter_def("buffer").is_some());
         assert!(filter_def("buffersink").is_some());

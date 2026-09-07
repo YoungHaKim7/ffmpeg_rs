@@ -50,6 +50,7 @@ pub mod link;
 pub mod parser;
 pub mod vf_format;
 pub mod vf_null;
+pub mod vf_scale;
 
 // Crate-root re-exports mirror how C code includes libavfilter headers:
 // `use crate::filter::{FilterGraph, NodeId, LinkId};`
@@ -87,7 +88,7 @@ pub fn filter_def(name: &str) -> Option<&'static FilterDef> {
         "format" => Some(&vf_format::FORMAT_DEF),
         "noformat" => Some(&vf_format::NOFORMAT_DEF),
         "null" => Some(&vf_null::NULL_DEF),
-        // Wave 2C: "scale"
+        "scale" => Some(&vf_scale::SCALE_DEF),
         _ => None,
     }
 }
@@ -114,8 +115,9 @@ mod tests {
             assert_eq!(def.name, name);
             assert_eq!(def.shorthand.first(), Some(&shorthand), "{name}");
         }
-        // Wave 2C: scale is not ported yet.
-        assert!(filter_def("scale").is_none());
+        let s = filter_def("scale").expect("scale is registered");
+        assert_eq!(s.name, "scale");
+        assert_eq!(s.shorthand.first(), Some(&"w"));
         assert!(filter_def("idet").is_none());
     }
 }
