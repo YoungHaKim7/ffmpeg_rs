@@ -11,4 +11,7 @@ $ cargo nextest run
 ```bash
 cargo t --test mod
 
+
+# cargo nextest
+cargo nextest run --test mod
 ```
