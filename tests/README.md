@@ -23,6 +23,6 @@ cargo t --lib codec::packet
 
 ```bash
 swscale/
-format/rawvideo.rs , y4m.rs
+format/rawvideo.rs & y4m.rs
 
 ```
