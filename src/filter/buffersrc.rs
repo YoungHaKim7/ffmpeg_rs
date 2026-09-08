@@ -1117,8 +1117,10 @@ mod tests {
     }
 
     /// buffersrc.c:337-340 + the NaN quirk: an UNSET (0/0) time_base passes
-    /// because av_q2d(0/0) = NaN and NaN <= 0 is false; 0/1 fails; 1/0
-    /// (inf) passes.
+    /// because av_q2d(0/0) = NaN and NaN <= 0 is false; 0/1 fails at init;
+    /// an EXPLICIT 1/0 never reaches init — write_number's range check
+    /// rejects den=0 at option-application time (verified against system
+    /// ffmpeg).
     #[test]
     fn init_invalid_time_base() {
         let mut g = FilterGraph::new();
@@ -1136,9 +1138,12 @@ mod tests {
             assert_eq!(s.time_base, Rational::new(0, 0));
             assert_eq!(s.warning_limit, 100);
         });
-        // inf passes: av_q2d(1/0) = inf > 0.
-        g.create_filter("buffer", "pix_fmt=yuv420p:video_size=320x240:time_base=1/0")
-            .unwrap();
+        // Explicit 1/0: rejected by write_number's range check (opt.c:280)
+        // BEFORE init — never reaches the av_q2d validation.
+        let err = g
+            .create_filter("buffer", "pix_fmt=yuv420p:video_size=320x240:time_base=1/0")
+            .unwrap_err();
+        assert!(err.to_string().contains("out of range"));
     }
 
     /// Option application + config_props (buffersrc.c:361-403, 555-590) and
