@@ -84,8 +84,10 @@ deliberately skipped C paths with the guard that makes them unreachable.
    `initFilter` port (`utils.c:197-612`), area/gauss/sinc/lanczos/spline
    via `-scale_algo` with filter-width widening on downscale, CPU fallback
    for algorithms the Vulkan engine cannot run
-4. Phase 3b — filtergraph (`libavfilter`: buffersrc/sink, `scale`/`format`)
+4. ✅ Phase 3b — filtergraph (`libavfilter`: buffersrc/sink, `scale`/`format`)
 5. Phase 4 — `swresample` + audio paths
+  ◼ Phase 4a: audio foundations + swresample core (spec→implement→integrate)
+  ◻ Phase 4b: WAV container + PCM codec + CLI + goldens
 6. Phase 5 — NUT container, more filters
 7. Stretch — winit player window on the Vulkan pipeline
 
