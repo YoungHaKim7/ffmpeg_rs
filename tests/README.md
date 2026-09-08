@@ -13,7 +13,7 @@ cargo t --test mod
 
 
 # cargo nextest
-cargo nextest run --test mod
+cargo nextest run --test format
 
 # 내가 원하는 모듈만 test
 cargo t --lib codec::packet
