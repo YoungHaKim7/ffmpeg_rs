@@ -161,36 +161,13 @@ impl FilterImpl for BufferSource {
     /// `init_video` (buffersrc.c:318-350) + the option application of
     /// `avfilter_init_dict`/`av_opt_set` over the `buffer_options` table
     /// (buffersrc.c:361-403; parse behavior from opt.c as cited at each
-    /// helper). Two phases in C order.
+    /// helper). Two phases in C order. Unknown keys are NOT pre-scanned:
+    /// C's `ff_filter_opt_parse` only builds the dict (no setting happens
+    /// at parse time), `av_opt_set_dict2` parks unknown keys as leftovers
+    /// and continues, init runs its validation, and only THEN does the
+    /// leftover check fire (avfilter.c:976-980) — init_filter's post-init
+    /// leftover check reproduces exactly that position.
     fn init(&mut self, g: &mut FilterGraph, node: NodeId) -> Result<()> {
-        // ---- Phase 0: unknown-option pre-scan -------------------------------
-        // C parses and sets options one by one BEFORE init runs
-        // (avfilter.c:855-902 process_options), so `width=1:foo=2` errors on
-        // 'foo' at parse time — the unknown option beats init's own
-        // validation. The port's dict-consume architecture defers leftover
-        // detection to after init, so the C order is restored by scanning
-        // keys up front with the same text the leftover check produces.
-        const KNOWN_KEYS: &[&str] = &[
-            "width",
-            "height",
-            "video_size",
-            "pix_fmt",
-            "sar",
-            "pixel_aspect",
-            "time_base",
-            "frame_rate",
-            "colorspace",
-            "range",
-        ];
-        if let Some((key, _)) = g.nodes[node.0]
-            .opts
-            .entries
-            .iter()
-            .find(|(k, _)| !KNOWN_KEYS.contains(&k.as_str()))
-        {
-            return Err(Error::NotFound(format!("No such option: {key}")));
-        }
-
         // ---- Phase 1: option application ----------------------------------
         // Ordered entries (last duplicate wins, C's AV_DICT_MULTIKEY);
         // recognized keys are consumed, unrecognized ones stay for
@@ -592,21 +569,48 @@ fn parse_int(name: &str, key: &str, val: &str) -> Result<i32> {
 /// opt.c:434-441: `sscanf(val, "%d%*1[:/]%d%c")` — "n/d" (one separator
 /// character; "n:" cannot reach us because create_filter splits options on
 /// ':') or a bare integer "n" → n/1 (the sscanf returns 1 and the expression
-/// fallback stores den=1). "1/0" is ACCEPTED (C's sscanf takes it; init's
-/// av_q2d check passes since inf > 0).
+/// fallback stores den=1). The four RATIONAL options declare min=0,
+/// max=DBL_MAX (buffersrc.c:366-369), so `write_number`'s range check
+/// (opt.c:280-286) rejects `!den` (den=0 → 1/0, 0/0), num<0 (min check),
+/// and den<0 (max check `DBL_MAX*den < num`) — verified empirically
+/// against system ffmpeg: time_base=1/0, sar=1/0, sar=-1/9 and
+/// frame_rate=-25/1 all abort option application with
+/// "Value %f for parameter '%s' out of range". The NaN quirk (an UNSET
+/// 0/0 passing init) applies only to the zero-init default, which never
+/// goes through option parsing.
 fn parse_rational(name: &str, key: &str, val: &str) -> Result<Rational> {
     let t = val.trim();
     let (num, consumed) = strtol_i32(t);
     if consumed > 0 {
         let rest = &t[consumed..];
-        if rest.is_empty() {
-            return Ok(Rational::new(num, 1));
-        }
-        if rest.as_bytes()[0] == b'/' {
+        let parsed = if rest.is_empty() {
+            Some((num, 1))
+        } else if rest.as_bytes()[0] == b'/' {
             let (den, consumed2) = strtol_i32(&rest[1..]);
             if consumed2 > 0 && rest[1 + consumed2..].is_empty() {
-                return Ok(Rational::new(num, den));
+                Some((num, den))
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some((num, den)) = parsed {
+            // write_number's range check for the RATIONAL options
+            // (opt.c:280-286, min=0/max=DBL_MAX): `!den` rejects den=0,
+            // the min check rejects num<0, the max check rejects den<0.
+            if den <= 0 || num < 0 {
+                log_error!(
+                    Some(name),
+                    "Value {:.6} for parameter '{}' out of range [0 - 1.79769e+308]\n",
+                    num as f64 / den as f64,
+                    key
+                );
+                return Err(Error::InvalidArgument(format!(
+                    "Value out of range for parameter '{key}'"
+                )));
+            }
+            return Ok(Rational::new(num, den));
         }
     }
     Err(parse_failed(name, key, val))
@@ -1195,10 +1199,16 @@ mod tests {
     #[test]
     fn init_unknown_option() {
         let mut g = FilterGraph::new();
+        // C's order (avfilter.c:929-980): the unknown 'foo' becomes a
+        // LEFTOVER, width=1 applies, init runs and fails its own
+        // validation FIRST — "Unspecified pixel format" beats the
+        // leftover "No such option" check.
         let err = g.create_filter("buffer", "width=1:foo=2").unwrap_err();
-        assert!(matches!(err, Error::NotFound(_)));
-        assert!(err.to_string().contains("No such option: foo"));
-        // alpha_mode: recognized by C, unported here.
+        assert!(matches!(err, Error::InvalidArgument(_)));
+        assert!(err.to_string().contains("Unspecified pixel format"));
+        // alpha_mode: recognized by C, unported here. Init succeeds here
+        // (all required params set), so the leftover check fires — same
+        // position as C's avfilter.c:976-980.
         let err = g
             .create_filter(
                 "buffer",
@@ -1584,15 +1594,12 @@ mod tests {
             parse_rational("n", "k", "25").unwrap(),
             Rational::new(25, 1)
         );
-        assert_eq!(
-            parse_rational("n", "k", "-1/25").unwrap(),
-            Rational::new(-1, 25)
-        );
-        // "1/0" is ACCEPTED (C sscanf takes it; init's av_q2d check passes)
-        assert_eq!(
-            parse_rational("n", "k", "1/0").unwrap(),
-            Rational::new(1, 0)
-        );
+        // write_number's range check (opt.c:280-286, RATIONAL min=0):
+        // negatives, den=0 and den<0 all abort option application —
+        // verified against system ffmpeg.
+        assert!(parse_rational("n", "k", "-1/25").is_err());
+        assert!(parse_rational("n", "k", "1/0").is_err());
+        assert!(parse_rational("n", "k", "1/-2").is_err());
         assert!(parse_rational("n", "k", "25/").is_err());
         assert!(parse_rational("n", "k", "abc").is_err());
         assert!(parse_rational("n", "k", "").is_err());
