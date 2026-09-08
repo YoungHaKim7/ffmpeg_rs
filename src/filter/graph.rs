@@ -546,6 +546,12 @@ impl FilterGraph {
                 self.check_list("pixel format", &self.fmt_lists[idx as usize])?;
             }
             if let Some(idx) = cfg.color_spaces {
+                // ff_formats_check_color_spaces (formats.c:1272-1277)
+                // rejects RESERVED before the generic list checks.
+                if self.csp_lists[idx as usize].contains(&ColorSpace::Reserved) {
+                    log_error!(None, "Invalid color space\n");
+                    return Err(Error::InvalidArgument("Invalid color space".into()));
+                }
                 self.check_list("color space", &self.csp_lists[idx as usize])?;
             }
             if let Some(idx) = cfg.color_ranges {
@@ -556,6 +562,14 @@ impl FilterGraph {
     }
 
     fn check_list<T: PartialEq>(&self, name: &str, list: &[T]) -> Result<()> {
+        // check_list (formats.c:1234-1248): empty lists are rejected
+        // outright ("Empty %s list") before the duplicate scan — this is
+        // what stops e.g. noformat's inverted-to-empty list at QUERY time
+        // instead of failing negotiation later.
+        if list.is_empty() {
+            log_error!(None, "Empty {name} list\n");
+            return Err(Error::InvalidArgument(format!("Empty {name} list")));
+        }
         for i in 0..list.len() {
             if list[i + 1..].contains(&list[i]) {
                 log_error!(None, "Duplicated {name}\n");
@@ -662,9 +676,20 @@ impl FilterGraph {
                     },
                 };
                 let outputs = self.nodes[filter.0].outputs.clone();
-                for o in outputs.iter().flatten() {
+                'outputs: for o in outputs.iter().flatten() {
                     let Some(list_idx) = self.links[o.0].incfg.slot(axis) else {
                         continue;
+                    };
+                    // Which kind of reduction happened decides the loop
+                    // control: REDUCE_FORMATS' empty-list fill `break`s
+                    // the outputs loop (avfiltergraph.c:962-967), while
+                    // the contains-collapse `break`s only the inner scan
+                    // — the outputs loop CONTINUES, so a multi-output
+                    // filter collapses every matching output (969-975).
+                    let was_empty = match axis {
+                        Axis::Formats => self.fmt_lists[list_idx as usize].is_empty(),
+                        Axis::ColorSpaces => self.csp_lists[list_idx as usize].is_empty(),
+                        Axis::ColorRanges => self.rng_lists[list_idx as usize].is_empty(),
                     };
                     let collapse = match (axis, fmt) {
                         (Axis::Formats, ListValue::Pix(f)) => {
@@ -680,7 +705,10 @@ impl FilterGraph {
                     };
                     if collapse {
                         ret = true;
-                        break; // C breaks the output loop per axis/input
+                        if was_empty {
+                            break 'outputs; // the empty-list fill breaks
+                        }
+                        continue; // the contains-collapse does not
                     }
                 }
             }
@@ -991,8 +1019,9 @@ impl FilterGraph {
                 let Some(fmt) = link.format else {
                     continue; // unconfigured links only exist pre-config
                 };
-                crate::util::imgutils::check_size(link.w, link.h)?;
-                let _ = fmt;
+                // av_image_check_size2 (imgutils.c:296-303): stride
+                // overflows reject huge geometries the plain bounds miss.
+                crate::util::imgutils::check_size2(fmt, link.w, link.h)?;
             }
         }
         Ok(())

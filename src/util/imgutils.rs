@@ -142,6 +142,29 @@ pub fn check_size(w: u32, h: u32) -> Result<()> {
     Ok(())
 }
 
+/// `av_image_check_size2` (imgutils.c:296-303) with max=INT64_MAX,
+/// format=0: the stride-overflow guards beyond the plain bounds —
+/// `stride = linesize(fmt, w, 0)` (≤0 → 8·w), `stride += 1024`; reject
+/// when `stride >= INT_MAX` or `stride·(h+128) >= INT_MAX`.
+pub fn check_size2(fmt: PixelFormat, w: u32, h: u32) -> Result<()> {
+    let mut stride = get_linesize(fmt, w, 0).unwrap_or(0) as i64;
+    if stride <= 0 {
+        stride = 8 * w as i64;
+    }
+    stride += 128 * 8;
+    let invalid = w == 0
+        || h == 0
+        || w > i32::MAX as u32
+        || h > i32::MAX as u32
+        || stride >= i32::MAX as i64
+        || stride * (h as i64 + 128) >= i32::MAX as i64;
+    if invalid {
+        crate::log_error!(Some("imgutils"), "Picture size {w}x{h} is invalid");
+        return Err(Error::OutOfRange);
+    }
+    Ok(())
+}
+
 /// `av_image_copy_to_buffer` — pack frame planes (each with its own
 /// `src_linesize`) into one contiguous buffer, row by row, honoring `align`
 /// row padding. Returns the packed buffer; the C version writes into a
