@@ -154,7 +154,10 @@ fn strtol_i32(s: &str) -> (i32, usize) {
     let n: i64 = text
         .parse()
         .unwrap_or(if b[start] == b'-' { i64::MIN } else { i64::MAX });
-    (n.clamp(i32::MIN as i64, i32::MAX as i64) as i32, i)
+    // C: strtol yields `long`, the assignment into an int option truncates
+    // mod 2^32 (glibc wrap). "3000000000" becomes -1294967296 — NEGATIVE,
+    // so C's positive-size checks reject it; Rust `as` wraps identically.
+    (n as i32, i)
 }
 
 /// The buffersrc-style generic parse failure (opt.c:500's
@@ -715,7 +718,13 @@ fn is_noop(out: &Frame, in_: &Frame) -> bool {
     {
         return false;
     }
-    in_.chroma_location == out.chroma_location
+    // sws's sanitize (format.c:305-335) clears the chroma location for
+    // formats without subsampled chroma (gray8, 4:4:4) — the comparison
+    // only applies when chroma planes exist.
+    if crate::util::pixdesc::descriptor(in_.format).log2_chroma_h > 0 {
+        return in_.chroma_location == out.chroma_location;
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -785,6 +794,21 @@ impl FilterImpl for ScaleContext {
                         self.in_color_matrix = parse_color_matrix(&name, &key, &value)?
                     }
                     "out_color_matrix" => {
+                        // The option's range is [0, AVCOL_SPC_NB-1]; the
+                        // CONST "auto" is -1, so unlike in_color_matrix C
+                        // REJECTS it here: "Value -1.000000 for parameter
+                        // 'out_color_matrix' out of range [0 - 17]"
+                        // (write_number, opt.c:280-286; empirically
+                        // confirmed on system ffmpeg).
+                        if value == "auto" {
+                            log_error!(
+                                Some(&name),
+                                "Value -1.000000 for parameter 'out_color_matrix' out of range [0 - 17]\n"
+                            );
+                            return Err(Error::InvalidArgument(
+                                "Value -1.000000 for parameter 'out_color_matrix' out of range [0 - 17]".to_string(),
+                            ));
+                        }
                         self.out_color_matrix = parse_color_matrix(&name, &key, &value)?
                     }
                     "in_range" => self.in_range = parse_range_opt(&name, &key, &value)?,
@@ -812,6 +836,26 @@ impl FilterImpl for ScaleContext {
             let msg = "Size and width/height expressions cannot be set at the same time.";
             log_error!(Some(&name), "{msg}\n");
             return Err(Error::InvalidArgument(msg.to_string()));
+        }
+
+        // ---- (1b) explicit EMPTY values (357-360 pointer semantics) -------
+        // C's `w_expr` is a heap pointer: an explicit `w=` gives a NON-NULL
+        // empty string that the "unset" default-fill must NOT replace. With
+        // h also set the empty expression then fails to parse ("Cannot
+        // parse expression for width: ''"); with h unset the w-only swap
+        // below carries the empty string into av_parse_video_size instead
+        // ("Invalid size ''"). Both shapes verified on system ffmpeg.
+        if w_opt.as_deref() == Some("") && h_opt.is_some() {
+            log_error!(Some(&name), "Cannot parse expression for width: ''\n");
+            return Err(Error::InvalidArgument(
+                "Cannot parse expression for width: ''".to_string(),
+            ));
+        }
+        if h_opt.as_deref() == Some("") {
+            log_error!(Some(&name), "Cannot parse expression for height: ''\n");
+            return Err(Error::InvalidArgument(
+                "Cannot parse expression for height: ''".to_string(),
+            ));
         }
 
         // ---- (2) the w-only quirk (342-343): `scale=640` (w set, h not)
@@ -1508,7 +1552,11 @@ static DEFAULT_PAD: PadDef = PadDef {
 ///   from the not-yet-renegotiated link.
 /// * `AVFILTER_FLAG_DYNAMIC_INPUTS` (1193) exists only for the ref pad —
 ///   not applicable.
-/// * shorthand `["w","h","flags","interl","size"]`: C's
+/// * shorthand: the full ff_filter_opt_parse walk of the option table
+///   (CONST and duplicate-offset aliases skipped) — `w,h,flags,interl,size`
+///   then the color options; slots 6-8 (`in_color_matrix`,
+///   `out_color_matrix`, `in_range`) confirmed positionally on system
+///   ffmpeg (C's
 ///   `ff_filter_opt_parse` derives it from the AVOption table in
 ///   declaration order skipping duplicate OFFSETs (width/height/s are
 ///   aliases — avfilter.c:855-902).
@@ -1517,7 +1565,23 @@ pub static SCALE_DEF: FilterDef = FilterDef {
     inputs: &[DEFAULT_PAD],
     outputs: &[DEFAULT_PAD],
     flags: FilterFlags::ALLOWS_RECONFIGURE,
-    shorthand: &["w", "h", "flags", "interl", "size"],
+    shorthand: &[
+        "w",
+        "h",
+        "flags",
+        "interl",
+        "size",
+        "in_color_matrix",
+        "out_color_matrix",
+        "in_range",
+        "out_range",
+        "in_chroma_loc",
+        "out_chroma_loc",
+        "force_original_aspect_ratio",
+        "force_divisible_by",
+        "reset_sar",
+        "eval",
+    ],
     make: || Box::new(ScaleContext::default()),
 };
 
@@ -1824,6 +1888,57 @@ mod tests {
         g.add_frame(src, &f).unwrap();
         let out = g.get_frame(sink).unwrap();
         assert_eq!(out.sample_aspect_ratio, Rational::new(1, 2));
+    }
+
+    #[test]
+    fn verify_pass_regressions() {
+        // (847) An explicitly EMPTY w=/h= is NOT replaced by the iw/ih
+        // default (C's av_strdup("") is a non-NULL pointer, 357-360): with
+        // h set the empty expression fails to parse; alone it rides the
+        // w-only swap into "Invalid size ''". Both verified on ffmpeg.
+        match scale_err("w=:h=ih") {
+            Error::InvalidArgument(msg) => {
+                assert_eq!(msg, "Cannot parse expression for width: ''")
+            }
+            other => panic!("unexpected: {other}"),
+        }
+        match scale_err("w=64:h=") {
+            Error::InvalidArgument(msg) => {
+                assert_eq!(msg, "Cannot parse expression for height: ''")
+            }
+            other => panic!("unexpected: {other}"),
+        }
+        match scale_err("w=") {
+            Error::InvalidArgument(msg) => assert_eq!(msg, "Invalid size ''"),
+            other => panic!("unexpected: {other}"),
+        }
+
+        // (221) out_color_matrix=auto: the CONST is -1, outside the
+        // option's [0,17] range — C rejects (write_number, opt.c:280-286);
+        // in_color_matrix=auto stays valid (its default IS -1). All-explicit
+        // keys — an explicit key would kill positional slots otherwise.
+        match scale_err("out_color_matrix=auto:w=64:h=48") {
+            Error::InvalidArgument(msg) => assert!(msg.contains("out of range [0 - 17]")),
+            other => panic!("unexpected: {other}"),
+        }
+        let mut g = FilterGraph::new();
+        g.create_filter("scale", "in_color_matrix=auto:w=64:h=48")
+            .expect("in_color_matrix=auto is C-valid");
+
+        // (318) strtol truncation mod 2^32: 3000000000 wraps negative like
+        // C's (int)long assignment, so the positive-size check rejects it.
+        assert!(parse_video_size("3000000000x480").is_err());
+
+        // (718) chroma location is only compared for formats WITH
+        // subsampled chroma (sws sanitize clears it for gray8/4:4:4) — a
+        // gray8 frame pair with differing chroma tags is still a noop.
+        let mut out = Frame::alloc(PixelFormat::Gray8, 64, 48).unwrap();
+        let mut in_ = Frame::alloc(PixelFormat::Gray8, 64, 48).unwrap();
+        out.color_range = ColorRange::Jpeg;
+        in_.color_range = ColorRange::Jpeg;
+        in_.chroma_location = ChromaLocation::Left;
+        out.chroma_location = ChromaLocation::Unspecified;
+        assert!(is_noop(&out, &in_), "gray8 has no chroma planes");
     }
 
     #[test]
@@ -2574,7 +2689,27 @@ mod tests {
         assert!(!def.inputs[0].needs_writable);
         // C's ff_filter_opt_parse derives the shorthand from the AVOption
         // order skipping duplicate OFFSETs (width/height/s are aliases).
-        assert_eq!(def.shorthand, &["w", "h", "flags", "interl", "size"][..]);
+        // The full C walk (slots 6-8 confirmed positionally on system
+        // ffmpeg: in_color_matrix, out_color_matrix, in_range).
+        assert_eq!(
+            def.shorthand,
+            &[
+                "w", "h", "flags", "interl", "size", "in_color_matrix",
+                "out_color_matrix", "in_range", "out_range", "in_chroma_loc",
+                "out_chroma_loc", "force_original_aspect_ratio",
+                "force_divisible_by", "reset_sar", "eval",
+            ][..]
+        );
+        // Positional slot 6 consumes in_color_matrix: with all six slots
+        // filled, PARSE succeeds and init fails on the w/h-vs-size conflict
+        // — the exact error system ffmpeg produces for this string (a
+        // 5-slot shorthand would instead error "No option name near
+        // 'bt709'").
+        let mut g = FilterGraph::new();
+        match g.create_filter("scale", "64:48:bicubic:0:64x48:bt709") {
+            Err(Error::InvalidArgument(msg)) => assert!(msg.contains("same time")),
+            other => panic!("expected the size/w-h conflict, got {other:?}"),
+        }
         // "scale" is in C's ff_filter_frame validation skip list
         // (avfilter.c:1075-1082) — the frame-changed path needs it.
         assert!(def.flags.contains(FilterFlags::ALLOWS_RECONFIGURE));
