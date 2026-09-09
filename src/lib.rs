@@ -113,6 +113,7 @@ pub mod filter;
 pub mod format;
 pub mod gpu;
 pub mod shaders;
+pub mod swresample;
 pub mod swscale;
 pub mod util;
 

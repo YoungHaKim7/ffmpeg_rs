@@ -17,6 +17,8 @@
 //! replaces it), `dict.h` metadata, `avassert.h` (debug_assert!), CPU flags,
 //! `hwcontext*` (arrives with the Vulkan phase), samplefmt (audio phase).
 
+pub mod audio_frame;
+pub mod channel_layout;
 pub mod color;
 pub mod error;
 pub mod frame;
@@ -26,6 +28,7 @@ pub mod mathematics;
 pub mod pixdesc;
 pub mod pixfmt;
 pub mod rational;
+pub mod samplefmt;
 
 pub use error::{Error, Result};
 pub use frame::{Frame, PictureType};

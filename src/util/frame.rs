@@ -110,8 +110,19 @@ impl Plane {
     pub fn data(&self) -> &[u8] {
         &self.buf[self.offset..self.offset + self.linesize * self.rows]
     }
-}
 
+    /// The mutable plane contents — copy-on-write: a shared buffer is
+    /// reallocated privately first (the per-plane slice of make_writable).
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        if std::sync::Arc::strong_count(&self.buf) > 1 {
+            let fresh: std::sync::Arc<[u8]> = std::sync::Arc::from(self.data().to_vec());
+            self.buf = fresh;
+            self.offset = 0;
+        }
+        let end = self.offset + self.linesize * self.rows;
+        &mut std::sync::Arc::get_mut(&mut self.buf).expect("CoW above") [self.offset..end]
+    }
+}
 /// `AVFrame` — video subset.
 #[derive(Debug)]
 pub struct Frame {

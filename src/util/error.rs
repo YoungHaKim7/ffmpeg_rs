@@ -50,6 +50,27 @@ pub enum Error {
     InvalidArgument(String),
 }
 
+// NOTE: manual PartialEq (assert_eq! on Results in tests) — variant-aware;
+// Io compares by formatted text (std::io::Error lacks PartialEq).
+impl PartialEq for Error {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Error::Eof, Error::Eof)
+            | (Error::Again, Error::Again)
+            | (Error::StreamNotFound, Error::StreamNotFound)
+            | (Error::BufferTooSmall, Error::BufferTooSmall)
+            | (Error::OutOfRange, Error::OutOfRange) => true,
+            (Error::InvalidData(a), Error::InvalidData(b))
+            | (Error::Unsupported(a), Error::Unsupported(b))
+            | (Error::NotFound(a), Error::NotFound(b))
+            | (Error::InvalidArgument(a), Error::InvalidArgument(b)) => a == b,
+            (Error::Io(a), Error::Io(b)) => a.to_string() == b.to_string(),
+            _ => false,
+        }
+    }
+}
+impl Eq for Error {}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
