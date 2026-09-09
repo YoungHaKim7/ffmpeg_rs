@@ -841,8 +841,7 @@ pub(crate) fn rgb_offsets(fmt: PixelFormat) -> (usize, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::color::ColorRange;
-    use crate::util::frame::Frame;
+    use crate::util::{color::ColorRange, frame::Frame};
 
     fn cpu_opts(alg: ScaleAlgorithm) -> ScaleOptions {
         ScaleOptions {

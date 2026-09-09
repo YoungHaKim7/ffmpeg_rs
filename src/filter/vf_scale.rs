@@ -2694,10 +2694,21 @@ mod tests {
         assert_eq!(
             def.shorthand,
             &[
-                "w", "h", "flags", "interl", "size", "in_color_matrix",
-                "out_color_matrix", "in_range", "out_range", "in_chroma_loc",
-                "out_chroma_loc", "force_original_aspect_ratio",
-                "force_divisible_by", "reset_sar", "eval",
+                "w",
+                "h",
+                "flags",
+                "interl",
+                "size",
+                "in_color_matrix",
+                "out_color_matrix",
+                "in_range",
+                "out_range",
+                "in_chroma_loc",
+                "out_chroma_loc",
+                "force_original_aspect_ratio",
+                "force_divisible_by",
+                "reset_sar",
+                "eval",
             ][..]
         );
         // Positional slot 6 consumes in_color_matrix: with all six slots

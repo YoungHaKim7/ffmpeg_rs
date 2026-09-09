@@ -73,6 +73,37 @@ use super::{
 };
 
 // ---------------------------------------------------------------------------
+// Filter definition (buffersink.c:382-393)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_PAD: PadDef = PadDef {
+    name: "default",
+    needs_writable: false,
+};
+
+/// `ff_vsink_buffer` (buffersink.c:382-393).
+///
+/// * inputs: `ff_video_default_filterpad` (video.c:37-41) — one pad
+///   `"default"`, no callbacks (C's pad has no `filter_frame`; see
+///   [`BufferSinkContext`]'s `filter_frame` for what that means).
+/// * outputs: `.p.outputs = NULL` (buffersink.c:386) — the graph endpoint.
+/// * `ALLOWS_RECONFIGURE`: buffersink is in `ff_filter_frame`'s
+///   skip-validation name list (avfilter.c:1076-1082; ported subset noted in
+///   filter.rs:49-52).
+/// * shorthand: the priv_class options in declaration order
+///   (avfilter.c:863-866): a positional value maps to `pixel_formats` first,
+///   then `colorspaces`, then `colorranges` (`alphamodes` dropped).
+/// * C's description string is dropped (`FilterDef` has no such field).
+pub static BUFFERSINK_DEF: FilterDef = FilterDef {
+    name: "buffersink",
+    inputs: &[DEFAULT_PAD],
+    outputs: &[],
+    flags: FilterFlags::ALLOWS_RECONFIGURE,
+    shorthand: &["pixel_formats", "colorspaces", "colorranges"],
+    make: || Box::new(BufferSinkContext::default()),
+};
+
+// ---------------------------------------------------------------------------
 // Context (buffersink.c:43-72)
 // ---------------------------------------------------------------------------
 
@@ -143,37 +174,6 @@ impl std::ops::BitOr for BuffersinkFlags {
         BuffersinkFlags(self.0 | rhs.0)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Filter definition (buffersink.c:382-393)
-// ---------------------------------------------------------------------------
-
-const DEFAULT_PAD: PadDef = PadDef {
-    name: "default",
-    needs_writable: false,
-};
-
-/// `ff_vsink_buffer` (buffersink.c:382-393).
-///
-/// * inputs: `ff_video_default_filterpad` (video.c:37-41) — one pad
-///   `"default"`, no callbacks (C's pad has no `filter_frame`; see
-///   [`BufferSinkContext`]'s `filter_frame` for what that means).
-/// * outputs: `.p.outputs = NULL` (buffersink.c:386) — the graph endpoint.
-/// * `ALLOWS_RECONFIGURE`: buffersink is in `ff_filter_frame`'s
-///   skip-validation name list (avfilter.c:1076-1082; ported subset noted in
-///   filter.rs:49-52).
-/// * shorthand: the priv_class options in declaration order
-///   (avfilter.c:863-866): a positional value maps to `pixel_formats` first,
-///   then `colorspaces`, then `colorranges` (`alphamodes` dropped).
-/// * C's description string is dropped (`FilterDef` has no such field).
-pub static BUFFERSINK_DEF: FilterDef = FilterDef {
-    name: "buffersink",
-    inputs: &[DEFAULT_PAD],
-    outputs: &[],
-    flags: FilterFlags::ALLOWS_RECONFIGURE,
-    shorthand: &["pixel_formats", "colorspaces", "colorranges"],
-    make: || Box::new(BufferSinkContext::default()),
-};
 
 // ---------------------------------------------------------------------------
 // FilterImpl (init / query_formats / activate / filter_frame)

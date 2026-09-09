@@ -785,18 +785,35 @@ fn golden_vf_scale_lanczos_is_bit_faithful() {
     fx.make_input_y4m();
     let desc = "scale=256:192:flags=lanczos";
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-vf", desc, "-f", "yuv4mpegpipe", fx.path("ref.y4m").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        desc,
+        "-f",
+        "yuv4mpegpipe",
+        fx.path("ref.y4m").to_str().unwrap(),
+        "-y",
     ]);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-vf", desc, "-f", "yuv4mpegpipe", fx.path("out.y4m").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        desc,
+        "-f",
+        "yuv4mpegpipe",
+        fx.path("out.y4m").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed:\n{stderr}");
     let ours = std::fs::read(fx.path("out.y4m")).unwrap();
     let theirs = std::fs::read(fx.path("ref.y4m")).unwrap();
     assert_eq!(ours.len(), theirs.len());
-    let max_diff = ours.iter().zip(&theirs).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    let max_diff = ours
+        .iter()
+        .zip(&theirs)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
     assert!(max_diff <= 3, "lanczos via -vf: max diff {max_diff} > 3");
 }
 
@@ -809,18 +826,35 @@ fn golden_vf_scale_bicubic_within_phase1_tolerance() {
     fx.make_input_y4m();
     let desc = "scale=64:48"; // default flags (bicubic), ½ down
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-vf", desc, "-f", "yuv4mpegpipe", fx.path("ref.y4m").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        desc,
+        "-f",
+        "yuv4mpegpipe",
+        fx.path("ref.y4m").to_str().unwrap(),
+        "-y",
     ]);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-vf", desc, "-f", "yuv4mpegpipe", fx.path("out.y4m").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        desc,
+        "-f",
+        "yuv4mpegpipe",
+        fx.path("out.y4m").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed:\n{stderr}");
     let ours = std::fs::read(fx.path("out.y4m")).unwrap();
     let theirs = std::fs::read(fx.path("ref.y4m")).unwrap();
     assert_eq!(ours.len(), theirs.len());
-    let max_diff = ours.iter().zip(&theirs).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    let max_diff = ours
+        .iter()
+        .zip(&theirs)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
     assert!(
         max_diff <= 96,
         "bicubic via -vf: max diff {max_diff} > 96 (the -s golden bound)"
@@ -840,19 +874,41 @@ fn golden_vf_scale_format_chain_vs_system_ffmpeg() {
     fx.make_input_y4m();
     let desc = "scale=256:192:flags=spline,format=rgb24";
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-vf", desc, "-f", "rawvideo", "-pix_fmt", "rgb24",
-        fx.path("ref.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        desc,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        fx.path("ref.raw").to_str().unwrap(),
+        "-y",
     ]);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.y4m").to_str().unwrap(),
-        "-vf", desc, "-f", "rawvideo", "-pix_fmt", "rgb24",
-        fx.path("out.raw").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.y4m").to_str().unwrap(),
+        "-vf",
+        desc,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        fx.path("out.raw").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed:\n{stderr}");
     let ours = std::fs::read(fx.path("out.raw")).unwrap();
     let theirs = std::fs::read(fx.path("ref.raw")).unwrap();
     assert_eq!(ours.len(), theirs.len());
-    let max_diff = ours.iter().zip(&theirs).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
-    assert!(max_diff <= 96, "spline+rgb24 via -vf: max diff {max_diff} > 96");
+    let max_diff = ours
+        .iter()
+        .zip(&theirs)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(
+        max_diff <= 96,
+        "spline+rgb24 via -vf: max diff {max_diff} > 96"
+    );
 }
