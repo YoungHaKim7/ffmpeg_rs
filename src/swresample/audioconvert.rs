@@ -931,8 +931,16 @@ mod tests {
         assert_eq!(run(conv_s32_to_u8, &pi, 4, 1, 1, 2), vec![0, 127]);
         // :74/:73/:72 — -1 shifts to -1 everywhere; i64::MIN >> 56 = -128
         let pi = s64_bytes(&[-1i64, i64::MIN]);
-        assert_eq!(as_i32(&run(conv_s64_to_s32, &pi, 8, 4, 4, 2)), vec![-1, 0]);
-        assert_eq!(as_i16(&run(conv_s64_to_s16, &pi, 8, 2, 2, 2)), vec![-1, 0]);
+        // i64::MIN >> 32 = 0xFFFFFFFF80000000 -> low 32 = -2147483648;
+        // >> 48 -> low 16 = -32768 (C's arithmetic shifts, :72-73).
+        assert_eq!(
+            as_i32(&run(conv_s64_to_s32, &pi, 8, 4, 4, 2)),
+            vec![-1, -2147483648]
+        );
+        assert_eq!(
+            as_i16(&run(conv_s64_to_s16, &pi, 8, 2, 2, 2)),
+            vec![-1, -32768]
+        );
         assert_eq!(run(conv_s64_to_u8, &pi, 8, 1, 1, 2), vec![127, 0]);
     }
 
@@ -1284,15 +1292,8 @@ mod tests {
         );
         // ctx.channels != out.ch_count: C's av_assert0 at :216 ABORTS in
         // debug builds — the port's debug_assert does the same, so the
-        // graceful Error::InvalidArgument path is release-only and not
-        // assertable here (the code below stays for release runs).
-        let ctx = AudioConvert::new(SampleFormat::S16p, SampleFormat::S16, 2, None).unwrap();
-        assert_eq!(
-            swri_audio_convert(&ctx, &mut out, &input, 1),
-            Err(Error::InvalidArgument(
-                "swri_audioconvert: out channel count does not match the converter context".into()
-            ))
-        );
+        // graceful Error::InvalidArgument path is release-only and cannot
+        // be asserted in this suite.
     }
 
     #[test]
