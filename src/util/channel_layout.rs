@@ -399,7 +399,11 @@ const fn bit(c: Channel) -> u64 {
 
 /// `AV_CHANNEL_LAYOUT_MASK(nb, m)` (`h:393-397`).
 const fn native(nb_channels: usize, mask: u64) -> ChannelLayout {
-    ChannelLayout { order: Order::Native, nb_channels, mask }
+    ChannelLayout {
+        order: Order::Native,
+        nb_channels,
+        mask,
+    }
 }
 
 /// `AVChannelLayout` (`channel_layout.h:328-386`) — native-order core.
@@ -431,7 +435,11 @@ pub struct ChannelLayout {
 /// with `nb_channels`/`mask`.
 impl Default for ChannelLayout {
     fn default() -> Self {
-        ChannelLayout { order: Order::Unspecified, nb_channels: 0, mask: 0 }
+        ChannelLayout {
+            order: Order::Unspecified,
+            nb_channels: 0,
+            mask: 0,
+        }
     }
 }
 
@@ -445,8 +453,7 @@ impl ChannelLayout {
     /// `AV_CHANNEL_LAYOUT_MONO` — `FC`.
     pub const MONO: ChannelLayout = native(1, bit(Channel::FrontCenter));
     /// `AV_CHANNEL_LAYOUT_STEREO` — `FL|FR`.
-    pub const STEREO: ChannelLayout =
-        native(2, bit(Channel::FrontLeft) | bit(Channel::FrontRight));
+    pub const STEREO: ChannelLayout = native(2, bit(Channel::FrontLeft) | bit(Channel::FrontRight));
     /// `AV_CHANNEL_LAYOUT_2POINT1` — `STEREO|LFE`.
     pub const TwoPointOne: ChannelLayout =
         native(3, ChannelLayout::STEREO.mask | bit(Channel::LowFrequency));
@@ -463,8 +470,10 @@ impl ChannelLayout {
     pub const FourPointZero: ChannelLayout =
         native(4, ChannelLayout::SURROUND.mask | bit(Channel::BackCenter));
     /// `AV_CHANNEL_LAYOUT_4POINT1` — `FourPointZero|LFE`.
-    pub const FourPointOne: ChannelLayout =
-        native(5, ChannelLayout::FourPointZero.mask | bit(Channel::LowFrequency));
+    pub const FourPointOne: ChannelLayout = native(
+        5,
+        ChannelLayout::FourPointZero.mask | bit(Channel::LowFrequency),
+    );
     /// `AV_CHANNEL_LAYOUT_2_2` — `STEREO|SL|SR`.
     pub const A2_2: ChannelLayout = native(
         4,
@@ -481,19 +490,25 @@ impl ChannelLayout {
         ChannelLayout::SURROUND.mask | bit(Channel::SideLeft) | bit(Channel::SideRight),
     );
     /// `AV_CHANNEL_LAYOUT_5POINT1` — `FivePointZero|LFE` (side surrounds).
-    pub const FivePointOne: ChannelLayout =
-        native(6, ChannelLayout::FivePointZero.mask | bit(Channel::LowFrequency));
+    pub const FivePointOne: ChannelLayout = native(
+        6,
+        ChannelLayout::FivePointZero.mask | bit(Channel::LowFrequency),
+    );
     /// `AV_CHANNEL_LAYOUT_5POINT0_BACK` — `SURROUND|BL|BR` (back surrounds).
     pub const FivePointZeroBack: ChannelLayout = native(
         5,
         ChannelLayout::SURROUND.mask | bit(Channel::BackLeft) | bit(Channel::BackRight),
     );
     /// `AV_CHANNEL_LAYOUT_5POINT1_BACK` — `FivePointZeroBack|LFE`.
-    pub const FivePointOneBack: ChannelLayout =
-        native(6, ChannelLayout::FivePointZeroBack.mask | bit(Channel::LowFrequency));
+    pub const FivePointOneBack: ChannelLayout = native(
+        6,
+        ChannelLayout::FivePointZeroBack.mask | bit(Channel::LowFrequency),
+    );
     /// `AV_CHANNEL_LAYOUT_6POINT0` — `FivePointZero|BC`.
-    pub const SixPointZero: ChannelLayout =
-        native(6, ChannelLayout::FivePointZero.mask | bit(Channel::BackCenter));
+    pub const SixPointZero: ChannelLayout = native(
+        6,
+        ChannelLayout::FivePointZero.mask | bit(Channel::BackCenter),
+    );
     /// `AV_CHANNEL_LAYOUT_6POINT0_FRONT` — `2_2|FLC|FRC`.
     pub const SixPointZeroFront: ChannelLayout = native(
         6,
@@ -509,17 +524,25 @@ impl ChannelLayout {
             | bit(Channel::TopFrontRight),
     );
     /// `AV_CHANNEL_LAYOUT_HEXAGONAL` — `FivePointZeroBack|BC`.
-    pub const HEXAGONAL: ChannelLayout =
-        native(6, ChannelLayout::FivePointZeroBack.mask | bit(Channel::BackCenter));
+    pub const HEXAGONAL: ChannelLayout = native(
+        6,
+        ChannelLayout::FivePointZeroBack.mask | bit(Channel::BackCenter),
+    );
     /// `AV_CHANNEL_LAYOUT_6POINT1` — `FivePointOne|BC`.
-    pub const SixPointOne: ChannelLayout =
-        native(7, ChannelLayout::FivePointOne.mask | bit(Channel::BackCenter));
+    pub const SixPointOne: ChannelLayout = native(
+        7,
+        ChannelLayout::FivePointOne.mask | bit(Channel::BackCenter),
+    );
     /// `AV_CHANNEL_LAYOUT_6POINT1_BACK` — `FivePointOneBack|BC`.
-    pub const SixPointOneBack: ChannelLayout =
-        native(7, ChannelLayout::FivePointOneBack.mask | bit(Channel::BackCenter));
+    pub const SixPointOneBack: ChannelLayout = native(
+        7,
+        ChannelLayout::FivePointOneBack.mask | bit(Channel::BackCenter),
+    );
     /// `AV_CHANNEL_LAYOUT_6POINT1_FRONT` — `SixPointZeroFront|LFE`.
-    pub const SixPointOneFront: ChannelLayout =
-        native(7, ChannelLayout::SixPointZeroFront.mask | bit(Channel::LowFrequency));
+    pub const SixPointOneFront: ChannelLayout = native(
+        7,
+        ChannelLayout::SixPointZeroFront.mask | bit(Channel::LowFrequency),
+    );
     /// `AV_CHANNEL_LAYOUT_7POINT0` — `FivePointZero|BL|BR`.
     pub const SevenPointZero: ChannelLayout = native(
         7,
@@ -590,7 +613,9 @@ impl ChannelLayout {
     /// `AV_CHANNEL_LAYOUT_7POINT1POINT2` — `SevenPointOne|TFL|TFR`.
     pub const SevenPointOnePointTwo: ChannelLayout = native(
         10,
-        ChannelLayout::SevenPointOne.mask | bit(Channel::TopFrontLeft) | bit(Channel::TopFrontRight),
+        ChannelLayout::SevenPointOne.mask
+            | bit(Channel::TopFrontLeft)
+            | bit(Channel::TopFrontRight),
     );
     /// `AV_CHANNEL_LAYOUT_7POINT1POINT4` — `SevenPointOnePointTwo|TBL|TBR`.
     pub const SevenPointOnePointFour: ChannelLayout = native(
@@ -616,9 +641,7 @@ impl ChannelLayout {
     /// `AV_CHANNEL_LAYOUT_9POINT1POINT6` — `NineOneFour|TSL|TSR`.
     pub const NineOneSix: ChannelLayout = native(
         16,
-        ChannelLayout::NineOneFour.mask
-            | bit(Channel::TopSideLeft)
-            | bit(Channel::TopSideRight),
+        ChannelLayout::NineOneFour.mask | bit(Channel::TopSideLeft) | bit(Channel::TopSideRight),
     );
     /// `AV_CHANNEL_LAYOUT_HEXADECAGONAL` —
     /// `OCTAGONAL|WL|WR|TBL|TBR|TBC|TFC|TFL|TFR` (`h:253`).
@@ -668,7 +691,11 @@ impl ChannelLayout {
     /// The `AV_CHANNEL_ORDER_UNSPEC` initializer: only a channel count,
     /// no positional information (`h:119-121`).
     pub const fn unspecified(nb_channels: usize) -> ChannelLayout {
-        ChannelLayout { order: Order::Unspecified, nb_channels, mask: 0 }
+        ChannelLayout {
+            order: Order::Unspecified,
+            nb_channels,
+            mask: 0,
+        }
     }
 
     /// `av_channel_layout_check` (`c:785-809`): `nb_channels == 0` →
@@ -729,9 +756,7 @@ impl ChannelLayout {
                         if i > 0 {
                             out.push('+');
                         }
-                        out.push_str(
-                            self.channel_from_index(i).unwrap_or(Channel::None).name(),
-                        );
+                        out.push_str(self.channel_from_index(i).unwrap_or(Channel::None).name());
                     }
                     out.push(')');
                     out
@@ -955,7 +980,9 @@ impl ChannelLayout {
         }
 
         // (7) c:440
-        Err(Error::InvalidArgument(format!("invalid channel layout '{s}'")))
+        Err(Error::InvalidArgument(format!(
+            "invalid channel layout '{s}'"
+        )))
     }
 }
 
@@ -1152,7 +1179,9 @@ fn parse_channel_list(s: &str) -> ListParse {
     }
 
     // mask != 0: at least one token set a bit.
-    ChannelLayout::from_mask(mask).map(ListParse::Ok).unwrap_or(ListParse::NoMatch)
+    ChannelLayout::from_mask(mask)
+        .map(ListParse::Ok)
+        .unwrap_or(ListParse::NoMatch)
 }
 
 /// Leading ASCII decimal digits of `s` + the remainder (the `%d` of C's
@@ -1213,7 +1242,11 @@ mod tests {
         ));
 
         // Hand-built inconsistent native layout fails check() (c:792).
-        let bad = ChannelLayout { order: Order::Native, nb_channels: 3, mask: 0x3 };
+        let bad = ChannelLayout {
+            order: Order::Native,
+            nb_channels: 3,
+            mask: 0x3,
+        };
         assert!(!bad.check());
         // Unspecified with any positive count is valid (c:804-805)…
         assert!(ChannelLayout::unspecified(2).check());
@@ -1285,7 +1318,10 @@ mod tests {
             ("FivePointOneBack", ChannelLayout::FivePointOneBack),
             ("SixPointZero", ChannelLayout::SixPointZero),
             ("SixPointZeroFront", ChannelLayout::SixPointZeroFront),
-            ("ThreePointOnePointTwo", ChannelLayout::ThreePointOnePointTwo),
+            (
+                "ThreePointOnePointTwo",
+                ChannelLayout::ThreePointOnePointTwo,
+            ),
             ("HEXAGONAL", ChannelLayout::HEXAGONAL),
             ("SixPointOne", ChannelLayout::SixPointOne),
             ("SixPointOneBack", ChannelLayout::SixPointOneBack),
@@ -1294,14 +1330,29 @@ mod tests {
             ("SevenPointZeroFront", ChannelLayout::SevenPointZeroFront),
             ("SevenPointOne", ChannelLayout::SevenPointOne),
             ("SevenPointOneWide", ChannelLayout::SevenPointOneWide),
-            ("SevenPointOneWideBack", ChannelLayout::SevenPointOneWideBack),
+            (
+                "SevenPointOneWideBack",
+                ChannelLayout::SevenPointOneWideBack,
+            ),
             ("FivePointOnePointTwo", ChannelLayout::FivePointOnePointTwo),
-            ("FivePointOnePointTwoBack", ChannelLayout::FivePointOnePointTwoBack),
+            (
+                "FivePointOnePointTwoBack",
+                ChannelLayout::FivePointOnePointTwoBack,
+            ),
             ("OCTAGONAL", ChannelLayout::OCTAGONAL),
             ("CUBE", ChannelLayout::CUBE),
-            ("FivePointOnePointFour", ChannelLayout::FivePointOnePointFour),
-            ("SevenPointOnePointTwo", ChannelLayout::SevenPointOnePointTwo),
-            ("SevenPointOnePointFour", ChannelLayout::SevenPointOnePointFour),
+            (
+                "FivePointOnePointFour",
+                ChannelLayout::FivePointOnePointFour,
+            ),
+            (
+                "SevenPointOnePointTwo",
+                ChannelLayout::SevenPointOnePointTwo,
+            ),
+            (
+                "SevenPointOnePointFour",
+                ChannelLayout::SevenPointOnePointFour,
+            ),
             ("SevenTwoThree", ChannelLayout::SevenTwoThree),
             ("NineOneFour", ChannelLayout::NineOneFour),
             ("NineOneSix", ChannelLayout::NineOneSix),
@@ -1318,7 +1369,11 @@ mod tests {
             assert_eq!(layout.nb_channels, *nb_exp, "{name}");
             assert_eq!(layout.order, Order::Native, "{name}");
             // nb must equal popcount for every const.
-            assert_eq!(layout.mask.count_ones() as usize, layout.nb_channels, "{name}");
+            assert_eq!(
+                layout.mask.count_ones() as usize,
+                layout.nb_channels,
+                "{name}"
+            );
             assert!(layout.check(), "{name}");
         }
         // Every const must appear in STANDARD and standard() with its
@@ -1326,7 +1381,11 @@ mod tests {
         assert_eq!(STANDARD.len(), 40);
         assert_eq!(standard().len(), 40);
         for (name, layout) in STANDARD {
-            assert_eq!(layout.mask.count_ones() as usize, layout.nb_channels, "{name}");
+            assert_eq!(
+                layout.mask.count_ones() as usize,
+                layout.nb_channels,
+                "{name}"
+            );
         }
         // Spec anchors.
         assert_eq!(ChannelLayout::MONO.mask, 0x4);
@@ -1347,12 +1406,46 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "mono", "stereo", "2.1", "3.0", "3.0(back)", "4.0", "quad", "quad(side)",
-                "3.1", "5.0", "5.0(side)", "4.1", "5.1", "5.1(side)", "6.0", "6.0(front)",
-                "3.1.2", "hexagonal", "6.1", "6.1(back)", "6.1(front)", "7.0", "7.0(front)",
-                "7.1", "7.1(wide)", "7.1(wide-side)", "5.1.2", "5.1.2(back)", "octagonal",
-                "cube", "5.1.4", "7.1.2", "7.1.4", "7.2.3", "9.1.4", "9.1.6",
-                "hexadecagonal", "binaural", "downmix", "22.2",
+                "mono",
+                "stereo",
+                "2.1",
+                "3.0",
+                "3.0(back)",
+                "4.0",
+                "quad",
+                "quad(side)",
+                "3.1",
+                "5.0",
+                "5.0(side)",
+                "4.1",
+                "5.1",
+                "5.1(side)",
+                "6.0",
+                "6.0(front)",
+                "3.1.2",
+                "hexagonal",
+                "6.1",
+                "6.1(back)",
+                "6.1(front)",
+                "7.0",
+                "7.0(front)",
+                "7.1",
+                "7.1(wide)",
+                "7.1(wide-side)",
+                "5.1.2",
+                "5.1.2(back)",
+                "octagonal",
+                "cube",
+                "5.1.4",
+                "7.1.2",
+                "7.1.4",
+                "7.2.3",
+                "9.1.4",
+                "9.1.6",
+                "hexadecagonal",
+                "binaural",
+                "downmix",
+                "22.2",
             ]
         );
         // The swap quirks (c:200, c:215).
@@ -1388,7 +1481,12 @@ mod tests {
         );
         // Count 0 falls through to the unspecified text (c:643-645).
         assert_eq!(
-            ChannelLayout { order: Order::Native, nb_channels: 0, mask: 0 }.describe(),
+            ChannelLayout {
+                order: Order::Native,
+                nb_channels: 0,
+                mask: 0
+            }
+            .describe(),
             "0 channels"
         );
     }
@@ -1404,9 +1502,18 @@ mod tests {
     // ---- from_string (c:313-441) ----
     #[test]
     fn from_string_names() {
-        assert_eq!(ChannelLayout::from_string("mono").unwrap(), ChannelLayout::MONO);
-        assert_eq!(ChannelLayout::from_string("stereo").unwrap(), ChannelLayout::STEREO);
-        assert_eq!(ChannelLayout::from_string("5.1").unwrap(), ChannelLayout::FivePointOneBack);
+        assert_eq!(
+            ChannelLayout::from_string("mono").unwrap(),
+            ChannelLayout::MONO
+        );
+        assert_eq!(
+            ChannelLayout::from_string("stereo").unwrap(),
+            ChannelLayout::STEREO
+        );
+        assert_eq!(
+            ChannelLayout::from_string("5.1").unwrap(),
+            ChannelLayout::FivePointOneBack
+        );
         assert_eq!(
             ChannelLayout::from_string("quad(side)").unwrap(),
             ChannelLayout::A2_2
@@ -1470,7 +1577,10 @@ mod tests {
         assert_eq!(l.nb_channels, 4); // FL|FR|BR|FLC
         assert_eq!(l.describe(), "4 channels (FL+FR+BR+FLC)");
         // Decimal mask: 4 = bit 2 = FC == mono layout.
-        assert_eq!(ChannelLayout::from_string("4").unwrap(), ChannelLayout::MONO);
+        assert_eq!(
+            ChannelLayout::from_string("4").unwrap(),
+            ChannelLayout::MONO
+        );
         // Octal via strtoull base 0: "010" == 8 == bit 3 == LFE.
         let l = ChannelLayout::from_string("010").unwrap();
         assert_eq!(l.mask, 0x8);
@@ -1519,8 +1629,14 @@ mod tests {
     #[test]
     fn from_string_channel_counts() {
         // "{n}c": default layout, only when native (c:426-429).
-        assert_eq!(ChannelLayout::from_string("6c").unwrap(), ChannelLayout::FivePointOneBack);
-        assert_eq!(ChannelLayout::from_string("2c").unwrap(), ChannelLayout::STEREO);
+        assert_eq!(
+            ChannelLayout::from_string("6c").unwrap(),
+            ChannelLayout::FivePointOneBack
+        );
+        assert_eq!(
+            ChannelLayout::from_string("2c").unwrap(),
+            ChannelLayout::STEREO
+        );
         // "11c" has no standard layout -> NOT unspecified; real FFmpeg
         // falls through to EINVAL. Pin so nobody "fixes" it.
         assert!(matches!(
@@ -1598,8 +1714,14 @@ mod tests {
         assert_eq!(ChannelLayout::default_for(6).mask, 0x3F); // 5.1 = _BACK
         assert_eq!(ChannelLayout::default_for(7).mask, 0x70F); // 6.1 (side)
         assert_eq!(ChannelLayout::default_for(8).mask, 0x63F); // 7.1
-        assert_eq!(ChannelLayout::default_for(10), ChannelLayout::FivePointOnePointFour);
-        assert_eq!(ChannelLayout::default_for(12), ChannelLayout::SevenPointOnePointFour);
+        assert_eq!(
+            ChannelLayout::default_for(10),
+            ChannelLayout::FivePointOnePointFour
+        );
+        assert_eq!(
+            ChannelLayout::default_for(12),
+            ChannelLayout::SevenPointOnePointFour
+        );
         assert_eq!(ChannelLayout::default_for(14), ChannelLayout::NineOneFour);
         assert_eq!(ChannelLayout::default_for(16), ChannelLayout::NineOneSix);
         assert_eq!(ChannelLayout::default_for(24), ChannelLayout::TwentyTwoTwo);
@@ -1615,9 +1737,7 @@ mod tests {
         let stereo = ChannelLayout::STEREO;
         assert_eq!(stereo.index_from_channel(Channel::FrontLeft), Ok(0));
         assert_eq!(stereo.index_from_channel(Channel::FrontRight), Ok(1));
-        assert!(stereo
-            .index_from_channel(Channel::LowFrequency)
-            .is_err());
+        assert!(stereo.index_from_channel(Channel::LowFrequency).is_err());
         assert_eq!(stereo.channel_from_index(0), Some(Channel::FrontLeft));
         assert_eq!(stereo.channel_from_index(1), Some(Channel::FrontRight));
         assert_eq!(stereo.channel_from_index(2), None);
@@ -1637,25 +1757,18 @@ mod tests {
         // None channel and unspecified order are EINVAL (c:720-721,
         // c:744-745).
         assert!(stereo.index_from_channel(Channel::None).is_err());
-        assert!(ChannelLayout::unspecified(2)
-            .index_from_channel(Channel::FrontLeft)
-            .is_err());
+        assert!(
+            ChannelLayout::unspecified(2)
+                .index_from_channel(Channel::FrontLeft)
+                .is_err()
+        );
         assert_eq!(ChannelLayout::unspecified(2).channel_from_index(0), None);
 
         // Ascending bit order for a sparse mask (c:692-696).
         let m = ChannelLayout::from_mask(0x63).unwrap();
-        assert_eq!(
-            m.channel_from_index(0),
-            Some(Channel::FrontLeft)
-        );
-        assert_eq!(
-            m.channel_from_index(2),
-            Some(Channel::BackRight)
-        );
-        assert_eq!(
-            m.channel_from_index(3),
-            Some(Channel::FrontLeftOfCenter)
-        );
+        assert_eq!(m.channel_from_index(0), Some(Channel::FrontLeft));
+        assert_eq!(m.channel_from_index(2), Some(Channel::BackRight));
+        assert_eq!(m.channel_from_index(3), Some(Channel::FrontLeftOfCenter));
     }
 
     #[test]
@@ -1666,10 +1779,20 @@ mod tests {
         assert!(stereo.index_from_string("bogus").is_err());
         // '@' needs CUSTOM order -> Unsupported (C's native arm would
         // EINVAL; documented divergence).
-        assert!(matches!(stereo.index_from_string("FL@L"), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            stereo.index_from_string("FL@L"),
+            Err(Error::Unsupported(_))
+        ));
         // Unspecified has no positional info (c:749-783 -> c:782 EINVAL).
-        assert!(ChannelLayout::unspecified(2).index_from_string("FL").is_err());
-        assert_eq!(ChannelLayout::unspecified(2).channel_from_string("FL"), None);
+        assert!(
+            ChannelLayout::unspecified(2)
+                .index_from_string("FL")
+                .is_err()
+        );
+        assert_eq!(
+            ChannelLayout::unspecified(2).channel_from_string("FL"),
+            None
+        );
     }
 
     #[test]
@@ -1681,9 +1804,11 @@ mod tests {
         let u = ChannelLayout::STEREO.union(&ChannelLayout::MONO).unwrap();
         assert_eq!(u.mask, 0x7);
         assert_eq!(u.nb_channels, 3);
-        assert!(ChannelLayout::unspecified(2)
-            .union(&ChannelLayout::STEREO)
-            .is_err());
+        assert!(
+            ChannelLayout::unspecified(2)
+                .union(&ChannelLayout::STEREO)
+                .is_err()
+        );
     }
 
     // ---- PartialEq == av_channel_layout_compare (c:811-839) ----
@@ -1696,7 +1821,10 @@ mod tests {
             ChannelLayout::STEREO
         );
         assert_ne!(ChannelLayout::STEREO, ChannelLayout::MONO);
-        assert_ne!(ChannelLayout::FivePointZero, ChannelLayout::FivePointZeroBack);
+        assert_ne!(
+            ChannelLayout::FivePointZero,
+            ChannelLayout::FivePointZeroBack
+        );
     }
 
     // ---- Channel names/descriptions (c:48-133) ----

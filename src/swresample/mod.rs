@@ -13,6 +13,10 @@
 //! (`*_dsp.c` x86 variants — scalar only), noise shaping (`dither.c` beyond
 //! the rectangular default documented at the call sites).
 
+pub mod audioconvert;
+pub mod rematrix;
+pub mod resample;
+
 use crate::util::samplefmt::SampleFormat;
 
 /// `SWR_CH_MAX` (`swresample_internal.h:28`).
@@ -101,7 +105,3 @@ impl AudioData {
         std::sync::Arc::make_mut(&mut self.data)
     }
 }
-
-pub mod audioconvert;
-pub mod rematrix;
-pub mod resample;

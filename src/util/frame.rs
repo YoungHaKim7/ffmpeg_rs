@@ -120,7 +120,7 @@ impl Plane {
             self.offset = 0;
         }
         let end = self.offset + self.linesize * self.rows;
-        &mut std::sync::Arc::get_mut(&mut self.buf).expect("CoW above") [self.offset..end]
+        &mut std::sync::Arc::get_mut(&mut self.buf).expect("CoW above")[self.offset..end]
     }
 }
 /// `AVFrame` — video subset.

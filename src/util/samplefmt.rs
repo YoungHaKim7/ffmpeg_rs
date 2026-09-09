@@ -266,13 +266,13 @@ pub fn samples_get_buffer_size(
             .ok_or(Error::OutOfRange)?;
     }
 
-    let per_plane = samples
-        .checked_mul(bps as u64)
-        .ok_or(Error::OutOfRange)?;
+    let per_plane = samples.checked_mul(bps as u64).ok_or(Error::OutOfRange)?;
     let line = if planar {
         per_plane
     } else {
-        per_plane.checked_mul(nb_channels as u64).ok_or(Error::OutOfRange)?
+        per_plane
+            .checked_mul(nb_channels as u64)
+            .ok_or(Error::OutOfRange)?
     };
     // FFALIGN(line, align) — every multiply checked (C: INT_MAX guards at
     // c:134-136/c:142-144 -> OutOfRange here).
@@ -281,7 +281,8 @@ pub fn samples_get_buffer_size(
         .checked_mul(align)
         .ok_or(Error::OutOfRange)?;
     let total = if planar {
-        line.checked_mul(nb_channels as u64).ok_or(Error::OutOfRange)?
+        line.checked_mul(nb_channels as u64)
+            .ok_or(Error::OutOfRange)?
     } else {
         line
     };
@@ -328,7 +329,11 @@ pub fn samples_fill_arrays(
         // c:176-178: audio_data[ch] = audio_data[ch-1] + line_size
         plane_offsets.push(ch * linesize);
     }
-    Ok(SampleArrays { linesize, buf_size, plane_offsets })
+    Ok(SampleArrays {
+        linesize,
+        buf_size,
+        plane_offsets,
+    })
 }
 
 /// The `av_samples_set_silence` fill byte (`samplefmt.c:256-261`):

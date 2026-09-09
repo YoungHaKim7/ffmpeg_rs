@@ -25,10 +25,12 @@
 
 use std::sync::Arc;
 
-use super::channel_layout::ChannelLayout;
-use super::frame::Plane;
-use super::rational::Rational;
-use super::samplefmt::{self, SampleFormat};
+use super::{
+    channel_layout::ChannelLayout,
+    frame::Plane,
+    rational::Rational,
+    samplefmt::{self, SampleFormat},
+};
 
 /// `AVFrame` — audio subset.
 #[derive(Debug, Clone)]
@@ -86,7 +88,11 @@ impl AudioFrame {
     /// `frame.c` `get_audio_buffer` (align 0): per-plane OWN buffers,
     /// silence-filled. The planes do not share an `Arc` — each `data[]`
     /// entry is its own allocation in C too.
-    pub fn alloc(format: SampleFormat, ch_layout: ChannelLayout, nb_samples: usize) -> Result<AudioFrame, crate::util::error::Error> {
+    pub fn alloc(
+        format: SampleFormat,
+        ch_layout: ChannelLayout,
+        nb_samples: usize,
+    ) -> Result<AudioFrame, crate::util::error::Error> {
         let arrays = samplefmt::samples_fill_arrays(ch_layout.nb_channels, nb_samples, format, 0)?;
         // The auto-align (align=0) rounds the SAMPLE count to 32; every
         // plane gets the same linesize (c's per-channel line_size).
@@ -96,7 +102,12 @@ impl AudioFrame {
             .iter()
             .map(|_| {
                 let buf: Arc<[u8]> = Arc::from(vec![fill; arrays.linesize]);
-                Plane { buf, offset: 0, linesize: arrays.linesize, rows: 1 }
+                Plane {
+                    buf,
+                    offset: 0,
+                    linesize: arrays.linesize,
+                    rows: 1,
+                }
             })
             .collect();
         Ok(AudioFrame {
@@ -206,8 +217,10 @@ mod tests {
     #[test]
     fn wrap_buffer_shared_arc_exact_offsets() {
         // 4 samples s16 stereo packed = 16 bytes; align=1 → no rounding.
-        let payload: Arc<[u8]> = Arc::from((0u16..8).flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
-        let f = AudioFrame::wrap_buffer(Arc::clone(&payload), SampleFormat::S16, stereo(), 4).unwrap();
+        let payload: Arc<[u8]> =
+            Arc::from((0u16..8).flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
+        let f =
+            AudioFrame::wrap_buffer(Arc::clone(&payload), SampleFormat::S16, stereo(), 4).unwrap();
         assert_eq!(f.nb_planes(), 1);
         assert_eq!(f.plane(0).len(), 16);
         assert_eq!(f.plane(0), &payload[..]);

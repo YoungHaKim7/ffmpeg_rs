@@ -53,12 +53,12 @@
 //!   bytes past the channel's base — the port guards with exactly that (for
 //!   planar planes, where `stride == bps`, this coincides with `stride*len`).
 
-use crate::util::error::{Error, Result};
+use crate::util::{
+    error::{Error, Result},
+    samplefmt::SampleFormat,
+};
 
-use crate::util::samplefmt::SampleFormat;
 use super::AudioData;
-
-
 
 /// C `conv_func_type` (`audioconvert.h:36`) minus the `DSDContext *st`
 /// parameter (only the unported DSD→FLT kernel used it), with C's `end`
@@ -814,8 +814,7 @@ mod tests {
         for &i in SampleFormat::ALL {
             for &o in SampleFormat::ALL {
                 let res = AudioConvert::new(o, i, 2, None);
-                let legal = six.contains(&i.packed())
-                    && six.contains(&o.packed())
+                let legal = six.contains(&i.packed()) && six.contains(&o.packed())
                     || (i == SampleFormat::Dsd && o == SampleFormat::Dsd);
                 if legal {
                     assert!(res.is_ok(), "expected ok: {} -> {}", i.name(), o.name());
@@ -823,9 +822,14 @@ mod tests {
                 } else {
                     let msg = match res {
                         Err(Error::Unsupported(m)) => m,
-                        other => panic!("expected Err for {} -> {}, got {other:?}", i.name(), o.name()),
+                        other => panic!(
+                            "expected Err for {} -> {}, got {other:?}",
+                            i.name(),
+                            o.name()
+                        ),
                     };
-                    if i == SampleFormat::Dsd && matches!(o, SampleFormat::Flt | SampleFormat::Fltp) {
+                    if i == SampleFormat::Dsd && matches!(o, SampleFormat::Flt | SampleFormat::Fltp)
+                    {
                         assert_eq!(
                             msg,
                             "DSD to float conversion requires dsd2pcm (libswresample/dsd2pcm.c), which is not ported"
@@ -853,7 +857,10 @@ mod tests {
         // :54 identity
         assert_eq!(run(conv_u8_to_u8, &pi, 1, 1, 1, 3), pi.to_vec());
         // :55 — signed-form equivalence of the 0x80U subtraction
-        assert_eq!(as_i16(&run(conv_u8_to_s16, &pi, 1, 2, 2, 3)), vec![-32768, 0, 32512]);
+        assert_eq!(
+            as_i16(&run(conv_u8_to_s16, &pi, 1, 2, 2, 3)),
+            vec![-32768, 0, 32512]
+        );
         // :56 — 0xFF - 0x80 = 127, 127<<24 = 0x7F000000 (C truth; the
         // 0x7FFF0000 value would be the S16-source row)
         assert_eq!(
@@ -916,7 +923,10 @@ mod tests {
     fn shift_truncation_s32_s64() {
         // :67 — 0x80000000 >> 16 = 0xFFFF8000 (arithmetic), stored to i16
         let pi = s32_bytes(&[i32::MIN, -1]);
-        assert_eq!(as_i16(&run(conv_s32_to_s16, &pi, 4, 2, 2, 2)), vec![-32768, -1]);
+        assert_eq!(
+            as_i16(&run(conv_s32_to_s16, &pi, 4, 2, 2, 2)),
+            vec![-32768, -1]
+        );
         // :66 — i32::MIN >> 24 = -128, + 0x80 = 0; -1 >> 24 = -1, + 0x80 = 127
         assert_eq!(run(conv_s32_to_u8, &pi, 4, 1, 1, 2), vec![0, 127]);
         // :74/:73/:72 — -1 shifts to -1 everywhere; i64::MIN >> 56 = -128
@@ -938,7 +948,10 @@ mod tests {
             vec![0, 16384, 32767, -32768, 32767]
         );
         // :78
-        assert_eq!(run(conv_flt_to_u8, &pi, 4, 1, 1, 5), vec![128, 192, 255, 0, 255]);
+        assert_eq!(
+            run(conv_flt_to_u8, &pi, 4, 1, 1, 5),
+            vec![128, 192, 255, 0, 255]
+        );
         // :80 — -1.0 * 2^31 exact, clip to i32::MIN
         assert_eq!(
             as_i32(&run(conv_flt_to_s32, &pi, 4, 4, 4, 5)),
@@ -992,7 +1005,10 @@ mod tests {
     fn int_to_float_scales() {
         // audioconvert.c:58-59,64-65,70-71,76-77 — bit-exact scales.
         let pi = s16_bytes(&[-32768i16]);
-        assert_eq!(as_f32(&run(conv_s16_to_flt, &pi, 2, 4, 4, 1)), vec![-1.0f32]);
+        assert_eq!(
+            as_f32(&run(conv_s16_to_flt, &pi, 2, 4, 4, 1)),
+            vec![-1.0f32]
+        );
         // s32 max: int->f32 rounds to nearest-even first (C implicit
         // conversion), then the exact 2^-31 scale.
         let pi = s32_bytes(&[2147483647i32]);
@@ -1004,7 +1020,10 @@ mod tests {
         let pi = s64_bytes(&[1i64 << 62]);
         assert_eq!(as_f32(&run(conv_s64_to_flt, &pi, 8, 4, 4, 1)), vec![0.5f32]);
         // u8 0x00 -> -1.0 (the signed 0x80 subtraction).
-        assert_eq!(as_f32(&run(conv_u8_to_flt, &[0x00], 1, 4, 4, 1)), vec![-1.0f32]);
+        assert_eq!(
+            as_f32(&run(conv_u8_to_flt, &[0x00], 1, 4, 4, 1)),
+            vec![-1.0f32]
+        );
     }
 
     // -- identity + width kernels -----------------------------------------------
@@ -1012,7 +1031,9 @@ mod tests {
     #[test]
     fn identity_kernels_bitexact() {
         // audioconvert.c:54,61,68,75,82,89,90 — byte-exact round-trips.
-        let pat: Vec<u8> = (0..40u8).map(|i| i.wrapping_mul(7).wrapping_add(3)).collect();
+        let pat: Vec<u8> = (0..40u8)
+            .map(|i| i.wrapping_mul(7).wrapping_add(3))
+            .collect();
         for (f, bps) in [
             (conv_u8_to_u8 as ConvFunc, 1usize),
             (conv_s16_to_s16 as ConvFunc, 2),
@@ -1031,7 +1052,10 @@ mod tests {
         // :88 — round-to-nearest narrowing: 1.0 + 2^-25 -> 1.0f32.
         let pi = (1.0f64 + 2.0f64.powi(-25)).to_le_bytes();
         assert_eq!(as_f32(&run(conv_dbl_to_flt, &pi, 8, 4, 4, 1)), vec![1.0f32]);
-        assert_eq!(as_f32(&run(conv_dbl_to_flt, &0.5f64.to_le_bytes(), 8, 4, 4, 1)), vec![0.5f32]);
+        assert_eq!(
+            as_f32(&run(conv_dbl_to_flt, &0.5f64.to_le_bytes(), 8, 4, 4, 1)),
+            vec![0.5f32]
+        );
     }
 
     // -- AudioData addressing (swresample.c:448,479-481) ------------------------
@@ -1095,10 +1119,7 @@ mod tests {
         swri_audio_convert(&ctx, &mut out, &input, 2).unwrap();
         // ch0 reads offsets 0,2 (values 0, 255) -> [-32768, 32512];
         // ch1 reads offsets 1,3 (values 128, 128) -> [0, 0]; interleaved out.
-        assert_eq!(
-            out.data.to_vec(),
-            s16_bytes(&[-32768i16, 0, 32512, 0])
-        );
+        assert_eq!(out.data.to_vec(), s16_bytes(&[-32768i16, 0, 32512, 0]));
     }
 
     #[test]
@@ -1109,13 +1130,15 @@ mod tests {
         let input = ad(packed.clone(), SampleFormat::S16, 2, 2);
         // Swap: ch_map = [1, 0].
         let mut out = AudioData::new(SampleFormat::S16, 2, 2);
-        let ctx = AudioConvert::new(SampleFormat::S16, SampleFormat::S16, 2, Some(&[1, 0])).unwrap();
+        let ctx =
+            AudioConvert::new(SampleFormat::S16, SampleFormat::S16, 2, Some(&[1, 0])).unwrap();
         assert_eq!(ctx.simd_bps, None);
         swri_audio_convert(&ctx, &mut out, &input, 2).unwrap();
         assert_eq!(out.data.to_vec(), s16_bytes(&[-400i16, 100, 500, -200]));
         // Mute channel 0: s16 input -> default silence [0;8] -> zeros.
         let mut out = AudioData::new(SampleFormat::S16, 2, 2);
-        let ctx = AudioConvert::new(SampleFormat::S16, SampleFormat::S16, 2, Some(&[-1, 0])).unwrap();
+        let ctx =
+            AudioConvert::new(SampleFormat::S16, SampleFormat::S16, 2, Some(&[-1, 0])).unwrap();
         assert_eq!(ctx.silence, [0u8; 8]);
         swri_audio_convert(&ctx, &mut out, &input, 2).unwrap();
         assert_eq!(out.data.to_vec(), s16_bytes(&[0i16, 100, 0, -200]));
@@ -1179,7 +1202,9 @@ mod tests {
         // the flattened full copy is output-identical for any len.
         for len in [64usize, 5] {
             // s16p -> s16p stereo (C split at off=48 / off=0).
-            let pat: Vec<i16> = (0..(2 * len)).map(|i| (i as i16).wrapping_mul(2654435761u32 as i16)).collect();
+            let pat: Vec<i16> = (0..(2 * len))
+                .map(|i| (i as i16).wrapping_mul(2654435761u32 as i16))
+                .collect();
             let mut data = Vec::new();
             for i in 0..len {
                 data.extend_from_slice(&pat[i].to_le_bytes());
@@ -1227,7 +1252,12 @@ mod tests {
         // audioconvert.c:259-260 — an absent out channel (empty backing
         // alias) is skipped without panic while other channels convert.
         // Scalar path (s16 -> s16p, formats differ).
-        let input = ad(s16_bytes(&[100i16, -400, -200, 500]), SampleFormat::S16, 2, 2);
+        let input = ad(
+            s16_bytes(&[100i16, -400, -200, 500]),
+            SampleFormat::S16,
+            2,
+            2,
+        );
         // Backing sized for plane 0 only: plane(1) -> None -> continue.
         let mut out = ad(vec![0xEE; 4], SampleFormat::S16p, 2, 2);
         let ctx = AudioConvert::new(SampleFormat::S16p, SampleFormat::S16, 2, None).unwrap();
@@ -1282,7 +1312,12 @@ mod tests {
     #[test]
     fn conversion_counts_exact_len() {
         // Exactly len samples converted: sentinel tail untouched.
-        let input = ad(s16_bytes(&[100i16, -400, -200, 500]), SampleFormat::S16, 2, 2);
+        let input = ad(
+            s16_bytes(&[100i16, -400, -200, 500]),
+            SampleFormat::S16,
+            2,
+            2,
+        );
         let mut out = ad(vec![0xAA; 16], SampleFormat::S16p, 2, 4); // capacity 4
         let ctx = AudioConvert::new(SampleFormat::S16p, SampleFormat::S16, 2, None).unwrap();
         swri_audio_convert(&ctx, &mut out, &input, 2).unwrap();
@@ -1294,4 +1329,3 @@ mod tests {
         assert_eq!(&out.data[12..16], &[0xAA, 0xAA, 0xAA, 0xAA]); // sentinel
     }
 }
-
