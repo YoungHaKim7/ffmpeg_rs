@@ -20,6 +20,9 @@ use std::{
     sync::atomic::{AtomicI32, Ordering},
 };
 
+/// `av_log_set_level` — global verbosity, default `AV_LOG_INFO` like ffmpeg's.
+static LEVEL: AtomicI32 = AtomicI32::new(Level::Info as i32);
+
 /// `AV_LOG_*` levels (`log.h:192-236`). Discriminants match C so that
 /// `-v/-loglevel` maps 1:1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -68,9 +71,6 @@ impl Level {
         }
     }
 }
-
-/// `av_log_set_level` — global verbosity, default `AV_LOG_INFO` like ffmpeg's.
-static LEVEL: AtomicI32 = AtomicI32::new(Level::Info as i32);
 
 /// Set the global log level (`av_log_set_level`).
 pub fn set_level(level: Level) {

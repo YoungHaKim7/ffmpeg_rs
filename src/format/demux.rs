@@ -17,6 +17,25 @@ use super::{Stream, io::IoContext};
 /// `AVPROBE_SCORE_MAX`.
 pub const PROBE_SCORE_MAX: u32 = 100;
 
+/// The demuxer list (a hand-maintanded `demuxer_list.c`).
+pub static INPUT_FORMATS: &[InputFormat] = &[
+    InputFormat {
+        name: "yuv4mpegpipe",
+        long_name: "YUV4MPEG pipe",
+        extensions: &["y4m"],
+        probe: Some(super::y4m::probe),
+        make: |_| Box::new(super::y4m::Y4mDemuxer::new()),
+    },
+    InputFormat {
+        name: "rawvideo",
+        long_name: "raw video",
+        extensions: &["yuv", "rgb"],
+        // C marks rawvideo as not auto-detectable: every file would match.
+        probe: None,
+        make: |opts| Box::new(super::rawvideo::RawVideoDemuxer::new(&opts.raw_video)),
+    },
+];
+
 /// Options only the rawvideo demuxer consumes (its AVOptions
 /// `pixel_format`/`video_size`/`framerate`, rawvideodec.c:211-227, typed).
 #[derive(Debug, Clone)]
@@ -67,25 +86,6 @@ pub trait Demuxer {
     /// `read_packet` — next packet or `Err(Error::Eof)`.
     fn read_packet(&mut self, io: &mut IoContext) -> Result<Packet>;
 }
-
-/// The demuxer list (a hand-maintanded `demuxer_list.c`).
-pub static INPUT_FORMATS: &[InputFormat] = &[
-    InputFormat {
-        name: "yuv4mpegpipe",
-        long_name: "YUV4MPEG pipe",
-        extensions: &["y4m"],
-        probe: Some(super::y4m::probe),
-        make: |_| Box::new(super::y4m::Y4mDemuxer::new()),
-    },
-    InputFormat {
-        name: "rawvideo",
-        long_name: "raw video",
-        extensions: &["yuv", "rgb"],
-        // C marks rawvideo as not auto-detectable: every file would match.
-        probe: None,
-        make: |opts| Box::new(super::rawvideo::RawVideoDemuxer::new(&opts.raw_video)),
-    },
-];
 
 /// `av_find_input_format` — registry lookup by `-f` name.
 pub fn find_input_format(name: &str) -> Option<&'static InputFormat> {

@@ -28,6 +28,36 @@ use crate::{
     },
 };
 
+const USAGE: &str = "\
+usage: ffmpeg_rs [global options] [[input options] -i INPUT] [output options] OUTPUT
+
+global options:
+  -y              overwrite output files without asking
+  -n              never overwrite output files
+  -v LEVEL        set log level (quiet|panic|fatal|error|warning|info|verbose|debug|trace)
+  -h, --help      show this help
+
+input options (before -i):
+  -f FMT          force input format (yuv4mpegpipe|rawvideo)
+  -pixel_format F rawvideo only: pixel format of the samples
+  -video_size WXH rawvideo only: frame size, e.g. 128x96
+  -framerate R    rawvideo only: frame rate, e.g. 25 or 30000:1001
+
+output options (after -i):
+  -f FMT          force output format (yuv4mpegpipe|rawvideo)
+  -pix_fmt F      output pixel format
+  -s WXH          rescale, e.g. 320x240 (Vulkan compute when available)
+  -vf GRAPH       filtergraph between decode and encode, e.g.
+                  'null', 'scale=320:240', 'scale=320:240,format=gray'
+  -scale_algo A   nearest | bilinear | bicubic (default) | area | gauss |
+                  sinc | lanczos | spline (the latter five are CPU-only,
+                  auto-falling back from the Vulkan engine)
+  -scale_engine E auto (default) | vulkan | cpu
+
+Pipeline: demux (y4m|rawvideo) -> decode (rawvideo) -> swscale -> encode
+(rawvideo) -> mux (y4m|rawvideo). Resampling runs the libswscale kernels on
+a Vulkan compute device when one is available, else on the CPU.";
+
 /// What `-y`/`-n` decided about clobbering the output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Overwrite {
@@ -70,36 +100,6 @@ pub struct Cli {
     /// `-scale_engine` (default auto: GPU when possible).
     pub scale_engine: ScaleEngine,
 }
-
-const USAGE: &str = "\
-usage: ffmpeg_rs [global options] [[input options] -i INPUT] [output options] OUTPUT
-
-global options:
-  -y              overwrite output files without asking
-  -n              never overwrite output files
-  -v LEVEL        set log level (quiet|panic|fatal|error|warning|info|verbose|debug|trace)
-  -h, --help      show this help
-
-input options (before -i):
-  -f FMT          force input format (yuv4mpegpipe|rawvideo)
-  -pixel_format F rawvideo only: pixel format of the samples
-  -video_size WXH rawvideo only: frame size, e.g. 128x96
-  -framerate R    rawvideo only: frame rate, e.g. 25 or 30000:1001
-
-output options (after -i):
-  -f FMT          force output format (yuv4mpegpipe|rawvideo)
-  -pix_fmt F      output pixel format
-  -s WXH          rescale, e.g. 320x240 (Vulkan compute when available)
-  -vf GRAPH       filtergraph between decode and encode, e.g.
-                  'null', 'scale=320:240', 'scale=320:240,format=gray'
-  -scale_algo A   nearest | bilinear | bicubic (default) | area | gauss |
-                  sinc | lanczos | spline (the latter five are CPU-only,
-                  auto-falling back from the Vulkan engine)
-  -scale_engine E auto (default) | vulkan | cpu
-
-Pipeline: demux (y4m|rawvideo) -> decode (rawvideo) -> swscale -> encode
-(rawvideo) -> mux (y4m|rawvideo). Resampling runs the libswscale kernels on
-a Vulkan compute device when one is available, else on the CPU.";
 
 /// `av_parse_video_rate` subset: `n` or `n:d`.
 fn parse_rate(s: &str) -> Result<Rational> {

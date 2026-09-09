@@ -109,6 +109,42 @@ use super::{
 };
 
 // ---------------------------------------------------------------------------
+// Filter definition (buffersrc.c:611-630)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_PAD: PadDef = PadDef {
+    name: "default",
+    needs_writable: false,
+};
+
+/// `ff_vsrc_buffer` (buffersrc.c:619-630) + `avfilter_vsrc_buffer_outputs`
+/// (611-617). The pad's `.type`/`.config_props` fields are expressed by the
+/// `FilterImpl` trait instead (config_props matches `PadRef::Out(0)` itself).
+///
+/// Shorthand = `ff_filter_opt_parse`'s walk of buffer_options skipping
+/// `AV_OPT_TYPE_CONST` and duplicate OFFSETs (avfilter.c:866-871):
+/// width/height/pix_fmt/sar/time_base/frame_rate/colorspace/range —
+/// `video_size` (dup offset of width) and `pixel_aspect` (dup of sar) are
+/// EXPLICIT-KEY ONLY; C's trailing `alpha_mode` slot is dropped (unported).
+pub static BUFFER_SRC_DEF: FilterDef = FilterDef {
+    name: "buffer",
+    inputs: &[],
+    outputs: &[DEFAULT_PAD],
+    flags: FilterFlags(0),
+    shorthand: &[
+        "width",
+        "height",
+        "pix_fmt",
+        "sar",
+        "time_base",
+        "frame_rate",
+        "colorspace",
+        "range",
+    ],
+    make: || Box::new(BufferSource::default()),
+};
+
+// ---------------------------------------------------------------------------
 // State (buffersrc.c:44-72 BufferSourceContext, video-only subset)
 // ---------------------------------------------------------------------------
 
@@ -780,42 +816,6 @@ fn ts2timestr(ts: i64, tb: Rational) -> String {
     b.truncate(last + 1);
     String::from_utf8(b).expect("digits, '.', '-' and maybe 'NaN' only")
 }
-
-// ---------------------------------------------------------------------------
-// Filter definition (buffersrc.c:611-630)
-// ---------------------------------------------------------------------------
-
-const DEFAULT_PAD: PadDef = PadDef {
-    name: "default",
-    needs_writable: false,
-};
-
-/// `ff_vsrc_buffer` (buffersrc.c:619-630) + `avfilter_vsrc_buffer_outputs`
-/// (611-617). The pad's `.type`/`.config_props` fields are expressed by the
-/// `FilterImpl` trait instead (config_props matches `PadRef::Out(0)` itself).
-///
-/// Shorthand = `ff_filter_opt_parse`'s walk of buffer_options skipping
-/// `AV_OPT_TYPE_CONST` and duplicate OFFSETs (avfilter.c:866-871):
-/// width/height/pix_fmt/sar/time_base/frame_rate/colorspace/range —
-/// `video_size` (dup offset of width) and `pixel_aspect` (dup of sar) are
-/// EXPLICIT-KEY ONLY; C's trailing `alpha_mode` slot is dropped (unported).
-pub static BUFFER_SRC_DEF: FilterDef = FilterDef {
-    name: "buffer",
-    inputs: &[],
-    outputs: &[DEFAULT_PAD],
-    flags: FilterFlags(0),
-    shorthand: &[
-        "width",
-        "height",
-        "pix_fmt",
-        "sar",
-        "time_base",
-        "frame_rate",
-        "colorspace",
-        "range",
-    ],
-    make: || Box::new(BufferSource::default()),
-};
 
 // ---------------------------------------------------------------------------
 // Runtime API (buffersrc.c:185-308) — the free functions the graph stubs

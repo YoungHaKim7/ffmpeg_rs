@@ -8,6 +8,24 @@ use crate::{
 
 use super::{Stream, io::IoContext};
 
+/// The muxer list.
+pub static OUTPUT_FORMATS: &[OutputFormat] = &[
+    OutputFormat {
+        name: "yuv4mpegpipe",
+        long_name: "YUV4MPEG pipe",
+        extensions: &["y4m"],
+        video_codec: CodecId::Rawvideo,
+        make: || Box::new(super::y4m::Y4mMuxer::new()),
+    },
+    OutputFormat {
+        name: "rawvideo",
+        long_name: "raw video",
+        extensions: &["yuv", "rgb"],
+        video_codec: CodecId::Rawvideo,
+        make: || Box::new(super::rawvideo::RawVideoMuxer),
+    },
+];
+
 /// `FFOutputFormat` — one row of the muxer registry.
 pub struct OutputFormat {
     pub name: &'static str,
@@ -35,24 +53,6 @@ pub trait Muxer {
         Ok(())
     }
 }
-
-/// The muxer list.
-pub static OUTPUT_FORMATS: &[OutputFormat] = &[
-    OutputFormat {
-        name: "yuv4mpegpipe",
-        long_name: "YUV4MPEG pipe",
-        extensions: &["y4m"],
-        video_codec: CodecId::Rawvideo,
-        make: || Box::new(super::y4m::Y4mMuxer::new()),
-    },
-    OutputFormat {
-        name: "rawvideo",
-        long_name: "raw video",
-        extensions: &["yuv", "rgb"],
-        video_codec: CodecId::Rawvideo,
-        make: || Box::new(super::rawvideo::RawVideoMuxer),
-    },
-];
 
 /// `av_guess_format` by `-f` name.
 pub fn find_output_format(name: &str) -> Option<&'static OutputFormat> {

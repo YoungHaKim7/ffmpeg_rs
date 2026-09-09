@@ -21,106 +21,6 @@
 
 use super::pixfmt::PixelFormat;
 
-/// `AVComponentDescriptor` (`pixdesc.h:33`) — where one component lives.
-#[derive(Clone, Copy, Debug)]
-pub struct ComponentDescriptor {
-    /// Which of the (up to 4) image planes the component is stored in.
-    pub plane: u8,
-    /// Bytes between horizontally adjacent pixels of this component
-    /// (bits for bitstream formats, which we do not support).
-    pub step: u8,
-    /// Byte offset of the component inside `step` (e.g. U in YUYV: step 4,
-    /// offset 1).
-    pub offset: u8,
-    /// Bit offset inside the step's first byte (only non-zero for sub-byte
-    /// formats like rgb565: G sits at bit 5).
-    pub shift: u8,
-    /// Component bit depth (8, 10, 12, 16…).
-    pub depth: u8,
-}
-
-/// `AV_PIX_FMT_FLAG_*` bitset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct PixFmtFlags(pub u32);
-
-impl PixFmtFlags {
-    pub const PLANAR: PixFmtFlags = PixFmtFlags(1 << 4);
-    pub const RGB: PixFmtFlags = PixFmtFlags(1 << 5);
-    pub const ALPHA: PixFmtFlags = PixFmtFlags(1 << 7);
-    pub const BE: PixFmtFlags = PixFmtFlags(1 << 2);
-    pub const FLOAT: PixFmtFlags = PixFmtFlags(1 << 9);
-    pub const XYZ: PixFmtFlags = PixFmtFlags(1 << 10);
-
-    pub const fn contains(self, other: PixFmtFlags) -> bool {
-        self.0 & other.0 == other.0
-    }
-    pub const fn intersects(self, other: PixFmtFlags) -> bool {
-        self.0 & other.0 != 0
-    }
-    pub const fn union(self, other: PixFmtFlags) -> PixFmtFlags {
-        PixFmtFlags(self.0 | other.0)
-    }
-}
-
-/// `AVPixFmtDescriptor` (`pixdesc.h:88`) — layout description of one format.
-#[derive(Clone, Copy, Debug)]
-pub struct PixFmtDescriptor {
-    pub name: &'static str,
-    pub nb_components: u8,
-    /// Chroma subsampling: U/V are stored at
-    /// `ceil(w >> log2_chroma_w) x ceil(h >> log2_chroma_h)`.
-    pub log2_chroma_w: u8,
-    pub log2_chroma_h: u8,
-    pub flags: PixFmtFlags,
-    /// Components in YUV order, or R/G/B(/A) for RGB formats.
-    pub comp: [ComponentDescriptor; 4],
-}
-
-/// `av_pix_fmt_desc_get` — total over [`PixelFormat::ALL`].
-pub fn descriptor(fmt: PixelFormat) -> &'static PixFmtDescriptor {
-    match fmt {
-        // ---- planar YUV ------------------------------------------------
-        PixelFormat::Yuv420p => &DESC_YUV420P,
-        PixelFormat::Yuv422p => &DESC_YUV422P,
-        PixelFormat::Yuv444p => &DESC_YUV444P,
-        PixelFormat::Yuv420p10le => &DESC_YUV420P10LE,
-        PixelFormat::Yuv422p10le => &DESC_YUV422P10LE,
-        PixelFormat::Yuv444p10le => &DESC_YUV444P10LE,
-        PixelFormat::Yuv420p16le => &DESC_YUV420P16LE,
-        PixelFormat::Yuv444p16le => &DESC_YUV444P16LE,
-        // ---- bi-planar / packed YUV ------------------------------------
-        PixelFormat::Nv12 => &DESC_NV12,
-        PixelFormat::Nv21 => &DESC_NV21,
-        PixelFormat::Yuyv422 => &DESC_YUYV422,
-        PixelFormat::Uyvy422 => &DESC_UYVY422,
-        // ---- gray ------------------------------------------------------
-        PixelFormat::Gray8 => &DESC_GRAY8,
-        PixelFormat::Gray16le => &DESC_GRAY16LE,
-        // ---- packed RGB ------------------------------------------------
-        PixelFormat::Rgb24 => &DESC_RGB24,
-        PixelFormat::Bgr24 => &DESC_BGR24,
-        PixelFormat::Rgba => &DESC_RGBA,
-        PixelFormat::Bgra => &DESC_BGRA,
-        PixelFormat::Argb => &DESC_ARGB,
-        PixelFormat::Abgr => &DESC_ABGR,
-        PixelFormat::Rgb565le => &DESC_RGB565LE,
-        // ---- planar RGB ------------------------------------------------
-        PixelFormat::Gbrp => &DESC_GBRP,
-        PixelFormat::Gbrap => &DESC_GBRAP,
-    }
-}
-
-// Component shorthand: (plane, step, offset, shift, depth).
-const fn c(plane: u8, step: u8, offset: u8, shift: u8, depth: u8) -> ComponentDescriptor {
-    ComponentDescriptor {
-        plane,
-        step,
-        offset,
-        shift,
-        depth,
-    }
-}
-
 const DESC_YUV420P: PixFmtDescriptor = PixFmtDescriptor {
     name: "yuv420p",
     nb_components: 3,
@@ -448,6 +348,106 @@ const DESC_GBRAP: PixFmtDescriptor = PixFmtDescriptor {
         .union(PixFmtFlags::RGB)
         .union(PixFmtFlags::ALPHA),
 };
+
+/// `AVComponentDescriptor` (`pixdesc.h:33`) — where one component lives.
+#[derive(Clone, Copy, Debug)]
+pub struct ComponentDescriptor {
+    /// Which of the (up to 4) image planes the component is stored in.
+    pub plane: u8,
+    /// Bytes between horizontally adjacent pixels of this component
+    /// (bits for bitstream formats, which we do not support).
+    pub step: u8,
+    /// Byte offset of the component inside `step` (e.g. U in YUYV: step 4,
+    /// offset 1).
+    pub offset: u8,
+    /// Bit offset inside the step's first byte (only non-zero for sub-byte
+    /// formats like rgb565: G sits at bit 5).
+    pub shift: u8,
+    /// Component bit depth (8, 10, 12, 16…).
+    pub depth: u8,
+}
+
+/// `AV_PIX_FMT_FLAG_*` bitset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PixFmtFlags(pub u32);
+
+impl PixFmtFlags {
+    pub const PLANAR: PixFmtFlags = PixFmtFlags(1 << 4);
+    pub const RGB: PixFmtFlags = PixFmtFlags(1 << 5);
+    pub const ALPHA: PixFmtFlags = PixFmtFlags(1 << 7);
+    pub const BE: PixFmtFlags = PixFmtFlags(1 << 2);
+    pub const FLOAT: PixFmtFlags = PixFmtFlags(1 << 9);
+    pub const XYZ: PixFmtFlags = PixFmtFlags(1 << 10);
+
+    pub const fn contains(self, other: PixFmtFlags) -> bool {
+        self.0 & other.0 == other.0
+    }
+    pub const fn intersects(self, other: PixFmtFlags) -> bool {
+        self.0 & other.0 != 0
+    }
+    pub const fn union(self, other: PixFmtFlags) -> PixFmtFlags {
+        PixFmtFlags(self.0 | other.0)
+    }
+}
+
+/// `AVPixFmtDescriptor` (`pixdesc.h:88`) — layout description of one format.
+#[derive(Clone, Copy, Debug)]
+pub struct PixFmtDescriptor {
+    pub name: &'static str,
+    pub nb_components: u8,
+    /// Chroma subsampling: U/V are stored at
+    /// `ceil(w >> log2_chroma_w) x ceil(h >> log2_chroma_h)`.
+    pub log2_chroma_w: u8,
+    pub log2_chroma_h: u8,
+    pub flags: PixFmtFlags,
+    /// Components in YUV order, or R/G/B(/A) for RGB formats.
+    pub comp: [ComponentDescriptor; 4],
+}
+
+/// `av_pix_fmt_desc_get` — total over [`PixelFormat::ALL`].
+pub fn descriptor(fmt: PixelFormat) -> &'static PixFmtDescriptor {
+    match fmt {
+        // ---- planar YUV ------------------------------------------------
+        PixelFormat::Yuv420p => &DESC_YUV420P,
+        PixelFormat::Yuv422p => &DESC_YUV422P,
+        PixelFormat::Yuv444p => &DESC_YUV444P,
+        PixelFormat::Yuv420p10le => &DESC_YUV420P10LE,
+        PixelFormat::Yuv422p10le => &DESC_YUV422P10LE,
+        PixelFormat::Yuv444p10le => &DESC_YUV444P10LE,
+        PixelFormat::Yuv420p16le => &DESC_YUV420P16LE,
+        PixelFormat::Yuv444p16le => &DESC_YUV444P16LE,
+        // ---- bi-planar / packed YUV ------------------------------------
+        PixelFormat::Nv12 => &DESC_NV12,
+        PixelFormat::Nv21 => &DESC_NV21,
+        PixelFormat::Yuyv422 => &DESC_YUYV422,
+        PixelFormat::Uyvy422 => &DESC_UYVY422,
+        // ---- gray ------------------------------------------------------
+        PixelFormat::Gray8 => &DESC_GRAY8,
+        PixelFormat::Gray16le => &DESC_GRAY16LE,
+        // ---- packed RGB ------------------------------------------------
+        PixelFormat::Rgb24 => &DESC_RGB24,
+        PixelFormat::Bgr24 => &DESC_BGR24,
+        PixelFormat::Rgba => &DESC_RGBA,
+        PixelFormat::Bgra => &DESC_BGRA,
+        PixelFormat::Argb => &DESC_ARGB,
+        PixelFormat::Abgr => &DESC_ABGR,
+        PixelFormat::Rgb565le => &DESC_RGB565LE,
+        // ---- planar RGB ------------------------------------------------
+        PixelFormat::Gbrp => &DESC_GBRP,
+        PixelFormat::Gbrap => &DESC_GBRAP,
+    }
+}
+
+// Component shorthand: (plane, step, offset, shift, depth).
+const fn c(plane: u8, step: u8, offset: u8, shift: u8, depth: u8) -> ComponentDescriptor {
+    ComponentDescriptor {
+        plane,
+        step,
+        offset,
+        shift,
+        depth,
+    }
+}
 
 /// `av_pix_fmt_count_planes` — highest plane index in use, +1.
 pub fn count_planes(fmt: PixelFormat) -> usize {
