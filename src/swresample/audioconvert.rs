@@ -68,6 +68,120 @@ use super::AudioData;
 /// `po.len() >= (len-1)*os + out_bps` and `pi.len() >= (len-1)*is + in_bps`.
 type ConvFunc = fn(po: &mut [u8], pi: &[u8], is: usize, os: usize, len: usize);
 
+/// `struct AudioConvert` (`audioconvert.h:39-48`).
+///
+/// Field mapping vs C: `channels`, `conv_f`, `silence[8]` keep their names;
+/// `simd_bps` replaces `simd_f` + the `cpy1/2/4/8` selection (bytes per
+/// sample 1/2/4/8, set at alloc when `out_fmt == in_fmt && ch_map.is_none()`,
+/// consumed as a whole-plane copy); `ch_map` is an owned clone of C's
+/// borrowed `const int *ch_map` (entries `>= 0` = source channel index,
+/// `-1` = muted channel, `audioconvert.h:56-58`).
+///
+/// Dropped with documented guards: `in/out_simd_align_mask` (only the skipped
+/// arch initializers set them — always 0 in scalar builds, and the misalign
+/// accumulation at `audioconvert.c:218-231` is dead code) and
+/// `dsd_state[SWR_CH_MAX]` (only the unported DSD→FLT kernel reads it).
+pub struct AudioConvert {
+    channels: usize,
+    conv_f: ConvFunc,
+    simd_bps: Option<usize>,
+    ch_map: Option<Vec<i32>>,
+    silence: [u8; 8],
+}
+
+impl std::fmt::Debug for AudioConvert {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // fn-pointer Debug is address noise — list the C-visible state instead.
+        f.debug_struct("AudioConvert")
+            .field("channels", &self.channels)
+            .field("ch_map", &self.ch_map)
+            .field("simd_bps", &self.simd_bps)
+            .field("silence", &self.silence)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AudioConvert {
+    /// `swri_audio_convert_alloc` (`audioconvert.c:153-202`; doc at
+    /// `audioconvert.h:50-63`). C returns `NULL` on a pair-table hole; the
+    /// port returns `Err` — the generic message mirrors the caller's log text
+    /// at `swresample.c:373-375` ("Cannot convert %s sample format to %s
+    /// sample format", source first, destination second). The C `flags`
+    /// (`AV_CPU_FLAG_*`) parameter is dropped: unused in the scalar body.
+    pub fn new(
+        out_fmt: SampleFormat,
+        in_fmt: SampleFormat,
+        channels: usize,
+        ch_map: Option<&[i32]>,
+    ) -> Result<Self> {
+        // C-legal pair at audioconvert.c:136 whose kernel delegates to
+        // dsd2pcm.c (unported) — dedicated message rather than the generic
+        // hole text, so the missing piece is identifiable.
+        if in_fmt.packed() == SampleFormat::Dsd && out_fmt.packed() == SampleFormat::Flt {
+            return Err(Error::Unsupported(
+                "DSD to float conversion requires dsd2pcm (libswresample/dsd2pcm.c), which is not ported"
+                    .into(),
+            ));
+        }
+
+        // audioconvert.c:159-162 — table lookup on PACKED forms (the kernel
+        // does not care about planarity; strides carry that).
+        let Some(conv_f) = conv_pair(in_fmt.packed(), out_fmt.packed()) else {
+            return Err(Error::Unsupported(format!(
+                "cannot convert sample format {} to {}",
+                in_fmt.name(),
+                out_fmt.name()
+            )));
+        };
+
+        // audioconvert.c:167-170 — LOCAL normalization: mono always converts
+        // planar->planar. Affects only the silence + copy-path decisions
+        // below (the kernel was already chosen from the packed forms).
+        let mut in_fmt = in_fmt;
+        let mut out_fmt = out_fmt;
+        if channels == 1 {
+            in_fmt = in_fmt.planar();
+            out_fmt = out_fmt.planar();
+        }
+
+        // audioconvert.c:172-174 — the port owns a clone of the borrowed map.
+        let ch_map = ch_map.map(|m| m.to_vec());
+
+        // audioconvert.c:175-182 — silence input sample.
+        let mut silence = [0u8; 8];
+        if in_fmt == SampleFormat::U8 || in_fmt == SampleFormat::U8p {
+            silence = [0x80; 8];
+        }
+        if in_fmt == SampleFormat::Dsd {
+            // swri_dsd2pcm_init() + dsd_state[] init skipped (unported; only
+            // reachable for dsd->dsd after the pair check above).
+            silence = [0x69; 8];
+        }
+
+        // audioconvert.c:184-191 — the cpy1/2/4/8 selection, flattened to
+        // "bytes per sample of an identical-format, unmapped converter".
+        // AFTER the mono normalization, exactly as in C (an unequal pair can
+        // become equal here, e.g. out=S16P in=S16 mono).
+        let simd_bps = if out_fmt == in_fmt && ch_map.is_none() {
+            Some(in_fmt.bytes_per_sample())
+        } else {
+            None
+        };
+
+        // audioconvert.c:193-199 — swri_audio_convert_init_x86/arm/aarch64
+        // skipped (guards `#if ARCH_X86 && HAVE_X86ASM` / ARCH_ARM /
+        // ARCH_AARCH64): SIMD macros flattened to scalar, output-identical.
+
+        Ok(AudioConvert {
+            channels,
+            conv_f,
+            simd_bps,
+            ch_map,
+            silence,
+        })
+    }
+}
+
 // --- source U8: audioconvert.c:54-59 ---------------------------------------
 
 /// `audioconvert.c:54` — identity byte copy.
@@ -501,120 +615,6 @@ fn conv_pair(in_packed: SampleFormat, out_packed: SampleFormat) -> Option<ConvFu
         _ => return None,
     };
     Some(f)
-}
-
-/// `struct AudioConvert` (`audioconvert.h:39-48`).
-///
-/// Field mapping vs C: `channels`, `conv_f`, `silence[8]` keep their names;
-/// `simd_bps` replaces `simd_f` + the `cpy1/2/4/8` selection (bytes per
-/// sample 1/2/4/8, set at alloc when `out_fmt == in_fmt && ch_map.is_none()`,
-/// consumed as a whole-plane copy); `ch_map` is an owned clone of C's
-/// borrowed `const int *ch_map` (entries `>= 0` = source channel index,
-/// `-1` = muted channel, `audioconvert.h:56-58`).
-///
-/// Dropped with documented guards: `in/out_simd_align_mask` (only the skipped
-/// arch initializers set them — always 0 in scalar builds, and the misalign
-/// accumulation at `audioconvert.c:218-231` is dead code) and
-/// `dsd_state[SWR_CH_MAX]` (only the unported DSD→FLT kernel reads it).
-pub struct AudioConvert {
-    channels: usize,
-    conv_f: ConvFunc,
-    simd_bps: Option<usize>,
-    ch_map: Option<Vec<i32>>,
-    silence: [u8; 8],
-}
-
-impl std::fmt::Debug for AudioConvert {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // fn-pointer Debug is address noise — list the C-visible state instead.
-        f.debug_struct("AudioConvert")
-            .field("channels", &self.channels)
-            .field("ch_map", &self.ch_map)
-            .field("simd_bps", &self.simd_bps)
-            .field("silence", &self.silence)
-            .finish_non_exhaustive()
-    }
-}
-
-impl AudioConvert {
-    /// `swri_audio_convert_alloc` (`audioconvert.c:153-202`; doc at
-    /// `audioconvert.h:50-63`). C returns `NULL` on a pair-table hole; the
-    /// port returns `Err` — the generic message mirrors the caller's log text
-    /// at `swresample.c:373-375` ("Cannot convert %s sample format to %s
-    /// sample format", source first, destination second). The C `flags`
-    /// (`AV_CPU_FLAG_*`) parameter is dropped: unused in the scalar body.
-    pub fn new(
-        out_fmt: SampleFormat,
-        in_fmt: SampleFormat,
-        channels: usize,
-        ch_map: Option<&[i32]>,
-    ) -> Result<Self> {
-        // C-legal pair at audioconvert.c:136 whose kernel delegates to
-        // dsd2pcm.c (unported) — dedicated message rather than the generic
-        // hole text, so the missing piece is identifiable.
-        if in_fmt.packed() == SampleFormat::Dsd && out_fmt.packed() == SampleFormat::Flt {
-            return Err(Error::Unsupported(
-                "DSD to float conversion requires dsd2pcm (libswresample/dsd2pcm.c), which is not ported"
-                    .into(),
-            ));
-        }
-
-        // audioconvert.c:159-162 — table lookup on PACKED forms (the kernel
-        // does not care about planarity; strides carry that).
-        let Some(conv_f) = conv_pair(in_fmt.packed(), out_fmt.packed()) else {
-            return Err(Error::Unsupported(format!(
-                "cannot convert sample format {} to {}",
-                in_fmt.name(),
-                out_fmt.name()
-            )));
-        };
-
-        // audioconvert.c:167-170 — LOCAL normalization: mono always converts
-        // planar->planar. Affects only the silence + copy-path decisions
-        // below (the kernel was already chosen from the packed forms).
-        let mut in_fmt = in_fmt;
-        let mut out_fmt = out_fmt;
-        if channels == 1 {
-            in_fmt = in_fmt.planar();
-            out_fmt = out_fmt.planar();
-        }
-
-        // audioconvert.c:172-174 — the port owns a clone of the borrowed map.
-        let ch_map = ch_map.map(|m| m.to_vec());
-
-        // audioconvert.c:175-182 — silence input sample.
-        let mut silence = [0u8; 8];
-        if in_fmt == SampleFormat::U8 || in_fmt == SampleFormat::U8p {
-            silence = [0x80; 8];
-        }
-        if in_fmt == SampleFormat::Dsd {
-            // swri_dsd2pcm_init() + dsd_state[] init skipped (unported; only
-            // reachable for dsd->dsd after the pair check above).
-            silence = [0x69; 8];
-        }
-
-        // audioconvert.c:184-191 — the cpy1/2/4/8 selection, flattened to
-        // "bytes per sample of an identical-format, unmapped converter".
-        // AFTER the mono normalization, exactly as in C (an unequal pair can
-        // become equal here, e.g. out=S16P in=S16 mono).
-        let simd_bps = if out_fmt == in_fmt && ch_map.is_none() {
-            Some(in_fmt.bytes_per_sample())
-        } else {
-            None
-        };
-
-        // audioconvert.c:193-199 — swri_audio_convert_init_x86/arm/aarch64
-        // skipped (guards `#if ARCH_X86 && HAVE_X86ASM` / ARCH_ARM /
-        // ARCH_AARCH64): SIMD macros flattened to scalar, output-identical.
-
-        Ok(AudioConvert {
-            channels,
-            conv_f,
-            simd_bps,
-            ch_map,
-            silence,
-        })
-    }
 }
 
 /// `swri_audio_convert` (`audioconvert.c:209-265`; doc at
