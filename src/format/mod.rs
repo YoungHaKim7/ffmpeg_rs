@@ -160,16 +160,30 @@ impl InputFormatContext {
         })
     }
 
-    /// `avformat_find_stream_info` — Y4M/rawvideo are self-describing, so
-    /// this is only the lifecycle hook plus a sanity check that stream 0 is
-    /// video (C would decode frames to fill in gaps; we have none).
+    /// `avformat_find_stream_info` — the ported containers are
+    /// self-describing, so this is the lifecycle hook plus per-media sanity
+    /// checks (C would decode frames to fill in gaps; we have none).
     pub fn find_stream_info(&mut self) -> Result<()> {
         let st = &self.streams[0];
-        if st.codecpar.codec_type != MediaType::Video {
-            return Err(Error::Unsupported("non-video streams".into()));
-        }
-        if st.codecpar.width == 0 || st.codecpar.height == 0 {
-            return Err(Error::InvalidData("stream dimensions unknown".into()));
+        match st.codecpar.codec_type {
+            MediaType::Video => {
+                if st.codecpar.width == 0 || st.codecpar.height == 0 {
+                    return Err(Error::InvalidData("stream dimensions unknown".into()));
+                }
+            }
+            MediaType::Audio => {
+                // WAV fills sample_rate/ch_layout/sample_fmt at header
+                // parse; a zero rate or zero channels is malformed.
+                if st.codecpar.sample_rate <= 0 {
+                    return Err(Error::InvalidData("stream sample rate unknown".into()));
+                }
+                if st.codecpar.ch_layout.nb_channels == 0 {
+                    return Err(Error::InvalidData("stream channel count unknown".into()));
+                }
+            }
+            other => {
+                return Err(Error::Unsupported(format!("non-A/V streams: {other:?}")));
+            }
         }
         Ok(())
     }
