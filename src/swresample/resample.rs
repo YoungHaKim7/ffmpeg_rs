@@ -1,5 +1,5 @@
 //! Rational resampling — port of `libswresample/resample.c` (513 lines), the
-g//! dispatch of `resample_dsp.c` (78 lines), plus `av_bessel_i0` from
+//! dispatch of `resample_dsp.c` (78 lines), plus `av_bessel_i0` from
 //! `libavutil/mathematics.c:227-330` (needed by the Kaiser window).
 //!
 //! ## C → Rust map
@@ -91,7 +91,6 @@ use crate::util::{
 };
 
 use super::AudioData;
-
 
 // ---------------------------------------------------------------------------
 // Filter type + the per-format element trait (resample_template.c)
@@ -1128,7 +1127,6 @@ impl ResampleContext {
         }
     }
 }
-
 
 // av_bessel_i0 — libavutil/mathematics.c:227-330
 // ---------------------------------------------------------------------------
