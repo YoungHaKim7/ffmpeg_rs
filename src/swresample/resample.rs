@@ -1,6 +1,5 @@
 //! Rational resampling — port of `libswresample/resample.c` (513 lines), the
-//! four instantiations of `resample_template.c` (219 lines) and the scalar
-//! dispatch of `resample_dsp.c` (78 lines), plus `av_bessel_i0` from
+g//! dispatch of `resample_dsp.c` (78 lines), plus `av_bessel_i0` from
 //! `libavutil/mathematics.c:227-330` (needed by the Kaiser window).
 //!
 //! ## C → Rust map
@@ -84,99 +83,15 @@
 //!   [`realloc_audio`] grows by doubling without the padding (invisible to
 //!   every caller — same reasoning as `AudioData`'s own doc in `mod.rs`).
 
-use crate::util::error::{Error, Result};
-use crate::util::mathematics::{rescale, rescale_rnd, Rounding};
-use crate::util::rational::Rational;
-use crate::util::samplefmt::SampleFormat;
+use crate::util::{
+    error::{Error, Result},
+    mathematics::{Rounding, rescale, rescale_rnd},
+    rational::Rational,
+    samplefmt::SampleFormat,
+};
 
 use super::AudioData;
 
-// ---------------------------------------------------------------------------
-// av_bessel_i0 — libavutil/mathematics.c:227-330
-// ---------------------------------------------------------------------------
-
-/// `av_bessel_i0` (`libavutil/mathematics.c:257`) — modified Bessel function
-/// of the first kind, order zero, via the Blair-Edwards (AECL-4928, 1974)
-/// minimax rational approximations taken from Boost:
-///
-/// * \|x\| ≤ 15: `p1(y)/q1(y)` with `y = x²`
-/// * \|x\| > 15: `p2(y)/q2(y) · e^x/√x` with `y = 1/x − 1/15`
-///
-/// `eval_poly` (`mathematics.c:216-224`) is the Horner loop
-/// `sum = c[n-1]; for i in (0..n-1).rev() { sum = sum·x + c[i] }`.
-pub fn bessel_i0(x: f64) -> f64 {
-    /// `p1[]` (`mathematics.c:258-273`).
-    const P1: [f64; 15] = [
-        -2.2335582639474375249e+15,
-        -5.5050369673018427753e+14,
-        -3.2940087627407749166e+13,
-        -8.4925101247114157499e+11,
-        -1.1912746104985237192e+10,
-        -1.0313066708737980747e+08,
-        -5.9545626019847898221e+05,
-        -2.4125195876041896775e+03,
-        -7.0935347449210549190e+00,
-        -1.5453977791786851041e-02,
-        -2.5172644670688975051e-05,
-        -3.0517226450451067446e-08,
-        -2.6843448573468483278e-11,
-        -1.5982226675653184646e-14,
-        -5.2487866627945699800e-18,
-    ];
-    /// `q1[]` (`mathematics.c:274-282`).
-    const Q1: [f64; 6] = [
-        -2.2335582639474375245e+15,
-        7.8858692566751002988e+12,
-        -1.2207067397808979846e+10,
-        1.0377081058062166144e+07,
-        -4.8527560179962773045e+03,
-        1.0,
-    ];
-    /// `p2[]` (`mathematics.c:283-291`).
-    const P2: [f64; 7] = [
-        -2.2210262233306573296e-04,
-        1.3067392038106924055e-02,
-        -4.4700805721174453923e-01,
-        5.5674518371240761397e+00,
-        -2.3517945679239481621e+01,
-        3.1611322818701131207e+01,
-        -9.6090021968656180000e+00,
-    ];
-    /// `q2[]` (`mathematics.c:292-301`).
-    const Q2: [f64; 8] = [
-        -5.5194330231005480228e-04,
-        3.2547697594819615062e-02,
-        -1.1151759188741312645e+00,
-        1.3982595353892851542e+01,
-        -6.0228002066743340583e+01,
-        8.5539563258012929600e+01,
-        -3.1446690275135491500e+01,
-        1.0,
-    ];
-
-    /// `eval_poly(coeff, size, x)` (`mathematics.c:216-224`) — Horner.
-    fn eval_poly(coeff: &[f64], x: f64) -> f64 {
-        let mut sum = coeff[coeff.len() - 1];
-        for &c in coeff.iter().rev().skip(1) {
-            sum = sum * x + c;
-        }
-        sum
-    }
-
-    if x == 0.0 {
-        return 1.0;
-    }
-    let x = x.abs();
-    if x <= 15.0 {
-        let y = x * x;
-        eval_poly(&P1, y) / eval_poly(&Q1, y)
-    } else {
-        let y = 1.0 / x - 1.0 / 15.0;
-        let r = eval_poly(&P2, y) / eval_poly(&Q2, y);
-        let factor = x.exp() / x.sqrt();
-        factor * r
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Filter type + the per-format element trait (resample_template.c)
@@ -280,16 +195,6 @@ trait ResampleElem: Copy + PartialEq + std::fmt::Debug {
     /// `lrintf`/`llrint` = round-half-to-even under the default x87/SSE
     /// rounding mode (same reading as `audioconvert`).
     fn quantize(v: f64) -> Self;
-}
-
-/// `av_clip_int16` (`libavutil/common.h:243-247`).
-fn clip_i16(a: i32) -> i16 {
-    a.clamp(i16::MIN as i32, i16::MAX as i32) as i16
-}
-
-/// `av_clipl_int32` (`libavutil/common.h:254-258`).
-fn clip_i32(a: i64) -> i32 {
-    a.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 impl ResampleElem for i16 {
@@ -492,118 +397,6 @@ impl ResampleElem for f64 {
 }
 
 // ---------------------------------------------------------------------------
-// build_filter — resample.c:41-174
-// ---------------------------------------------------------------------------
-
-/// `build_filter` (`resample.c:41-174`) — builds the polyphase filterbank
-/// into `bank` (typed elements, C's `void *filter` + `c->format` switch).
-///
-/// C name kept; `scale` is C's `int scale` (`1 << filter_shift`), applied as
-/// `tab[i] * scale / norm` in double. The even-`phase_count` mirror
-/// (`:105-128`) writes phase `phase_count - ph` as the reversed tap image of
-/// phase `ph` (sinc symmetry: `h_{P-p}[N-1-i] = h_p[i]`).
-fn build_filter<E: ResampleElem>(
-    bank: &mut [E],
-    factor: f64,
-    tap_count: usize,
-    alloc: usize,
-    phase_count: usize,
-    scale: i32,
-    filter_type: FilterType,
-    kaiser_beta: f64,
-) {
-    // :44 — odd phase_count builds every phase; even builds a bit over half
-    // and mirrors the rest below.
-    let ph_nb = if phase_count % 2 == 1 {
-        phase_count
-    } else {
-        phase_count / 2 + 1
-    };
-    let mut tab = vec![0.0f64; tap_count + 1];
-    // C's sin_lut is av_malloc'd (uninitialized) and only read when
-    // factor == 1.0 — zero-init here (documented divergence).
-    let mut sin_lut = vec![0.0f64; ph_nb];
-    let center = (tap_count - 1) / 2;
-    let mut norm = 0.0f64;
-
-    debug_assert!(tap_count == 1 || tap_count % 2 == 0, "resample.c:55");
-
-    // :58-59 — upsampling needs no anti-alias filter.
-    let factor = if factor > 1.0 { 1.0 } else { factor };
-
-    // :61-64 — the factor==1 shortcut: sin(x)/x == sin_lut[ph]/x via the
-    // reflection identity, precomputed with the center-parity sign.
-    if factor == 1.0 {
-        for (ph, slot) in sin_lut.iter_mut().enumerate() {
-            *slot = (std::f64::consts::PI * ph as f64 / phase_count as f64).sin()
-                * (if center & 1 == 1 { 1.0 } else { -1.0 });
-        }
-    }
-
-    for ph in 0..ph_nb {
-        let mut s = sin_lut[ph];
-        for i in 0..tap_count {
-            // :68 — x is PI-scaled; also the window argument below (CUBIC
-            // reassigns it to the unscaled |offset|, its own arm only).
-            let mut x = std::f64::consts::PI
-                * ((i as f64 - center as f64) - ph as f64 / phase_count as f64)
-                * factor;
-            let mut y = if x == 0.0 {
-                1.0
-            } else if factor == 1.0 {
-                s / x
-            } else {
-                x.sin() / x
-            };
-            match filter_type {
-                FilterType::Cubic => {
-                    // :75-80 — Keys cubic, d = -0.5.
-                    let d = -0.5f64;
-                    x = (((i as f64 - center as f64) - ph as f64 / phase_count as f64) * factor)
-                        .abs();
-                    if x < 1.0 {
-                        y = 1.0 - 3.0 * x * x + 2.0 * x * x * x + d * (-x * x + x * x * x);
-                    } else {
-                        y = d * (-4.0 + 8.0 * x - 5.0 * x * x + x * x * x);
-                    }
-                }
-                FilterType::BlackmanNuttall => {
-                    // :81-85 — Chebyshev form in t = -cos(w).
-                    let w = 2.0 * x / (factor * tap_count as f64);
-                    let t = -w.cos();
-                    y *= 0.3635819 - 0.4891775 * t + 0.1365995 * (2.0 * t * t - 1.0)
-                        - 0.0106411 * (4.0 * t * t * t - 3.0 * t);
-                }
-                FilterType::Kaiser => {
-                    // :86-89.
-                    let w = 2.0 * x / (factor * tap_count as f64 * std::f64::consts::PI);
-                    y *= bessel_i0(kaiser_beta * (1.0 - w * w).max(0.0).sqrt());
-                }
-            }
-
-            tab[i] = y;
-            s = -s;
-            if ph == 0 {
-                norm += y; // :96-97 — DC gain from phase 0 only
-            }
-        }
-
-        // :100-130 — quantize + mirror. The EVEN mirror below runs when
-        // phase_count is even (the `if (phase_count % 2) break;` skips it).
-        for i in 0..tap_count {
-            let q = E::quantize(tab[i] * scale as f64 / norm);
-            bank[ph * alloc + i] = q;
-        }
-        if phase_count % 2 == 0 {
-            for i in 0..tap_count {
-                let q = bank[ph * alloc + i];
-                bank[(phase_count - ph) * alloc + tap_count - 1 - i] = q;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // ResampleContext — resample.h:30-61 + resample.c:184-278
 // ---------------------------------------------------------------------------
 
@@ -690,8 +483,7 @@ impl ResampleContext {
         let factor = (out_rate as f64 * cutoff / in_rate as f64).min(1.0);
         let mut phase_count: i32 = 1 << phase_shift;
         let mut phase_count_compensation = phase_count;
-        let mut filter_length =
-            (filter_size as f64 / factor).ceil().max(1.0) as i32;
+        let mut filter_length = (filter_size as f64 / factor).ceil().max(1.0) as i32;
 
         // :194-195 — FFALIGN(filter_length, 2), only when > 1.
         if filter_length > 1 {
@@ -861,8 +653,11 @@ impl ResampleContext {
         );
 
         // :292-303.
-        let mut new_bank =
-            FilterBank::zeroed(self.format, self.filter_alloc as usize, phase_count as usize);
+        let mut new_bank = FilterBank::zeroed(
+            self.format,
+            self.filter_alloc as usize,
+            phase_count as usize,
+        );
         let scale: i32 = 1 << self.filter_shift;
         match &mut new_bank {
             FilterBank::S16(b) => build_filter(
@@ -969,8 +764,8 @@ impl ResampleContext {
         self.compensation_distance = compensation_distance;
         if compensation_distance != 0 {
             self.dst_incr = (self.ideal_dst_incr as i64
-                - self.ideal_dst_incr as i64 * sample_delta as i64
-                    / compensation_distance as i64) as i32;
+                - self.ideal_dst_incr as i64 * sample_delta as i64 / compensation_distance as i64)
+                as i32;
         } else {
             self.dst_incr = self.ideal_dst_incr;
         }
@@ -1072,10 +867,15 @@ impl ResampleContext {
             dst_size = dst_size.min(new_size).max(0);
             if dst_size > 0 {
                 for i in 0..dst.ch_count {
-                    let dst_plane =
-                        dst.plane_bytes_mut(i).ok_or(Error::BufferTooSmall)?;
+                    let dst_plane = dst.plane_bytes_mut(i).ok_or(Error::BufferTooSmall)?;
                     let src_plane = src.plane(i).ok_or(Error::BufferTooSmall)?;
-                    self.resample_one_kernel(dst_plane, src_plane, dst_size as usize, index2, incr)?;
+                    self.resample_one_kernel(
+                        dst_plane,
+                        src_plane,
+                        dst_size as usize,
+                        index2,
+                        incr,
+                    )?;
                     if i + 1 == dst.ch_count {
                         // :369-375 — update on the LAST channel only. All
                         // arithmetic in i64 then narrowed (C int64 exprs
@@ -1100,8 +900,8 @@ impl ResampleContext {
         } else {
             // :379-385 — how many outputs can the input sustain: advance the
             // phase clock to (1 + src_size - filter_length)·phase_count.
-            let end_index = (1i64 + src_size as i64 - self.filter_length as i64)
-                * self.phase_count as i64;
+            let end_index =
+                (1i64 + src_size as i64 - self.filter_length as i64) * self.phase_count as i64;
             let delta_frac =
                 (end_index - self.index as i64) * self.src_incr as i64 - self.frac as i64;
             let delta_n = (delta_frac + self.dst_incr as i64 - 1) / self.dst_incr as i64;
@@ -1112,9 +912,7 @@ impl ResampleContext {
                 // frac and dst_incr_mod are zero; pick the cheap one then.
                 let linear = self.linear != 0 && (self.frac != 0 || self.dst_incr_mod != 0);
                 for i in 0..dst.ch_count {
-                    let dst_plane = dst
-                        .plane_bytes_mut(i)
-                        .ok_or(Error::BufferTooSmall)?;
+                    let dst_plane = dst.plane_bytes_mut(i).ok_or(Error::BufferTooSmall)?;
                     let src_plane = src.plane(i).ok_or(Error::BufferTooSmall)?;
                     // :392 — C passes update_ctx = (i+1 == ch_count); here
                     // every channel's run is threaded through locals and
@@ -1211,19 +1009,13 @@ impl ResampleContext {
         in_buffer_index: usize,
         in_buffer_count: &mut usize,
     ) -> Result<()> {
-        let reflection =
-            ((*in_buffer_count).min(self.filter_length as usize) + 1) / 2;
+        let reflection = ((*in_buffer_count).min(self.filter_length as usize) + 1) / 2;
 
-        realloc_audio(
-            in_buffer,
-            in_buffer_index + *in_buffer_count + reflection,
-        )?;
+        realloc_audio(in_buffer, in_buffer_index + *in_buffer_count + reflection)?;
         debug_assert!(in_buffer.planar, "resample.c:445");
         let bps = in_buffer.bps;
         for ch in 0..in_buffer.ch_count {
-            let plane = in_buffer
-                .plane_bytes_mut(ch)
-                .ok_or(Error::BufferTooSmall)?;
+            let plane = in_buffer.plane_bytes_mut(ch).ok_or(Error::BufferTooSmall)?;
             for j in 0..reflection {
                 // :448-449 — sample [idx+count+j] = sample [idx+count-j-1].
                 let from = (in_buffer_index + *in_buffer_count - j - 1) * bps;
@@ -1333,6 +1125,215 @@ impl ResampleContext {
             FilterBank::S32(_) => resample_one::<i32>(dst, src, n, index2, incr),
             FilterBank::Flt(_) => resample_one::<f32>(dst, src, n, index2, incr),
             FilterBank::Dbl(_) => resample_one::<f64>(dst, src, n, index2, incr),
+        }
+    }
+}
+
+
+// av_bessel_i0 — libavutil/mathematics.c:227-330
+// ---------------------------------------------------------------------------
+
+/// `av_bessel_i0` (`libavutil/mathematics.c:257`) — modified Bessel function
+/// of the first kind, order zero, via the Blair-Edwards (AECL-4928, 1974)
+/// minimax rational approximations taken from Boost:
+///
+/// * \|x\| ≤ 15: `p1(y)/q1(y)` with `y = x²`
+/// * \|x\| > 15: `p2(y)/q2(y) · e^x/√x` with `y = 1/x − 1/15`
+///
+/// `eval_poly` (`mathematics.c:216-224`) is the Horner loop
+/// `sum = c[n-1]; for i in (0..n-1).rev() { sum = sum·x + c[i] }`.
+pub fn bessel_i0(x: f64) -> f64 {
+    /// `p1[]` (`mathematics.c:258-273`).
+    const P1: [f64; 15] = [
+        -2.2335582639474375249e+15,
+        -5.5050369673018427753e+14,
+        -3.2940087627407749166e+13,
+        -8.4925101247114157499e+11,
+        -1.1912746104985237192e+10,
+        -1.0313066708737980747e+08,
+        -5.9545626019847898221e+05,
+        -2.4125195876041896775e+03,
+        -7.0935347449210549190e+00,
+        -1.5453977791786851041e-02,
+        -2.5172644670688975051e-05,
+        -3.0517226450451067446e-08,
+        -2.6843448573468483278e-11,
+        -1.5982226675653184646e-14,
+        -5.2487866627945699800e-18,
+    ];
+    /// `q1[]` (`mathematics.c:274-282`).
+    const Q1: [f64; 6] = [
+        -2.2335582639474375245e+15,
+        7.8858692566751002988e+12,
+        -1.2207067397808979846e+10,
+        1.0377081058062166144e+07,
+        -4.8527560179962773045e+03,
+        1.0,
+    ];
+    /// `p2[]` (`mathematics.c:283-291`).
+    const P2: [f64; 7] = [
+        -2.2210262233306573296e-04,
+        1.3067392038106924055e-02,
+        -4.4700805721174453923e-01,
+        5.5674518371240761397e+00,
+        -2.3517945679239481621e+01,
+        3.1611322818701131207e+01,
+        -9.6090021968656180000e+00,
+    ];
+    /// `q2[]` (`mathematics.c:292-301`).
+    const Q2: [f64; 8] = [
+        -5.5194330231005480228e-04,
+        3.2547697594819615062e-02,
+        -1.1151759188741312645e+00,
+        1.3982595353892851542e+01,
+        -6.0228002066743340583e+01,
+        8.5539563258012929600e+01,
+        -3.1446690275135491500e+01,
+        1.0,
+    ];
+
+    /// `eval_poly(coeff, size, x)` (`mathematics.c:216-224`) — Horner.
+    fn eval_poly(coeff: &[f64], x: f64) -> f64 {
+        let mut sum = coeff[coeff.len() - 1];
+        for &c in coeff.iter().rev().skip(1) {
+            sum = sum * x + c;
+        }
+        sum
+    }
+
+    if x == 0.0 {
+        return 1.0;
+    }
+    let x = x.abs();
+    if x <= 15.0 {
+        let y = x * x;
+        eval_poly(&P1, y) / eval_poly(&Q1, y)
+    } else {
+        let y = 1.0 / x - 1.0 / 15.0;
+        let r = eval_poly(&P2, y) / eval_poly(&Q2, y);
+        let factor = x.exp() / x.sqrt();
+        factor * r
+    }
+}
+
+/// `av_clip_int16` (`libavutil/common.h:243-247`).
+fn clip_i16(a: i32) -> i16 {
+    a.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+/// `av_clipl_int32` (`libavutil/common.h:254-258`).
+fn clip_i32(a: i64) -> i32 {
+    a.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+// ---------------------------------------------------------------------------
+// build_filter — resample.c:41-174
+// ---------------------------------------------------------------------------
+
+/// `build_filter` (`resample.c:41-174`) — builds the polyphase filterbank
+/// into `bank` (typed elements, C's `void *filter` + `c->format` switch).
+///
+/// C name kept; `scale` is C's `int scale` (`1 << filter_shift`), applied as
+/// `tab[i] * scale / norm` in double. The even-`phase_count` mirror
+/// (`:105-128`) writes phase `phase_count - ph` as the reversed tap image of
+/// phase `ph` (sinc symmetry: `h_{P-p}[N-1-i] = h_p[i]`).
+fn build_filter<E: ResampleElem>(
+    bank: &mut [E],
+    factor: f64,
+    tap_count: usize,
+    alloc: usize,
+    phase_count: usize,
+    scale: i32,
+    filter_type: FilterType,
+    kaiser_beta: f64,
+) {
+    // :44 — odd phase_count builds every phase; even builds a bit over half
+    // and mirrors the rest below.
+    let ph_nb = if phase_count % 2 == 1 {
+        phase_count
+    } else {
+        phase_count / 2 + 1
+    };
+    let mut tab = vec![0.0f64; tap_count + 1];
+    // C's sin_lut is av_malloc'd (uninitialized) and only read when
+    // factor == 1.0 — zero-init here (documented divergence).
+    let mut sin_lut = vec![0.0f64; ph_nb];
+    let center = (tap_count - 1) / 2;
+    let mut norm = 0.0f64;
+
+    debug_assert!(tap_count == 1 || tap_count % 2 == 0, "resample.c:55");
+
+    // :58-59 — upsampling needs no anti-alias filter.
+    let factor = if factor > 1.0 { 1.0 } else { factor };
+
+    // :61-64 — the factor==1 shortcut: sin(x)/x == sin_lut[ph]/x via the
+    // reflection identity, precomputed with the center-parity sign.
+    if factor == 1.0 {
+        for (ph, slot) in sin_lut.iter_mut().enumerate() {
+            *slot = (std::f64::consts::PI * ph as f64 / phase_count as f64).sin()
+                * (if center & 1 == 1 { 1.0 } else { -1.0 });
+        }
+    }
+
+    for ph in 0..ph_nb {
+        let mut s = sin_lut[ph];
+        for i in 0..tap_count {
+            // :68 — x is PI-scaled; also the window argument below (CUBIC
+            // reassigns it to the unscaled |offset|, its own arm only).
+            let mut x = std::f64::consts::PI
+                * ((i as f64 - center as f64) - ph as f64 / phase_count as f64)
+                * factor;
+            let mut y = if x == 0.0 {
+                1.0
+            } else if factor == 1.0 {
+                s / x
+            } else {
+                x.sin() / x
+            };
+            match filter_type {
+                FilterType::Cubic => {
+                    // :75-80 — Keys cubic, d = -0.5.
+                    let d = -0.5f64;
+                    x = (((i as f64 - center as f64) - ph as f64 / phase_count as f64) * factor)
+                        .abs();
+                    if x < 1.0 {
+                        y = 1.0 - 3.0 * x * x + 2.0 * x * x * x + d * (-x * x + x * x * x);
+                    } else {
+                        y = d * (-4.0 + 8.0 * x - 5.0 * x * x + x * x * x);
+                    }
+                }
+                FilterType::BlackmanNuttall => {
+                    // :81-85 — Chebyshev form in t = -cos(w).
+                    let w = 2.0 * x / (factor * tap_count as f64);
+                    let t = -w.cos();
+                    y *= 0.3635819 - 0.4891775 * t + 0.1365995 * (2.0 * t * t - 1.0)
+                        - 0.0106411 * (4.0 * t * t * t - 3.0 * t);
+                }
+                FilterType::Kaiser => {
+                    // :86-89.
+                    let w = 2.0 * x / (factor * tap_count as f64 * std::f64::consts::PI);
+                    y *= bessel_i0(kaiser_beta * (1.0 - w * w).max(0.0).sqrt());
+                }
+            }
+
+            tab[i] = y;
+            s = -s;
+            if ph == 0 {
+                norm += y; // :96-97 — DC gain from phase 0 only
+            }
+        }
+
+        // :100-130 — quantize + mirror. The EVEN mirror below runs when
+        // phase_count is even (the `if (phase_count % 2) break;` skips it).
+        for i in 0..tap_count {
+            let q = E::quantize(tab[i] * scale as f64 / norm);
+            bank[ph * alloc + i] = q;
+        }
+        if phase_count % 2 == 0 {
+            for i in 0..tap_count {
+                let q = bank[ph * alloc + i];
+                bank[(phase_count - ph) * alloc + tap_count - 1 - i] = q;
+            }
         }
     }
 }
@@ -1540,8 +1541,6 @@ fn realloc_audio(a: &mut AudioData, count: usize) -> Result<()> {
     Ok(())
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1563,33 +1562,40 @@ mod tests {
         v.iter().flat_map(|s| s.to_le_bytes()).collect()
     }
 
-
     /// The swr_convert staging shape: invert_initial_buffer stages the
     /// first filter_length+1 samples (mirrored around the start), returning
     /// the staged sample count — then multiple_resample reads the staging.
-    fn stage(
-        c: &mut ResampleContext,
-        src: &AudioData,
-        in_count: usize,
-    ) -> (AudioData, usize) {
+    fn stage(c: &mut ResampleContext, src: &AudioData, in_count: usize) -> (AudioData, usize) {
         let mut staging = AudioData::new(c.format, 1, 0);
         let mut out_idx = 0usize;
         let mut out_sz = 0usize;
         let r = c
             .invert_initial_buffer(&mut staging, src, in_count, &mut out_idx, &mut out_sz)
             .unwrap();
-        assert!(r != i32::MAX, "enough input staged (feed >= filter_length+1)");
+        assert!(
+            r != i32::MAX,
+            "enough input staged (feed >= filter_length+1)"
+        );
         (staging, out_sz)
     }
 
     fn ctx_44100_48000() -> ResampleContext {
-
         // C defaults (options.c): filter_size 16, phase_shift 10, linear 0,
         // cutoff 0 (→0.97), Kaiser beta 10? — pinned explicitly instead of
         // relying on option defaults.
         ResampleContext::new(
-            44100, 48000, 16, 10, 0, 0.0, SampleFormat::S16p,
-            FilterType::Kaiser, 10.0, 0.0, 0, 1,
+            44100,
+            48000,
+            16,
+            10,
+            0,
+            0.0,
+            SampleFormat::S16p,
+            FilterType::Kaiser,
+            10.0,
+            0.0,
+            0,
+            1,
         )
         .unwrap()
     }
@@ -1653,8 +1659,18 @@ mod tests {
     #[test]
     fn downsample_staged_window() {
         let mut c = ResampleContext::new(
-            24000, 48000, 16, 10, 0, 0.0, SampleFormat::S16p,
-            FilterType::Kaiser, 10.0, 0.0, 0, 1,
+            24000,
+            48000,
+            16,
+            10,
+            0,
+            0.0,
+            SampleFormat::S16p,
+            FilterType::Kaiser,
+            10.0,
+            0.0,
+            0,
+            1,
         )
         .unwrap();
         const IN: usize = 256;
@@ -1681,21 +1697,40 @@ mod tests {
     #[test]
     fn upsample_staged_constant() {
         let mut c = ResampleContext::new(
-            48000, 24000, 16, 10, 0, 0.0, SampleFormat::Fltp,
-            FilterType::Kaiser, 10.0, 0.0, 0, 1,
+            48000,
+            24000,
+            16,
+            10,
+            0,
+            0.0,
+            SampleFormat::Fltp,
+            FilterType::Kaiser,
+            10.0,
+            0.0,
+            0,
+            1,
         )
         .unwrap();
         const IN: usize = 256;
         let src = mono(
             IN,
             SampleFormat::Fltp,
-            vec![0.5f32; IN].iter().flat_map(|f| f.to_le_bytes()).collect(),
+            vec![0.5f32; IN]
+                .iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect(),
         );
         let (staging, staged) = stage(&mut c, &src, IN);
         let mut dst = mono(IN * 2, SampleFormat::Fltp, vec![0; IN * 2 * 4]);
         let mut consumed = 0;
         let n = c
-            .multiple_resample(&mut dst, (IN * 2) as i32, &staging, staged as i32, &mut consumed)
+            .multiple_resample(
+                &mut dst,
+                (IN * 2) as i32,
+                &staging,
+                staged as i32,
+                &mut consumed,
+            )
             .unwrap();
         let expect = ((staged - c.filter_length as usize) * 2) as i32;
         assert!(

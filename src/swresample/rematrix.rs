@@ -182,6 +182,631 @@ const CH_LAYOUT_STEREO_DOWNMIX: u64 = ch_bit(Channel::StereoLeft) | ch_bit(Chann
 const INT_MAX_F64: f64 = 2147483647.0;
 
 // ---------------------------------------------------------------------------
+// RematrixContext — swri_rematrix_init (rematrix.c:673-793) + swri_rematrix
+// (rematrix.c:800-879)
+// ---------------------------------------------------------------------------
+
+/// `s->native_matrix` + `s->native_one` (`swresample_internal.h:180-186`):
+/// the quantized matrix, row-major `[out][in]` with row stride
+/// `used_ch_layout.nb_channels` (`rematrix.c:675`), plus the unit
+/// coefficient of the format (int: 32768, float/double: 1.0,
+/// `rematrix.c:716,733,744,761`).
+///
+/// The typed accessors are `pub(crate)` for the dither port, which reuses
+/// this module's [`sum2_*`] kernels with `one` (`swresample.c:708-728`).
+#[derive(Clone, Debug)]
+pub enum NativeMatrix {
+    /// `int` flavor (s16p/s32p), 17.15 with error diffusion.
+    Int {
+        /// `(int*)s->native_matrix`.
+        coeffs: Vec<i32>,
+        /// `s->native_one.i` = 32768.
+        one: i32,
+    },
+    /// `float` flavor (fltp).
+    Float {
+        /// `(float*)s->native_matrix`.
+        coeffs: Vec<f32>,
+        /// `s->native_one.f` = 1.0.
+        one: f32,
+    },
+    /// `double` flavor (dblp).
+    Double {
+        /// `(double*)s->native_matrix`.
+        coeffs: Vec<f64>,
+        /// `s->native_one.d` = 1.0.
+        one: f64,
+    },
+}
+
+// The typed accessors are exercised by this module's tests today and by
+// the dither port (swresample.c:708-728) once it lands.
+#[allow(dead_code)]
+impl NativeMatrix {
+    /// The `Int` flavor's coefficients and `native_one.i`, if this is it.
+    pub(crate) fn as_int(&self) -> Option<(&[i32], i32)> {
+        if let NativeMatrix::Int { coeffs, one } = self {
+            Some((coeffs, *one))
+        } else {
+            None
+        }
+    }
+
+    /// The `Float` flavor's coefficients and `native_one.f`.
+    pub(crate) fn as_float(&self) -> Option<(&[f32], f32)> {
+        if let NativeMatrix::Float { coeffs, one } = self {
+            Some((coeffs, *one))
+        } else {
+            None
+        }
+    }
+
+    /// The `Double` flavor's coefficients and `native_one.d`.
+    pub(crate) fn as_double(&self) -> Option<(&[f64], f64)> {
+        if let NativeMatrix::Double { coeffs, one } = self {
+            Some((coeffs, *one))
+        } else {
+            None
+        }
+    }
+}
+
+/// `s->mix_any_f` (`rematrix_template.c:108-127`) — the whole-buffer fast
+/// path; the C per-format function-pointer duplication collapses to this
+/// tag dispatched on `int_fmt` (+`clip_s16` for the s16 pair).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnyFastPath {
+    /// `mix6to2` — 5.1 (side or back) → stereo.
+    Mix6to2,
+    /// `mix8to2` — 7.1 → stereo.
+    Mix8to2,
+}
+
+/// Every rematrix field of C's `SwrContext` (`swresample_internal.h:144-196`
+/// subset). Built by [`RematrixContext::init`] where C calls
+/// `swri_rematrix_init` (`swresample.c:413-415`); the future swresample-core
+/// `SwrContext` embeds it and calls [`RematrixContext::rematrix`] at
+/// `swresample.c:676/679`. `swri_rematrix_free` (`rematrix.c:795-798`) is
+/// plain ownership — no `Drop` work.
+#[derive(Clone, Debug)]
+pub struct RematrixContext {
+    /// `s->matrix` — floating-point coefficients, row-major `[out][in]`.
+    matrix: [[f64; SWR_CH_MAX]; SWR_CH_MAX],
+    /// `s->matrix_flt` — valid iff `int_fmt == Fltp` (C union,
+    /// `swresample_internal.h:172-177`).
+    matrix_flt: [[f32; SWR_CH_MAX]; SWR_CH_MAX],
+    /// `s->matrix32` — 17.15, valid iff `int_fmt` ∉ {Fltp, Dblp} (no
+    /// diffusion, `rematrix.c:781`).
+    matrix32: [[i32; SWR_CH_MAX]; SWR_CH_MAX],
+    /// `s->native_matrix` + `s->native_one`.
+    native_matrix: NativeMatrix,
+    /// `s->matrix_ch` (`rematrix.c:768-786`): `[out][0]` = tap count,
+    /// `[out][1..=count]` = input channel indices with `matrix != 0.0`,
+    /// increasing.
+    matrix_ch: [[u8; SWR_CH_MAX + 1]; SWR_CH_MAX],
+    /// `s->midbuf.fmt == s->int_sample_fmt`.
+    int_fmt: SampleFormat,
+    /// s16p with a quantized row |coeff| sum > 32768 (`rematrix.c:717`) —
+    /// selects the `av_clip_int16` kernel pair.
+    clip_s16: bool,
+    /// `s->mix_any_f`.
+    mix_any: Option<AnyFastPath>,
+    /// `used_ch_layout.nb_channels` — the row stride of `native_matrix`
+    /// (`rematrix.c:675`). C indexes it with `in->ch_count` at `:830/:841`;
+    /// `swr_init` keeps the two equal (`swresample.c:335-337`).
+    in_nb: usize,
+}
+
+impl RematrixContext {
+    /// `swri_rematrix_init` (`rematrix.c:673-793`). Field mapping of the C
+    /// context the body reads:
+    ///
+    /// | parameter | C field |
+    /// |---|---|
+    /// | `in_ch_layout` | `s->in_ch_layout` (auto_matrix + fast-path checks) |
+    /// | `used_in_nb_channels` | `used_ch_layout.nb_channels` — `nb_in`, the `native_matrix` row stride (`:675`) |
+    /// | `out_ch_layout` | `s->out_ch_layout` |
+    /// | `out_nb_channels` | `s->out.ch_count` — `nb_out` (`:676`) |
+    /// | `out_sample_fmt` | `s->out_sample_fmt` (auto_matrix `maxval`) |
+    /// | `int_sample_fmt` | `s->int_sample_fmt` == `s->midbuf.fmt` (quantization switch `:699,726,737,748`; `matrix32` switch `:774`) |
+    /// | `options` | `clev`/`slev`/`lfe_mix_level`/`rematrix_volume`/`rematrix_maxval`/`matrix_encoding` |
+    /// | `custom` | `s->rematrix_custom` + `s->matrix` (set earlier by [`swr_set_matrix`]) |
+    /// | `log_ctx` | `s` (av_log context) |
+    ///
+    /// The final x86 dispatch (`:788-790`) is not ported (module doc).
+    pub fn init(
+        in_ch_layout: &ChannelLayout,
+        used_in_nb_channels: usize,
+        out_ch_layout: &ChannelLayout,
+        out_nb_channels: usize,
+        out_sample_fmt: SampleFormat,
+        int_sample_fmt: SampleFormat,
+        options: &RematrixOptions,
+        custom: Option<&CustomRematrix>,
+        log_ctx: Option<&str>,
+    ) -> Result<Self> {
+        let nb_in = used_in_nb_channels;
+        let nb_out = out_nb_channels;
+
+        // rematrix.c:678 — s->mix_any_f = NULL; every quantization branch
+        // below re-selects it (get_mix_any_func returns NULL -> None).
+        let mix_any;
+
+        let mut matrix = [[0.0f64; SWR_CH_MAX]; SWR_CH_MAX];
+        if let Some(custom) = custom {
+            // rematrix.c:684-698 — custom matrix used verbatim (no auto
+            // build, no maxval/volume handling), DEBUG dump.
+            log_debug!(log_ctx, "Custom matrix coefficients:");
+            for i in 0..out_ch_layout.nb_channels {
+                let mut line = format!(
+                    "{}: ",
+                    out_ch_layout
+                        .channel_from_index(i)
+                        .unwrap_or(Channel::None)
+                        .name()
+                );
+                for j in 0..in_ch_layout.nb_channels {
+                    line.push_str(&format!(
+                        "{}:{:.6} ",
+                        in_ch_layout
+                            .channel_from_index(j)
+                            .unwrap_or(Channel::None)
+                            .name(),
+                        custom.matrix[i][j]
+                    ));
+                }
+                log_debug!(log_ctx, "{line}");
+            }
+            matrix = custom.matrix;
+        } else {
+            // rematrix.c:680-683.
+            auto_matrix(
+                &mut matrix,
+                in_ch_layout,
+                out_ch_layout,
+                out_sample_fmt,
+                int_sample_fmt,
+                options,
+                log_ctx,
+            )?;
+        }
+
+        // rematrix.c:699-766 — quantize into native_matrix, select the mix
+        // function set (and the s16 clip variants on maxsum > 32768).
+        let native_matrix;
+        let mut clip_s16 = false;
+        match int_sample_fmt {
+            SampleFormat::S16p => {
+                // rematrix.c:699-725 — 17.15 with per-row error diffusion.
+                let mut coeffs = vec![0i32; nb_in * nb_out];
+                let mut maxsum = 0i32;
+                for i in 0..nb_out {
+                    let mut rem = 0.0f64;
+                    let mut sum = 0i32;
+                    for j in 0..nb_in {
+                        let target = matrix[i][j] * 32768.0 + rem;
+                        let q = lrintf(target);
+                        coeffs[i * nb_in + j] = q;
+                        rem += target - f64::from(q);
+                        sum = sum.wrapping_add(q.abs());
+                    }
+                    maxsum = maxsum.max(sum);
+                }
+                clip_s16 = maxsum > 32768;
+                mix_any = get_mix_any_func(&matrix, in_ch_layout, out_ch_layout);
+                native_matrix = NativeMatrix::Int {
+                    coeffs,
+                    one: 32768, // rematrix.c:716
+                };
+            }
+            SampleFormat::Fltp => {
+                // rematrix.c:726-736.
+                let mut coeffs = vec![0f32; nb_in * nb_out];
+                for i in 0..nb_out {
+                    for j in 0..nb_in {
+                        coeffs[i * nb_in + j] = matrix[i][j] as f32;
+                    }
+                }
+                mix_any = get_mix_any_func(&matrix, in_ch_layout, out_ch_layout);
+                native_matrix = NativeMatrix::Float {
+                    coeffs,
+                    one: 1.0, // rematrix.c:733
+                };
+            }
+            SampleFormat::Dblp => {
+                // rematrix.c:737-747.
+                let mut coeffs = vec![0f64; nb_in * nb_out];
+                for i in 0..nb_out {
+                    for j in 0..nb_in {
+                        coeffs[i * nb_in + j] = matrix[i][j];
+                    }
+                }
+                mix_any = get_mix_any_func(&matrix, in_ch_layout, out_ch_layout);
+                native_matrix = NativeMatrix::Double {
+                    coeffs,
+                    one: 1.0, // rematrix.c:744
+                };
+            }
+            SampleFormat::S32p => {
+                // rematrix.c:748-764 — same diffusion as s16, no clip check.
+                let mut coeffs = vec![0i32; nb_in * nb_out];
+                for i in 0..nb_out {
+                    let mut rem = 0.0f64;
+                    for j in 0..nb_in {
+                        let target = matrix[i][j] * 32768.0 + rem;
+                        let q = lrintf(target);
+                        coeffs[i * nb_in + j] = q;
+                        rem += target - f64::from(q);
+                    }
+                }
+                mix_any = get_mix_any_func(&matrix, in_ch_layout, out_ch_layout);
+                native_matrix = NativeMatrix::Int {
+                    coeffs,
+                    one: 32768, // rematrix.c:761
+                };
+            }
+            // rematrix.c:765-766 — av_assert0(0). swr_init accepts s64p
+            // (swresample.c:279-283) but rematrixing aborts here.
+            _ => {
+                return Err(Error::Unsupported(format!(
+                    "rematrixing with internal sample format {} (C: av_assert0(0), rematrix.c:766)",
+                    int_sample_fmt.name()
+                )));
+            }
+        }
+
+        // rematrix.c:768-786 — matrix_ch sparsity + matrix_flt/matrix32.
+        let mut matrix_ch = [[0u8; SWR_CH_MAX + 1]; SWR_CH_MAX];
+        let mut matrix_flt = [[0f32; SWR_CH_MAX]; SWR_CH_MAX];
+        let mut matrix32 = [[0i32; SWR_CH_MAX]; SWR_CH_MAX];
+        for i in 0..SWR_CH_MAX {
+            let mut ch_in = 0usize;
+            for j in 0..SWR_CH_MAX {
+                let coeff = matrix[i][j];
+                if coeff != 0.0 {
+                    ch_in += 1;
+                    matrix_ch[i][ch_in] = j as u8;
+                }
+                match int_sample_fmt {
+                    SampleFormat::Fltp => matrix_flt[i][j] = coeff as f32,
+                    SampleFormat::Dblp => {}
+                    _ => matrix32[i][j] = lrintf(coeff * 32768.0),
+                }
+            }
+            matrix_ch[i][0] = ch_in as u8;
+        }
+
+        Ok(RematrixContext {
+            matrix,
+            matrix_flt,
+            matrix32,
+            native_matrix,
+            matrix_ch,
+            int_fmt: int_sample_fmt,
+            clip_s16,
+            mix_any,
+            in_nb: nb_in,
+        })
+    }
+
+    /// `s->int_sample_fmt`.
+    pub fn int_fmt(&self) -> SampleFormat {
+        self.int_fmt
+    }
+
+    /// `s->native_matrix` + `native_one` (for the dither port,
+    /// `swresample.c:708-728`; exercised by tests until then).
+    #[allow(dead_code)]
+    pub(crate) fn native_matrix(&self) -> &NativeMatrix {
+        &self.native_matrix
+    }
+
+    /// `swri_rematrix` (`rematrix.c:800-879`): remix `len` samples per
+    /// channel from `input` into `out`.
+    ///
+    /// `mustcopy` is C's parameter (`preout==out` / `midbuf==out` at
+    /// `swresample.c:676,679`): it forbids the plane steal and turns empty
+    /// output rows into explicit zeroing (`:821-822`).
+    ///
+    /// Divergences (module doc): whole-buffer `Arc` steal instead of
+    /// C's per-channel pointer steal; [`Error::BufferTooSmall`] instead of
+    /// OOB UB; the `av_assert0`s at `:815-816` are `debug_assert!`s. The
+    /// buffers must be planar — C only ever passes the planar internal
+    /// formats (`swresample.c:405-411`).
+    pub fn rematrix(
+        &self,
+        out: &mut AudioData,
+        input: &AudioData,
+        len: usize,
+        mustcopy: bool,
+    ) -> Result<()> {
+        if !input.planar || !out.planar {
+            return Err(Error::InvalidArgument(
+                "swri_rematrix requires planar internal-format buffers (swresample.c:405-411)"
+                    .into(),
+            ));
+        }
+        // rematrix.c:815-816, plus the stride identity of rematrix.c:675
+        // (used_ch_layout.nb == in.ch_count, enforced by swr_init).
+        debug_assert_eq!(input.ch_count, self.in_nb);
+
+        // rematrix.c:805-808 — the whole-buffer fast path covers every
+        // output channel (get_mix_any_func guarantees a stereo output).
+        if let Some(fast) = self.mix_any {
+            return self.apply_mix_any(fast, out, input, len);
+        }
+
+        // rematrix.c:834 — out->ch[out_i] = in->ch[in_i]. C steals one plane
+        // per identity row; the single-`Arc` AudioData can only steal the
+        // whole buffer, so that happens iff EVERY row is an identity 1.0
+        // copy (and the geometries match). Otherwise identity rows take the
+        // byte-copy road — observably identical for distinct buffers.
+        let steal_all = !mustcopy
+            && out.ch_count == input.ch_count
+            && out.count == input.count
+            && out.bps == input.bps
+            && out.fmt == input.fmt
+            && (0..out.ch_count).all(|i| {
+                self.matrix_ch[i][0] == 1
+                    && self.matrix_ch[i][1] as usize == i
+                    && self.matrix[i][i] == 1.0
+            });
+        if steal_all {
+            out.data = input.data.clone();
+            return Ok(());
+        }
+
+        let bps = self.int_fmt.bytes_per_sample();
+        for out_i in 0..out.ch_count {
+            match self.matrix_ch[out_i][0] {
+                // rematrix.c:820-823 — no inputs: zero on mustcopy, else
+                // leave the plane untouched.
+                0 => {
+                    if mustcopy {
+                        let plane = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
+                        let n = len * bps;
+                        if plane.len() < n {
+                            return Err(Error::BufferTooSmall);
+                        }
+                        plane[..n].fill(0);
+                    }
+                }
+                // rematrix.c:824-836 — one input.
+                1 => {
+                    let in_i = self.matrix_ch[out_i][1] as usize;
+                    if self.matrix[out_i][in_i] != 1.0 {
+                        // rematrix.c:827-830 — mix_1_1_f (copy with coeff).
+                        let idx = input.ch_count * out_i + in_i;
+                        let src = input.plane(in_i).ok_or(Error::BufferTooSmall)?;
+                        let dst = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
+                        if src.len() < len * bps || dst.len() < len * bps {
+                            return Err(Error::BufferTooSmall);
+                        }
+                        match (&self.native_matrix, self.int_fmt, self.clip_s16) {
+                            (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, false) => {
+                                copy_s16(dst, src, coeffs[idx], len)
+                            }
+                            (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, true) => {
+                                copy_clip_s16(dst, src, coeffs[idx], len)
+                            }
+                            (NativeMatrix::Int { coeffs, .. }, SampleFormat::S32p, _) => {
+                                copy_s32(dst, src, coeffs[idx], len)
+                            }
+                            (NativeMatrix::Float { coeffs, .. }, SampleFormat::Fltp, _) => {
+                                copy_float(dst, src, coeffs[idx], len)
+                            }
+                            (NativeMatrix::Double { coeffs, .. }, SampleFormat::Dblp, _) => {
+                                copy_double(dst, src, coeffs[idx], len)
+                            }
+                            _ => unreachable!("init only yields these format/coeff pairs"),
+                        }
+                    } else {
+                        // rematrix.c:831-835 — memcpy on mustcopy, steal
+                        // otherwise (see steal_all above).
+                        let n = len * out.bps;
+                        let src = input.plane(in_i).ok_or(Error::BufferTooSmall)?;
+                        let dst = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
+                        if src.len() < n || dst.len() < n {
+                            return Err(Error::BufferTooSmall);
+                        }
+                        dst[..n].copy_from_slice(&src[..n]);
+                    }
+                }
+                // rematrix.c:837-846 — two inputs: mix_2_1_f.
+                2 => {
+                    let in_i1 = self.matrix_ch[out_i][1] as usize;
+                    let in_i2 = self.matrix_ch[out_i][2] as usize;
+                    let idx1 = input.ch_count * out_i + in_i1;
+                    let idx2 = input.ch_count * out_i + in_i2;
+                    let src1 = input.plane(in_i1).ok_or(Error::BufferTooSmall)?;
+                    let src2 = input.plane(in_i2).ok_or(Error::BufferTooSmall)?;
+                    let dst = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
+                    if src1.len() < len * bps || src2.len() < len * bps || dst.len() < len * bps {
+                        return Err(Error::BufferTooSmall);
+                    }
+                    match (&self.native_matrix, self.int_fmt, self.clip_s16) {
+                        (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, false) => {
+                            sum2_s16(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
+                        }
+                        (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, true) => {
+                            sum2_clip_s16(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
+                        }
+                        (NativeMatrix::Int { coeffs, .. }, SampleFormat::S32p, _) => {
+                            sum2_s32(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
+                        }
+                        (NativeMatrix::Float { coeffs, .. }, SampleFormat::Fltp, _) => {
+                            sum2_float(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
+                        }
+                        (NativeMatrix::Double { coeffs, .. }, SampleFormat::Dblp, _) => {
+                            sum2_double(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
+                        }
+                        _ => unreachable!("init only yields these format/coeff pairs"),
+                    }
+                }
+                // rematrix.c:847-875 — generic ≥3-tap path.
+                _ => {
+                    self.apply_generic(out, out_i, input, len, bps)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The `s->mix_any_f` call (`rematrix.c:805-808` +
+    /// `rematrix_template.c:78-106`). `out` must be stereo (guaranteed by
+    /// `get_mix_any_func`).
+    fn apply_mix_any(
+        &self,
+        fast: AnyFastPath,
+        out: &mut AudioData,
+        input: &AudioData,
+        len: usize,
+    ) -> Result<()> {
+        debug_assert_eq!(out.ch_count, 2);
+        let need = len * self.int_fmt.bytes_per_sample();
+        if input.ch_count < 6 || input.plane(0).map_or(true, |p| p.len() < need) {
+            return Err(Error::BufferTooSmall);
+        }
+        let (o0, o1) = two_planes_mut(out, 0, 1).ok_or(Error::BufferTooSmall)?;
+        if o0.len() < need || o1.len() < need {
+            return Err(Error::BufferTooSmall);
+        }
+        match fast {
+            AnyFastPath::Mix6to2 => {
+                debug_assert_eq!(
+                    input.ch_count, 6,
+                    "coeff stride is 6 (rematrix_template.c:87)"
+                );
+                match (&self.native_matrix, self.int_fmt, self.clip_s16) {
+                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, false) => {
+                        mix6to2_s16(o0, o1, input, coeffs, len)
+                    }
+                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, true) => {
+                        mix6to2_clip_s16(o0, o1, input, coeffs, len)
+                    }
+                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S32p, _) => {
+                        mix6to2_s32(o0, o1, input, coeffs, len)
+                    }
+                    (NativeMatrix::Float { coeffs, .. }, SampleFormat::Fltp, _) => {
+                        mix6to2_float(o0, o1, input, coeffs, len)
+                    }
+                    (NativeMatrix::Double { coeffs, .. }, SampleFormat::Dblp, _) => {
+                        mix6to2_double(o0, o1, input, coeffs, len)
+                    }
+                    _ => unreachable!("init only yields these format/coeff pairs"),
+                }
+            }
+            AnyFastPath::Mix8to2 => {
+                debug_assert_eq!(
+                    input.ch_count, 8,
+                    "coeff stride is 8 (rematrix_template.c:102)"
+                );
+                if input.ch_count < 8 {
+                    return Err(Error::BufferTooSmall);
+                }
+                match (&self.native_matrix, self.int_fmt, self.clip_s16) {
+                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, false) => {
+                        mix8to2_s16(o0, o1, input, coeffs, len)
+                    }
+                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, true) => {
+                        mix8to2_clip_s16(o0, o1, input, coeffs, len)
+                    }
+                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S32p, _) => {
+                        mix8to2_s32(o0, o1, input, coeffs, len)
+                    }
+                    (NativeMatrix::Float { coeffs, .. }, SampleFormat::Fltp, _) => {
+                        mix8to2_float(o0, o1, input, coeffs, len)
+                    }
+                    (NativeMatrix::Double { coeffs, .. }, SampleFormat::Dblp, _) => {
+                        mix8to2_double(o0, o1, input, coeffs, len)
+                    }
+                    _ => unreachable!("init only yields these format/coeff pairs"),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The generic ≥3-tap branch (`rematrix.c:847-875`): per-sample
+    /// multiply-accumulate over `matrix_ch[out_i]`, format by format. The
+    /// integer arm replicates the documented upstream bug (module doc):
+    /// samples are read as **i16** (the low half of s32 samples on LE) and
+    /// the `(v+16384)>>15` result is stored sign-extended — C stores only
+    /// the low 16 bits of the output slot, leaving the upper half stale.
+    fn apply_generic(
+        &self,
+        out: &mut AudioData,
+        out_i: usize,
+        input: &AudioData,
+        len: usize,
+        bps: usize,
+    ) -> Result<()> {
+        let taps = self.matrix_ch[out_i][0] as usize;
+        let need = len * bps;
+        let dst = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
+        if dst.len() < need {
+            return Err(Error::BufferTooSmall);
+        }
+        let srcs: Vec<&[u8]> = (0..taps)
+            .map(|j| input.plane(self.matrix_ch[out_i][1 + j] as usize))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(Error::BufferTooSmall)?;
+        if srcs.iter().any(|p| p.len() < need) {
+            return Err(Error::BufferTooSmall);
+        }
+
+        match self.int_fmt {
+            // rematrix.c:848-856 — float, matrix_flt, f32 accumulation.
+            SampleFormat::Fltp => {
+                for i in 0..len {
+                    let mut v = 0.0f32;
+                    for j in 0..taps {
+                        let in_i = self.matrix_ch[out_i][1 + j] as usize;
+                        v += ld_f32(srcs[j], i) * self.matrix_flt[out_i][in_i];
+                    }
+                    st_f32(dst, i, v);
+                }
+            }
+            // rematrix.c:857-865 — double, matrix, f64 accumulation.
+            SampleFormat::Dblp => {
+                for i in 0..len {
+                    let mut v = 0.0f64;
+                    for j in 0..taps {
+                        let in_i = self.matrix_ch[out_i][1 + j] as usize;
+                        v += ld_f64(srcs[j], i) * self.matrix[out_i][in_i];
+                    }
+                    st_f64(dst, i, v);
+                }
+            }
+            // rematrix.c:866-875 — integer: matrix32, i32 accumulation of
+            // i16-READ samples (the upstream bug), (v+16384)>>15 store.
+            _ => {
+                for i in 0..len {
+                    let mut v = 0i32;
+                    for j in 0..taps {
+                        let in_i = self.matrix_ch[out_i][1 + j] as usize;
+                        v = v.wrapping_add(
+                            (ld_i16(srcs[j], i) as i32).wrapping_mul(self.matrix32[out_i][in_i]),
+                        );
+                    }
+                    let r = (v.wrapping_add(16384) >> 15) as i16;
+                    if bps == 2 {
+                        st_i16(dst, i, r);
+                    } else {
+                        // s32p: C writes ((int16_t*)out)[i] — the low half
+                        // only, upper half indeterminate. Sign-extend here
+                        // (deterministic; module doc "Replicated upstream
+                        // bug").
+                        st_i32(dst, i, r as i32);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MatrixEncoding — channel_layout.h:273-282 (owned here; the channel_layout
 // module left it to the rematrix phase)
 // ---------------------------------------------------------------------------
@@ -1475,122 +2100,6 @@ fn eight_planes(in_: &AudioData) -> (&[u8], &[u8], &[u8], &[u8], &[u8], &[u8], &
     )
 }
 
-// ---------------------------------------------------------------------------
-// RematrixContext — swri_rematrix_init (rematrix.c:673-793) + swri_rematrix
-// (rematrix.c:800-879)
-// ---------------------------------------------------------------------------
-
-/// `s->native_matrix` + `s->native_one` (`swresample_internal.h:180-186`):
-/// the quantized matrix, row-major `[out][in]` with row stride
-/// `used_ch_layout.nb_channels` (`rematrix.c:675`), plus the unit
-/// coefficient of the format (int: 32768, float/double: 1.0,
-/// `rematrix.c:716,733,744,761`).
-///
-/// The typed accessors are `pub(crate)` for the dither port, which reuses
-/// this module's [`sum2_*`] kernels with `one` (`swresample.c:708-728`).
-#[derive(Clone, Debug)]
-pub enum NativeMatrix {
-    /// `int` flavor (s16p/s32p), 17.15 with error diffusion.
-    Int {
-        /// `(int*)s->native_matrix`.
-        coeffs: Vec<i32>,
-        /// `s->native_one.i` = 32768.
-        one: i32,
-    },
-    /// `float` flavor (fltp).
-    Float {
-        /// `(float*)s->native_matrix`.
-        coeffs: Vec<f32>,
-        /// `s->native_one.f` = 1.0.
-        one: f32,
-    },
-    /// `double` flavor (dblp).
-    Double {
-        /// `(double*)s->native_matrix`.
-        coeffs: Vec<f64>,
-        /// `s->native_one.d` = 1.0.
-        one: f64,
-    },
-}
-
-// The typed accessors are exercised by this module's tests today and by
-// the dither port (swresample.c:708-728) once it lands.
-#[allow(dead_code)]
-impl NativeMatrix {
-    /// The `Int` flavor's coefficients and `native_one.i`, if this is it.
-    pub(crate) fn as_int(&self) -> Option<(&[i32], i32)> {
-        if let NativeMatrix::Int { coeffs, one } = self {
-            Some((coeffs, *one))
-        } else {
-            None
-        }
-    }
-
-    /// The `Float` flavor's coefficients and `native_one.f`.
-    pub(crate) fn as_float(&self) -> Option<(&[f32], f32)> {
-        if let NativeMatrix::Float { coeffs, one } = self {
-            Some((coeffs, *one))
-        } else {
-            None
-        }
-    }
-
-    /// The `Double` flavor's coefficients and `native_one.d`.
-    pub(crate) fn as_double(&self) -> Option<(&[f64], f64)> {
-        if let NativeMatrix::Double { coeffs, one } = self {
-            Some((coeffs, *one))
-        } else {
-            None
-        }
-    }
-}
-
-/// `s->mix_any_f` (`rematrix_template.c:108-127`) — the whole-buffer fast
-/// path; the C per-format function-pointer duplication collapses to this
-/// tag dispatched on `int_fmt` (+`clip_s16` for the s16 pair).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnyFastPath {
-    /// `mix6to2` — 5.1 (side or back) → stereo.
-    Mix6to2,
-    /// `mix8to2` — 7.1 → stereo.
-    Mix8to2,
-}
-
-/// Every rematrix field of C's `SwrContext` (`swresample_internal.h:144-196`
-/// subset). Built by [`RematrixContext::init`] where C calls
-/// `swri_rematrix_init` (`swresample.c:413-415`); the future swresample-core
-/// `SwrContext` embeds it and calls [`RematrixContext::rematrix`] at
-/// `swresample.c:676/679`. `swri_rematrix_free` (`rematrix.c:795-798`) is
-/// plain ownership — no `Drop` work.
-#[derive(Clone, Debug)]
-pub struct RematrixContext {
-    /// `s->matrix` — floating-point coefficients, row-major `[out][in]`.
-    matrix: [[f64; SWR_CH_MAX]; SWR_CH_MAX],
-    /// `s->matrix_flt` — valid iff `int_fmt == Fltp` (C union,
-    /// `swresample_internal.h:172-177`).
-    matrix_flt: [[f32; SWR_CH_MAX]; SWR_CH_MAX],
-    /// `s->matrix32` — 17.15, valid iff `int_fmt` ∉ {Fltp, Dblp} (no
-    /// diffusion, `rematrix.c:781`).
-    matrix32: [[i32; SWR_CH_MAX]; SWR_CH_MAX],
-    /// `s->native_matrix` + `s->native_one`.
-    native_matrix: NativeMatrix,
-    /// `s->matrix_ch` (`rematrix.c:768-786`): `[out][0]` = tap count,
-    /// `[out][1..=count]` = input channel indices with `matrix != 0.0`,
-    /// increasing.
-    matrix_ch: [[u8; SWR_CH_MAX + 1]; SWR_CH_MAX],
-    /// `s->midbuf.fmt == s->int_sample_fmt`.
-    int_fmt: SampleFormat,
-    /// s16p with a quantized row |coeff| sum > 32768 (`rematrix.c:717`) —
-    /// selects the `av_clip_int16` kernel pair.
-    clip_s16: bool,
-    /// `s->mix_any_f`.
-    mix_any: Option<AnyFastPath>,
-    /// `used_ch_layout.nb_channels` — the row stride of `native_matrix`
-    /// (`rematrix.c:675`). C indexes it with `in->ch_count` at `:830/:841`;
-    /// `swr_init` keeps the two equal (`swresample.c:335-337`).
-    in_nb: usize,
-}
-
 /// `get_mix_any_func_*` (`rematrix_template.c:108-127`) — same conditions
 /// for every format: out STEREO, in 5.1 (side/back → `mix6to2`) or 7.1
 /// (`mix8to2`), shared FC/LFE coefficients, and the specific cross-zero
@@ -1670,515 +2179,6 @@ fn auto_matrix(
         options.matrix_encoding,
         log_ctx,
     )
-}
-
-impl RematrixContext {
-    /// `swri_rematrix_init` (`rematrix.c:673-793`). Field mapping of the C
-    /// context the body reads:
-    ///
-    /// | parameter | C field |
-    /// |---|---|
-    /// | `in_ch_layout` | `s->in_ch_layout` (auto_matrix + fast-path checks) |
-    /// | `used_in_nb_channels` | `used_ch_layout.nb_channels` — `nb_in`, the `native_matrix` row stride (`:675`) |
-    /// | `out_ch_layout` | `s->out_ch_layout` |
-    /// | `out_nb_channels` | `s->out.ch_count` — `nb_out` (`:676`) |
-    /// | `out_sample_fmt` | `s->out_sample_fmt` (auto_matrix `maxval`) |
-    /// | `int_sample_fmt` | `s->int_sample_fmt` == `s->midbuf.fmt` (quantization switch `:699,726,737,748`; `matrix32` switch `:774`) |
-    /// | `options` | `clev`/`slev`/`lfe_mix_level`/`rematrix_volume`/`rematrix_maxval`/`matrix_encoding` |
-    /// | `custom` | `s->rematrix_custom` + `s->matrix` (set earlier by [`swr_set_matrix`]) |
-    /// | `log_ctx` | `s` (av_log context) |
-    ///
-    /// The final x86 dispatch (`:788-790`) is not ported (module doc).
-    pub fn init(
-        in_ch_layout: &ChannelLayout,
-        used_in_nb_channels: usize,
-        out_ch_layout: &ChannelLayout,
-        out_nb_channels: usize,
-        out_sample_fmt: SampleFormat,
-        int_sample_fmt: SampleFormat,
-        options: &RematrixOptions,
-        custom: Option<&CustomRematrix>,
-        log_ctx: Option<&str>,
-    ) -> Result<Self> {
-        let nb_in = used_in_nb_channels;
-        let nb_out = out_nb_channels;
-
-        // rematrix.c:678 — s->mix_any_f = NULL; every quantization branch
-        // below re-selects it (get_mix_any_func returns NULL -> None).
-        let mix_any;
-
-        let mut matrix = [[0.0f64; SWR_CH_MAX]; SWR_CH_MAX];
-        if let Some(custom) = custom {
-            // rematrix.c:684-698 — custom matrix used verbatim (no auto
-            // build, no maxval/volume handling), DEBUG dump.
-            log_debug!(log_ctx, "Custom matrix coefficients:");
-            for i in 0..out_ch_layout.nb_channels {
-                let mut line = format!(
-                    "{}: ",
-                    out_ch_layout
-                        .channel_from_index(i)
-                        .unwrap_or(Channel::None)
-                        .name()
-                );
-                for j in 0..in_ch_layout.nb_channels {
-                    line.push_str(&format!(
-                        "{}:{:.6} ",
-                        in_ch_layout
-                            .channel_from_index(j)
-                            .unwrap_or(Channel::None)
-                            .name(),
-                        custom.matrix[i][j]
-                    ));
-                }
-                log_debug!(log_ctx, "{line}");
-            }
-            matrix = custom.matrix;
-        } else {
-            // rematrix.c:680-683.
-            auto_matrix(
-                &mut matrix,
-                in_ch_layout,
-                out_ch_layout,
-                out_sample_fmt,
-                int_sample_fmt,
-                options,
-                log_ctx,
-            )?;
-        }
-
-        // rematrix.c:699-766 — quantize into native_matrix, select the mix
-        // function set (and the s16 clip variants on maxsum > 32768).
-        let native_matrix;
-        let mut clip_s16 = false;
-        match int_sample_fmt {
-            SampleFormat::S16p => {
-                // rematrix.c:699-725 — 17.15 with per-row error diffusion.
-                let mut coeffs = vec![0i32; nb_in * nb_out];
-                let mut maxsum = 0i32;
-                for i in 0..nb_out {
-                    let mut rem = 0.0f64;
-                    let mut sum = 0i32;
-                    for j in 0..nb_in {
-                        let target = matrix[i][j] * 32768.0 + rem;
-                        let q = lrintf(target);
-                        coeffs[i * nb_in + j] = q;
-                        rem += target - f64::from(q);
-                        sum = sum.wrapping_add(q.abs());
-                    }
-                    maxsum = maxsum.max(sum);
-                }
-                clip_s16 = maxsum > 32768;
-                mix_any = get_mix_any_func(&matrix, in_ch_layout, out_ch_layout);
-                native_matrix = NativeMatrix::Int {
-                    coeffs,
-                    one: 32768, // rematrix.c:716
-                };
-            }
-            SampleFormat::Fltp => {
-                // rematrix.c:726-736.
-                let mut coeffs = vec![0f32; nb_in * nb_out];
-                for i in 0..nb_out {
-                    for j in 0..nb_in {
-                        coeffs[i * nb_in + j] = matrix[i][j] as f32;
-                    }
-                }
-                mix_any = get_mix_any_func(&matrix, in_ch_layout, out_ch_layout);
-                native_matrix = NativeMatrix::Float {
-                    coeffs,
-                    one: 1.0, // rematrix.c:733
-                };
-            }
-            SampleFormat::Dblp => {
-                // rematrix.c:737-747.
-                let mut coeffs = vec![0f64; nb_in * nb_out];
-                for i in 0..nb_out {
-                    for j in 0..nb_in {
-                        coeffs[i * nb_in + j] = matrix[i][j];
-                    }
-                }
-                mix_any = get_mix_any_func(&matrix, in_ch_layout, out_ch_layout);
-                native_matrix = NativeMatrix::Double {
-                    coeffs,
-                    one: 1.0, // rematrix.c:744
-                };
-            }
-            SampleFormat::S32p => {
-                // rematrix.c:748-764 — same diffusion as s16, no clip check.
-                let mut coeffs = vec![0i32; nb_in * nb_out];
-                for i in 0..nb_out {
-                    let mut rem = 0.0f64;
-                    for j in 0..nb_in {
-                        let target = matrix[i][j] * 32768.0 + rem;
-                        let q = lrintf(target);
-                        coeffs[i * nb_in + j] = q;
-                        rem += target - f64::from(q);
-                    }
-                }
-                mix_any = get_mix_any_func(&matrix, in_ch_layout, out_ch_layout);
-                native_matrix = NativeMatrix::Int {
-                    coeffs,
-                    one: 32768, // rematrix.c:761
-                };
-            }
-            // rematrix.c:765-766 — av_assert0(0). swr_init accepts s64p
-            // (swresample.c:279-283) but rematrixing aborts here.
-            _ => {
-                return Err(Error::Unsupported(format!(
-                    "rematrixing with internal sample format {} (C: av_assert0(0), rematrix.c:766)",
-                    int_sample_fmt.name()
-                )));
-            }
-        }
-
-        // rematrix.c:768-786 — matrix_ch sparsity + matrix_flt/matrix32.
-        let mut matrix_ch = [[0u8; SWR_CH_MAX + 1]; SWR_CH_MAX];
-        let mut matrix_flt = [[0f32; SWR_CH_MAX]; SWR_CH_MAX];
-        let mut matrix32 = [[0i32; SWR_CH_MAX]; SWR_CH_MAX];
-        for i in 0..SWR_CH_MAX {
-            let mut ch_in = 0usize;
-            for j in 0..SWR_CH_MAX {
-                let coeff = matrix[i][j];
-                if coeff != 0.0 {
-                    ch_in += 1;
-                    matrix_ch[i][ch_in] = j as u8;
-                }
-                match int_sample_fmt {
-                    SampleFormat::Fltp => matrix_flt[i][j] = coeff as f32,
-                    SampleFormat::Dblp => {}
-                    _ => matrix32[i][j] = lrintf(coeff * 32768.0),
-                }
-            }
-            matrix_ch[i][0] = ch_in as u8;
-        }
-
-        Ok(RematrixContext {
-            matrix,
-            matrix_flt,
-            matrix32,
-            native_matrix,
-            matrix_ch,
-            int_fmt: int_sample_fmt,
-            clip_s16,
-            mix_any,
-            in_nb: nb_in,
-        })
-    }
-
-    /// `s->int_sample_fmt`.
-    pub fn int_fmt(&self) -> SampleFormat {
-        self.int_fmt
-    }
-
-    /// `s->native_matrix` + `native_one` (for the dither port,
-    /// `swresample.c:708-728`; exercised by tests until then).
-    #[allow(dead_code)]
-    pub(crate) fn native_matrix(&self) -> &NativeMatrix {
-        &self.native_matrix
-    }
-
-    /// `swri_rematrix` (`rematrix.c:800-879`): remix `len` samples per
-    /// channel from `input` into `out`.
-    ///
-    /// `mustcopy` is C's parameter (`preout==out` / `midbuf==out` at
-    /// `swresample.c:676,679`): it forbids the plane steal and turns empty
-    /// output rows into explicit zeroing (`:821-822`).
-    ///
-    /// Divergences (module doc): whole-buffer `Arc` steal instead of
-    /// C's per-channel pointer steal; [`Error::BufferTooSmall`] instead of
-    /// OOB UB; the `av_assert0`s at `:815-816` are `debug_assert!`s. The
-    /// buffers must be planar — C only ever passes the planar internal
-    /// formats (`swresample.c:405-411`).
-    pub fn rematrix(
-        &self,
-        out: &mut AudioData,
-        input: &AudioData,
-        len: usize,
-        mustcopy: bool,
-    ) -> Result<()> {
-        if !input.planar || !out.planar {
-            return Err(Error::InvalidArgument(
-                "swri_rematrix requires planar internal-format buffers (swresample.c:405-411)"
-                    .into(),
-            ));
-        }
-        // rematrix.c:815-816, plus the stride identity of rematrix.c:675
-        // (used_ch_layout.nb == in.ch_count, enforced by swr_init).
-        debug_assert_eq!(input.ch_count, self.in_nb);
-
-        // rematrix.c:805-808 — the whole-buffer fast path covers every
-        // output channel (get_mix_any_func guarantees a stereo output).
-        if let Some(fast) = self.mix_any {
-            return self.apply_mix_any(fast, out, input, len);
-        }
-
-        // rematrix.c:834 — out->ch[out_i] = in->ch[in_i]. C steals one plane
-        // per identity row; the single-`Arc` AudioData can only steal the
-        // whole buffer, so that happens iff EVERY row is an identity 1.0
-        // copy (and the geometries match). Otherwise identity rows take the
-        // byte-copy road — observably identical for distinct buffers.
-        let steal_all = !mustcopy
-            && out.ch_count == input.ch_count
-            && out.count == input.count
-            && out.bps == input.bps
-            && out.fmt == input.fmt
-            && (0..out.ch_count).all(|i| {
-                self.matrix_ch[i][0] == 1
-                    && self.matrix_ch[i][1] as usize == i
-                    && self.matrix[i][i] == 1.0
-            });
-        if steal_all {
-            out.data = input.data.clone();
-            return Ok(());
-        }
-
-        let bps = self.int_fmt.bytes_per_sample();
-        for out_i in 0..out.ch_count {
-            match self.matrix_ch[out_i][0] {
-                // rematrix.c:820-823 — no inputs: zero on mustcopy, else
-                // leave the plane untouched.
-                0 => {
-                    if mustcopy {
-                        let plane = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
-                        let n = len * bps;
-                        if plane.len() < n {
-                            return Err(Error::BufferTooSmall);
-                        }
-                        plane[..n].fill(0);
-                    }
-                }
-                // rematrix.c:824-836 — one input.
-                1 => {
-                    let in_i = self.matrix_ch[out_i][1] as usize;
-                    if self.matrix[out_i][in_i] != 1.0 {
-                        // rematrix.c:827-830 — mix_1_1_f (copy with coeff).
-                        let idx = input.ch_count * out_i + in_i;
-                        let src = input.plane(in_i).ok_or(Error::BufferTooSmall)?;
-                        let dst = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
-                        if src.len() < len * bps || dst.len() < len * bps {
-                            return Err(Error::BufferTooSmall);
-                        }
-                        match (&self.native_matrix, self.int_fmt, self.clip_s16) {
-                            (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, false) => {
-                                copy_s16(dst, src, coeffs[idx], len)
-                            }
-                            (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, true) => {
-                                copy_clip_s16(dst, src, coeffs[idx], len)
-                            }
-                            (NativeMatrix::Int { coeffs, .. }, SampleFormat::S32p, _) => {
-                                copy_s32(dst, src, coeffs[idx], len)
-                            }
-                            (NativeMatrix::Float { coeffs, .. }, SampleFormat::Fltp, _) => {
-                                copy_float(dst, src, coeffs[idx], len)
-                            }
-                            (NativeMatrix::Double { coeffs, .. }, SampleFormat::Dblp, _) => {
-                                copy_double(dst, src, coeffs[idx], len)
-                            }
-                            _ => unreachable!("init only yields these format/coeff pairs"),
-                        }
-                    } else {
-                        // rematrix.c:831-835 — memcpy on mustcopy, steal
-                        // otherwise (see steal_all above).
-                        let n = len * out.bps;
-                        let src = input.plane(in_i).ok_or(Error::BufferTooSmall)?;
-                        let dst = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
-                        if src.len() < n || dst.len() < n {
-                            return Err(Error::BufferTooSmall);
-                        }
-                        dst[..n].copy_from_slice(&src[..n]);
-                    }
-                }
-                // rematrix.c:837-846 — two inputs: mix_2_1_f.
-                2 => {
-                    let in_i1 = self.matrix_ch[out_i][1] as usize;
-                    let in_i2 = self.matrix_ch[out_i][2] as usize;
-                    let idx1 = input.ch_count * out_i + in_i1;
-                    let idx2 = input.ch_count * out_i + in_i2;
-                    let src1 = input.plane(in_i1).ok_or(Error::BufferTooSmall)?;
-                    let src2 = input.plane(in_i2).ok_or(Error::BufferTooSmall)?;
-                    let dst = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
-                    if src1.len() < len * bps || src2.len() < len * bps || dst.len() < len * bps {
-                        return Err(Error::BufferTooSmall);
-                    }
-                    match (&self.native_matrix, self.int_fmt, self.clip_s16) {
-                        (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, false) => {
-                            sum2_s16(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
-                        }
-                        (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, true) => {
-                            sum2_clip_s16(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
-                        }
-                        (NativeMatrix::Int { coeffs, .. }, SampleFormat::S32p, _) => {
-                            sum2_s32(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
-                        }
-                        (NativeMatrix::Float { coeffs, .. }, SampleFormat::Fltp, _) => {
-                            sum2_float(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
-                        }
-                        (NativeMatrix::Double { coeffs, .. }, SampleFormat::Dblp, _) => {
-                            sum2_double(dst, src1, src2, coeffs[idx1], coeffs[idx2], len)
-                        }
-                        _ => unreachable!("init only yields these format/coeff pairs"),
-                    }
-                }
-                // rematrix.c:847-875 — generic ≥3-tap path.
-                _ => {
-                    self.apply_generic(out, out_i, input, len, bps)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The `s->mix_any_f` call (`rematrix.c:805-808` +
-    /// `rematrix_template.c:78-106`). `out` must be stereo (guaranteed by
-    /// `get_mix_any_func`).
-    fn apply_mix_any(
-        &self,
-        fast: AnyFastPath,
-        out: &mut AudioData,
-        input: &AudioData,
-        len: usize,
-    ) -> Result<()> {
-        debug_assert_eq!(out.ch_count, 2);
-        let need = len * self.int_fmt.bytes_per_sample();
-        if input.ch_count < 6 || input.plane(0).map_or(true, |p| p.len() < need) {
-            return Err(Error::BufferTooSmall);
-        }
-        let (o0, o1) = two_planes_mut(out, 0, 1).ok_or(Error::BufferTooSmall)?;
-        if o0.len() < need || o1.len() < need {
-            return Err(Error::BufferTooSmall);
-        }
-        match fast {
-            AnyFastPath::Mix6to2 => {
-                debug_assert_eq!(
-                    input.ch_count, 6,
-                    "coeff stride is 6 (rematrix_template.c:87)"
-                );
-                match (&self.native_matrix, self.int_fmt, self.clip_s16) {
-                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, false) => {
-                        mix6to2_s16(o0, o1, input, coeffs, len)
-                    }
-                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, true) => {
-                        mix6to2_clip_s16(o0, o1, input, coeffs, len)
-                    }
-                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S32p, _) => {
-                        mix6to2_s32(o0, o1, input, coeffs, len)
-                    }
-                    (NativeMatrix::Float { coeffs, .. }, SampleFormat::Fltp, _) => {
-                        mix6to2_float(o0, o1, input, coeffs, len)
-                    }
-                    (NativeMatrix::Double { coeffs, .. }, SampleFormat::Dblp, _) => {
-                        mix6to2_double(o0, o1, input, coeffs, len)
-                    }
-                    _ => unreachable!("init only yields these format/coeff pairs"),
-                }
-            }
-            AnyFastPath::Mix8to2 => {
-                debug_assert_eq!(
-                    input.ch_count, 8,
-                    "coeff stride is 8 (rematrix_template.c:102)"
-                );
-                if input.ch_count < 8 {
-                    return Err(Error::BufferTooSmall);
-                }
-                match (&self.native_matrix, self.int_fmt, self.clip_s16) {
-                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, false) => {
-                        mix8to2_s16(o0, o1, input, coeffs, len)
-                    }
-                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S16p, true) => {
-                        mix8to2_clip_s16(o0, o1, input, coeffs, len)
-                    }
-                    (NativeMatrix::Int { coeffs, .. }, SampleFormat::S32p, _) => {
-                        mix8to2_s32(o0, o1, input, coeffs, len)
-                    }
-                    (NativeMatrix::Float { coeffs, .. }, SampleFormat::Fltp, _) => {
-                        mix8to2_float(o0, o1, input, coeffs, len)
-                    }
-                    (NativeMatrix::Double { coeffs, .. }, SampleFormat::Dblp, _) => {
-                        mix8to2_double(o0, o1, input, coeffs, len)
-                    }
-                    _ => unreachable!("init only yields these format/coeff pairs"),
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The generic ≥3-tap branch (`rematrix.c:847-875`): per-sample
-    /// multiply-accumulate over `matrix_ch[out_i]`, format by format. The
-    /// integer arm replicates the documented upstream bug (module doc):
-    /// samples are read as **i16** (the low half of s32 samples on LE) and
-    /// the `(v+16384)>>15` result is stored sign-extended — C stores only
-    /// the low 16 bits of the output slot, leaving the upper half stale.
-    fn apply_generic(
-        &self,
-        out: &mut AudioData,
-        out_i: usize,
-        input: &AudioData,
-        len: usize,
-        bps: usize,
-    ) -> Result<()> {
-        let taps = self.matrix_ch[out_i][0] as usize;
-        let need = len * bps;
-        let dst = out.plane_bytes_mut(out_i).ok_or(Error::BufferTooSmall)?;
-        if dst.len() < need {
-            return Err(Error::BufferTooSmall);
-        }
-        let srcs: Vec<&[u8]> = (0..taps)
-            .map(|j| input.plane(self.matrix_ch[out_i][1 + j] as usize))
-            .collect::<Option<Vec<_>>>()
-            .ok_or(Error::BufferTooSmall)?;
-        if srcs.iter().any(|p| p.len() < need) {
-            return Err(Error::BufferTooSmall);
-        }
-
-        match self.int_fmt {
-            // rematrix.c:848-856 — float, matrix_flt, f32 accumulation.
-            SampleFormat::Fltp => {
-                for i in 0..len {
-                    let mut v = 0.0f32;
-                    for j in 0..taps {
-                        let in_i = self.matrix_ch[out_i][1 + j] as usize;
-                        v += ld_f32(srcs[j], i) * self.matrix_flt[out_i][in_i];
-                    }
-                    st_f32(dst, i, v);
-                }
-            }
-            // rematrix.c:857-865 — double, matrix, f64 accumulation.
-            SampleFormat::Dblp => {
-                for i in 0..len {
-                    let mut v = 0.0f64;
-                    for j in 0..taps {
-                        let in_i = self.matrix_ch[out_i][1 + j] as usize;
-                        v += ld_f64(srcs[j], i) * self.matrix[out_i][in_i];
-                    }
-                    st_f64(dst, i, v);
-                }
-            }
-            // rematrix.c:866-875 — integer: matrix32, i32 accumulation of
-            // i16-READ samples (the upstream bug), (v+16384)>>15 store.
-            _ => {
-                for i in 0..len {
-                    let mut v = 0i32;
-                    for j in 0..taps {
-                        let in_i = self.matrix_ch[out_i][1 + j] as usize;
-                        v = v.wrapping_add(
-                            (ld_i16(srcs[j], i) as i32).wrapping_mul(self.matrix32[out_i][in_i]),
-                        );
-                    }
-                    let r = (v.wrapping_add(16384) >> 15) as i16;
-                    if bps == 2 {
-                        st_i16(dst, i, r);
-                    } else {
-                        // s32p: C writes ((int16_t*)out)[i] — the low half
-                        // only, upper half indeterminate. Sign-extend here
-                        // (deterministic; module doc "Replicated upstream
-                        // bug").
-                        st_i32(dst, i, r as i32);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Two disjoint mutable planes `a < b` of a planar `AudioData`, via one
