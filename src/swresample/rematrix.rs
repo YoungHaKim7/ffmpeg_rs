@@ -164,11 +164,6 @@ const BOTTOM_FRONT_CENTER: usize = Channel::BottomFrontCenter as i32 as usize; /
 const BOTTOM_FRONT_LEFT: usize = Channel::BottomFrontLeft as i32 as usize; // 39
 const BOTTOM_FRONT_RIGHT: usize = Channel::BottomFrontRight as i32 as usize; // 40
 
-/// `AV_CH_FOO` bit of a channel (`channel_layout.h:175-210`).
-const fn ch_bit(c: Channel) -> u64 {
-    1u64 << (c as i32)
-}
-
 /// `AV_CH_LAYOUT_STEREO` = `FL|FR` (`channel_layout.h:218`).
 const CH_LAYOUT_STEREO: u64 = ch_bit(Channel::FrontLeft) | ch_bit(Channel::FrontRight);
 
@@ -180,6 +175,11 @@ const CH_LAYOUT_STEREO_DOWNMIX: u64 = ch_bit(Channel::StereoLeft) | ch_bit(Chann
 
 /// `INT_MAX` as the double C compares `maxcoef` against (`rematrix.c:664`).
 const INT_MAX_F64: f64 = 2147483647.0;
+
+/// `AV_CH_FOO` bit of a channel (`channel_layout.h:175-210`).
+const fn ch_bit(c: Channel) -> u64 {
+    1u64 << (c as i32)
+}
 
 // ---------------------------------------------------------------------------
 // RematrixContext — swri_rematrix_init (rematrix.c:673-793) + swri_rematrix
