@@ -35,6 +35,22 @@ pub enum CodecId {
     Rawvideo,
     /// `AV_CODEC_ID_WRAPPED_AVFRAME`.
     WrappedAvframe,
+    /// The PCM family (`AV_CODEC_ID_PCM_*`) as far as WAV needs it.
+    /// alaw/mulaw are recognized by the demuxer but their companding
+    /// decoders are not ported (Error::Unsupported at open).
+    PcmU8,
+    PcmS16le,
+    PcmS16be,
+    PcmS24le,
+    PcmS24be,
+    PcmS32le,
+    PcmS32be,
+    PcmF32le,
+    PcmF32be,
+    PcmF64le,
+    PcmF64be,
+    PcmAlaw,
+    PcmMulaw,
 }
 
 impl CodecId {
@@ -44,6 +60,19 @@ impl CodecId {
             CodecId::None => "none",
             CodecId::Rawvideo => "rawvideo",
             CodecId::WrappedAvframe => "wrapped_avframe",
+            CodecId::PcmU8 => "pcm_u8",
+            CodecId::PcmS16le => "pcm_s16le",
+            CodecId::PcmS16be => "pcm_s16be",
+            CodecId::PcmS24le => "pcm_s24le",
+            CodecId::PcmS24be => "pcm_s24be",
+            CodecId::PcmS32le => "pcm_s32le",
+            CodecId::PcmS32be => "pcm_s32be",
+            CodecId::PcmF32le => "pcm_f32le",
+            CodecId::PcmF32be => "pcm_f32be",
+            CodecId::PcmF64le => "pcm_f64le",
+            CodecId::PcmF64be => "pcm_f64be",
+            CodecId::PcmAlaw => "pcm_alaw",
+            CodecId::PcmMulaw => "pcm_mulaw",
         }
     }
 }
@@ -85,6 +114,20 @@ pub struct CodecParameters {
     pub chroma_location: ChromaLocation,
     /// Bits per second, 0 when unknown.
     pub bit_rate: i64,
+    // ---- audio (codecpar's audio fields; `format` stays the video union
+    // member — C stores the AVSampleFormat in the same int, the port
+    // keeps a separate field) ----
+    /// `sample_rate`.
+    pub sample_rate: i32,
+    /// `ch_layout`.
+    pub ch_layout: crate::util::channel_layout::ChannelLayout,
+    /// `format` for audio — the `AVSampleFormat`.
+    pub sample_fmt: crate::util::samplefmt::SampleFormat,
+    /// `block_align` — bytes per sample frame (channels · bps).
+    pub block_align: i32,
+    /// `frame_size` — samples per packet (PCM: 1 conceptually; C uses it
+    /// for the demuxer's per-packet sample count bookkeeping).
+    pub frame_size: i32,
 }
 
 impl Default for CodecParameters {
@@ -104,6 +147,11 @@ impl Default for CodecParameters {
             color_space: ColorSpace::Unspecified,
             chroma_location: ChromaLocation::Unspecified,
             bit_rate: 0,
+            sample_rate: 0,
+            ch_layout: crate::util::channel_layout::ChannelLayout::default(),
+            sample_fmt: crate::util::samplefmt::SampleFormat::S16,
+            block_align: 0,
+            frame_size: 0,
         }
     }
 }

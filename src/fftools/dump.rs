@@ -136,6 +136,7 @@ fn codec_prefix(st: &Stream) -> String {
         CodecId::Rawvideo => "rawvideo",
         CodecId::WrappedAvframe => "wrapped_avframe",
         CodecId::None => "none",
+        other => other.name(),
     };
     match codec_tag(st.codecpar.format) {
         Some(t) => format!("{name} ({} / 0x{t:08X})", tag_string(t)),
