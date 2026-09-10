@@ -49,6 +49,9 @@ output options (after -i):
   -s WXH          rescale, e.g. 320x240 (Vulkan compute when available)
   -vf GRAPH       filtergraph between decode and encode, e.g.
                   'null', 'scale=320:240', 'scale=320:240,format=gray'
+  -ar RATE        audio: output sample rate (via swresample)
+  -ac N           audio: output channel count
+  -sample_fmt F   audio: u8|s16|s32|flt|dbl (+p planar variants)
   -scale_algo A   nearest | bilinear | bicubic (default) | area | gauss |
                   sinc | lanczos | spline (the latter five are CPU-only,
                   auto-falling back from the Vulkan engine)
@@ -95,6 +98,12 @@ pub struct Cli {
     /// `-vf GRAPH` — a filtergraph description run between decode and
     /// encode (Phase 3b): `buffersrc -> GRAPH -> buffersink`.
     pub video_filters: Option<String>,
+    /// `-ar RATE` — output sample rate (audio; through swresample).
+    pub output_sample_rate: Option<i32>,
+    /// `-ac N` — output channel count (audio; rematrixed via swresample).
+    pub output_channels: Option<usize>,
+    /// `-sample_fmt FMT` — output sample format (u8|s16|s32|flt|dbl|...).
+    pub output_sample_fmt: Option<String>,
     /// `-scale_algo` (default bicubic, ffmpeg's default).
     pub scale_algorithm: ScaleAlgorithm,
     /// `-scale_engine` (default auto: GPU when possible).
@@ -167,6 +176,9 @@ pub fn parse(args: &[String]) -> Result<Cli> {
         output_pix_fmt: None,
         output_size: None,
         video_filters: None,
+        output_sample_rate: None,
+        output_channels: None,
+        output_sample_fmt: None,
         scale_algorithm: ScaleAlgorithm::Bicubic,
         scale_engine: ScaleEngine::Auto,
     };
@@ -295,6 +307,34 @@ pub fn parse(args: &[String]) -> Result<Cli> {
                 if cli.video_filters.replace(desc.clone()).is_some() {
                     return Err(Error::InvalidArgument(format!("option {arg} given twice")));
                 }
+            }
+            "-ar" => {
+                let v = next(arg)?;
+                cli.output_sample_rate = Some(v.trim().parse().map_err(|_| {
+                    Error::InvalidArgument(format!("Invalid sample rate: {v}"))
+                })?);
+            }
+            "-ac" => {
+                let v = next(arg)?;
+                let n: usize = v.trim().parse().map_err(|_| {
+                    Error::InvalidArgument(format!("Invalid channel count: {v}"))
+                })?;
+                if n == 0 || n > crate::swresample::SWR_CH_MAX {
+                    return Err(Error::InvalidArgument(format!(
+                        "Invalid channel count: {n} (1..={})",
+                        crate::swresample::SWR_CH_MAX
+                    )));
+                }
+                cli.output_channels = Some(n);
+            }
+            "-sample_fmt" => {
+                let v = next(arg)?;
+                if crate::util::samplefmt::SampleFormat::from_name(v.trim()).is_none() {
+                    return Err(Error::InvalidArgument(format!(
+                        "Unknown sample format '{v}'"
+                    )));
+                }
+                cli.output_sample_fmt = Some(v.trim().to_string());
             }
             "-r" | "-ss" => {
                 return Err(Error::Unsupported(format!(
