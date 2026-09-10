@@ -101,10 +101,14 @@
 //!   C output *line* into one `log_debug!` call (the log sink is line-based);
 //!   the rendered text is identical, including `%f` → `{:.6}`.
 
-use crate::util::channel_layout::{Channel, ChannelLayout, Order};
-use crate::util::error::{Error, Result};
-use crate::util::samplefmt::SampleFormat;
-use crate::{log_debug, log_error, log_verbose, log_warning};
+use crate::{
+    util::{
+        channel_layout::{Channel, ChannelLayout, Order},
+        error::{Error, Result},
+        samplefmt::SampleFormat,
+    },
+    {log_debug, log_error, log_verbose, log_warning},
+};
 
 use super::{AudioData, SWR_CH_MAX};
 
