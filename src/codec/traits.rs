@@ -18,7 +18,7 @@
 
 use crate::{
     codec::{packet::Packet, params::CodecParameters},
-    util::{error::Result, frame::Frame},
+    util::{audio_frame::AudioFrame, error::Result, frame::Frame},
 };
 
 /// Decoder interface (`FFCodec` with `FF_CODEC_DECODE_CB`).
@@ -37,6 +37,26 @@ pub trait Decoder {
     /// * `Err(Error::Again)` — needs more input first
     /// * `Err(Error::Eof)` — input ended and all frames were emitted
     fn receive_frame(&mut self) -> Result<Frame>;
+}
+
+/// Audio decoder interface — the [`Decoder`] handshake with
+/// [`AudioFrame`] output (`FFCodec` with `FF_CODEC_DECODE_CB`,
+/// `p.type == AVMEDIA_TYPE_AUDIO`).
+pub trait AudioDecoder {
+    /// `avcodec_open2` — configure from stream parameters
+    /// (`avcodec_parameters_to_context` + open).
+    fn init(&mut self, params: &CodecParameters) -> Result<()>;
+
+    /// `avcodec_send_packet` — queue one packet for decoding.
+    /// `None` enters drain mode (C: `avcodec_send_packet(avctx, NULL)`).
+    fn send_packet(&mut self, pkt: Option<&Packet>) -> Result<()>;
+
+    /// `avcodec_receive_frame` — pull the next decoded audio frame.
+    ///
+    /// * `Ok(frame)` — a frame is ready
+    /// * `Err(Error::Again)` — needs more input first
+    /// * `Err(Error::Eof)` — input ended and all frames were emitted
+    fn receive_frame(&mut self) -> Result<AudioFrame>;
 }
 
 /// Encoder interface (`FFCodec` with `FF_CODEC_ENCODE_CB`).

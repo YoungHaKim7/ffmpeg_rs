@@ -30,6 +30,7 @@ pub mod mux;
 pub mod rawvideo;
 #[cfg(test)]
 pub mod testutil;
+pub mod wav;
 pub mod y4m;
 
 use crate::{

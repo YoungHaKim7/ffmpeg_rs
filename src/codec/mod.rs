@@ -14,6 +14,7 @@
 
 pub mod packet;
 pub mod params;
+pub mod pcm;
 pub mod rawvideo;
 pub mod traits;
 

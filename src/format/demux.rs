@@ -34,6 +34,13 @@ pub static INPUT_FORMATS: &[InputFormat] = &[
         probe: None,
         make: |opts| Box::new(super::rawvideo::RawVideoDemuxer::new(&opts.raw_video)),
     },
+    InputFormat {
+        name: "wav",
+        long_name: "WAV / WAVE (Waveform Audio)",
+        extensions: &["wav"],
+        probe: Some(super::wav::probe),
+        make: |_| Box::new(super::wav::WavDemuxer::new()),
+    },
 ];
 
 /// Options only the rawvideo demuxer consumes (its AVOptions
