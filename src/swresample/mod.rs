@@ -93,9 +93,9 @@ pub const SWR_CH_MAX: usize = 64;
 /// [`AudioData`]'s doc); not reproduced as a constant.
 
 /// `MAX_DROP_STEP` (`swresample.c:761`).
-pub const MAX_DROP_STEP: i32 = 16384;
+pub const MAX_DROP_STEP: i32 = 0x4000;
 /// `MAX_SILENCE_STEP` (`swresample.c:876`).
-pub const MAX_SILENCE_STEP: i32 = 16384;
+pub const MAX_SILENCE_STEP: i32 = 0x4000;
 
 /// `AV_NOPTS_VALUE` (`libavutil/avutil.h`) via [`crate::NOPTS`].
 pub const NOPTS: i64 = crate::NOPTS;
@@ -1189,8 +1189,7 @@ impl SwrContext {
         // (31) :349 — RSC = 1; INTEGER division on the left (x86-64 int);
         // the right side divides in float, subtracts the double 1.0, and
         // the comparison promotes the int directly to double.
-        let left =
-            (self.out.ch_count as i32 / self.used_ch_layout.nb_channels as i32 - 1) as f64;
+        let left = (self.out.ch_count as i32 / self.used_ch_layout.nb_channels as i32 - 1) as f64;
         let right = (self.out_rate() as f32 / self.in_rate() as f32) as f64 - 1.0;
         self.resample_first = left < right;
 
