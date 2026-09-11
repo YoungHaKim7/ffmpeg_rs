@@ -912,3 +912,119 @@ fn golden_vf_scale_format_chain_vs_system_ffmpeg() {
         "spline+rgb24 via -vf: max diff {max_diff} > 96"
     );
 }
+
+// ===========================================================================
+// Audio (Phase 4b): WAV through demux → PcmDecoder → swresample → PcmEncoder
+// ===========================================================================
+
+/// Build a 440 Hz sine WAV fixture (2 s, 48 kHz mono s16le) with system
+/// ffmpeg in the test's temp dir.
+fn make_sine_wav(fx: &Fixture) {
+    fx.run_ffmpeg(&[
+        "-f", "lavfi",
+        "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+        "-c:a", "pcm_s16le",
+        fx.path("in.wav").to_str().unwrap(),
+        "-y",
+    ]);
+}
+
+/// The PCM payload of a WAV file (bytes after its `data` chunk header).
+fn wav_payload(path: &std::path::Path) -> Vec<u8> {
+    let b = std::fs::read(path).unwrap();
+    let i = b.windows(4).position(|w| w == b"data").expect("data chunk");
+    b[i + 4..].to_vec()
+}
+
+/// `-i in.wav -f wav out.wav` passthrough: the PCM payload is byte-exact
+/// (the CLI's ffmpeg writes a LIST/INFO encoder chunk ours does not — the
+/// muxer writes no metadata, matching wavenc.c's empty-dictionary path; the
+/// PAYLOAD is the comparison).
+#[test]
+fn golden_wav_passthrough_payload_exact() {
+    let Some(fx) = Fixture::new("wav_pt") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    make_sine_wav(&fx);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("in.wav").to_str().unwrap(),
+        "-f", "wav", fx.path("out.wav").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    fx.run_ffmpeg(&[
+        "-i", fx.path("in.wav").to_str().unwrap(),
+        "-f", "wav", fx.path("ref.wav").to_str().unwrap(), "-y",
+    ]);
+    assert_eq!(
+        wav_payload(&fx.path("out.wav")),
+        wav_payload(&fx.path("ref.wav")),
+        "PCM payload differs from system ffmpeg"
+    );
+}
+
+/// `-ar 44100`: the port's Kaiser polyphase resample is BIT-EXACT against
+/// system ffmpeg's swresample (measured: 88200 samples, max diff 0).
+#[test]
+fn golden_wav_resample_48k_to_44k1_bit_exact() {
+    let Some(fx) = Fixture::new("wav_44k") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    make_sine_wav(&fx);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("in.wav").to_str().unwrap(),
+        "-ar", "44100",
+        "-f", "wav", fx.path("out.wav").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    fx.run_ffmpeg(&[
+        "-i", fx.path("in.wav").to_str().unwrap(),
+        "-ar", "44100",
+        "-f", "wav", fx.path("ref.wav").to_str().unwrap(), "-y",
+    ]);
+    assert_eq!(
+        wav_payload(&fx.path("out.wav")),
+        wav_payload(&fx.path("ref.wav")),
+        "48k→44.1k resampled samples differ from system ffmpeg"
+    );
+}
+
+/// `-sample_fmt flt -ac 2`: format conversion + rematrix. s16→f32 is exact
+/// (x·2⁻¹⁵); mono→stereo duplication halves per channel — compare decoded
+/// f32 samples within ±1 LSB of 2⁻¹⁵.
+#[test]
+fn golden_wav_fmt_and_channel_conversion() {
+    let Some(fx) = Fixture::new("wav_f32st") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    make_sine_wav(&fx);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("in.wav").to_str().unwrap(),
+        "-sample_fmt", "flt", "-ac", "2",
+        "-f", "wav", fx.path("out.wav").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    // system ffmpeg spells it -c:a pcm_f32le (its -sample_fmt applies to
+    // encoders that advertise the option, not PCM); ours uses -sample_fmt.
+    fx.run_ffmpeg(&[
+        "-i", fx.path("in.wav").to_str().unwrap(),
+        "-c:a", "pcm_f32le", "-ac", "2",
+        "-f", "wav", fx.path("ref.wav").to_str().unwrap(), "-y",
+    ]);
+    let ours = wav_payload(&fx.path("out.wav"));
+    let theirs = wav_payload(&fx.path("ref.wav"));
+    assert_eq!(ours.len(), theirs.len());
+    let n = ours.len() / 4;
+    let mut max_diff = 0.0f32;
+    for k in 0..n {
+        let a = f32::from_le_bytes(ours[4 * k..4 * k + 4].try_into().unwrap());
+        let b = f32::from_le_bytes(theirs[4 * k..4 * k + 4].try_into().unwrap());
+        max_diff = max_diff.max((a - b).abs());
+    }
+    assert!(
+        max_diff <= 1.0 / 32768.0,
+        "f32 stereo conversion max diff {max_diff} > 1 LSB"
+    );
+}

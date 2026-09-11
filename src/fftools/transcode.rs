@@ -245,19 +245,6 @@ fn transcode(cli: &Cli) -> Result<Stats> {
     // Dispatch by media type: open the input, then hand off to the audio
     // loop when stream 0 is audio (ffmpeg's per-stream-type scheduling
     // collapsed to one branch).
-    {
-        let probe = InputFormatContext::open(
-            &cli.input_url,
-            cli.input_format.as_deref(),
-            &DemuxOptions {
-                raw_video: crate::format::demux::RawVideoDemuxOptions::default(),
-            },
-        )?;
-        if probe.streams[0].codecpar.codec_type == crate::codec::params::MediaType::Audio {
-            drop(probe);
-            return transcode_audio(cli);
-        }
-    }
     let demux_opts = DemuxOptions {
         raw_video: crate::format::demux::RawVideoDemuxOptions {
             pixel_format: cli.input_pixel_format.unwrap_or(PixelFormat::Yuv420p),
@@ -271,6 +258,11 @@ fn transcode(cli: &Cli) -> Result<Stats> {
     dump::dump_input(&ictx);
 
     let in_st = ictx.streams[0].clone();
+    if in_st.codecpar.codec_type == crate::codec::params::MediaType::Audio {
+        // ffmpeg's per-stream-type scheduling collapsed to one branch: an
+        // audio stream 0 hands the whole run to the audio loop.
+        return transcode_audio(cli);
+    }
 
     // ---- filtergraph (-vf) -------------------------------------------------
     // ffmpeg folds `-s`/`-pix_fmt` into the graph as trailing filters
@@ -634,14 +626,18 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
             }
         }
     }
-
     let demux_opts = DemuxOptions {
-        raw_video: crate::format::demux::RawVideoDemuxOptions::default(),
+        raw_video: crate::format::demux::RawVideoDemuxOptions {
+            pixel_format: cli.input_pixel_format.unwrap_or(PixelFormat::Yuv420p),
+            video_size: cli.input_video_size,
+            framerate: cli.input_framerate.unwrap_or(Rational::new(25, 1)),
+        },
     };
     let mut ictx =
         InputFormatContext::open(&cli.input_url, cli.input_format.as_deref(), &demux_opts)?;
     ictx.find_stream_info()?;
     let in_st = ictx.streams[0].clone();
+
 
     // ---- decoder ----------------------------------------------------------
     let mut decoder = PcmDecoder::new();
