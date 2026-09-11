@@ -921,9 +921,12 @@ fn golden_vf_scale_format_chain_vs_system_ffmpeg() {
 /// ffmpeg in the test's temp dir.
 fn make_sine_wav(fx: &Fixture) {
     fx.run_ffmpeg(&[
-        "-f", "lavfi",
-        "-i", "sine=frequency=440:sample_rate=48000:duration=2",
-        "-c:a", "pcm_s16le",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=48000:duration=2",
+        "-c:a",
+        "pcm_s16le",
         fx.path("in.wav").to_str().unwrap(),
         "-y",
     ]);
@@ -948,13 +951,21 @@ fn golden_wav_passthrough_payload_exact() {
     };
     make_sine_wav(&fx);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.wav").to_str().unwrap(),
-        "-f", "wav", fx.path("out.wav").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.wav").to_str().unwrap(),
+        "-f",
+        "wav",
+        fx.path("out.wav").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed:\n{stderr}");
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.wav").to_str().unwrap(),
-        "-f", "wav", fx.path("ref.wav").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.wav").to_str().unwrap(),
+        "-f",
+        "wav",
+        fx.path("ref.wav").to_str().unwrap(),
+        "-y",
     ]);
     assert_eq!(
         wav_payload(&fx.path("out.wav")),
@@ -973,15 +984,25 @@ fn golden_wav_resample_48k_to_44k1_bit_exact() {
     };
     make_sine_wav(&fx);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.wav").to_str().unwrap(),
-        "-ar", "44100",
-        "-f", "wav", fx.path("out.wav").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.wav").to_str().unwrap(),
+        "-ar",
+        "44100",
+        "-f",
+        "wav",
+        fx.path("out.wav").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed:\n{stderr}");
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.wav").to_str().unwrap(),
-        "-ar", "44100",
-        "-f", "wav", fx.path("ref.wav").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.wav").to_str().unwrap(),
+        "-ar",
+        "44100",
+        "-f",
+        "wav",
+        fx.path("ref.wav").to_str().unwrap(),
+        "-y",
     ]);
     assert_eq!(
         wav_payload(&fx.path("out.wav")),
@@ -1001,17 +1022,31 @@ fn golden_wav_fmt_and_channel_conversion() {
     };
     make_sine_wav(&fx);
     let (ok, _, stderr) = fx.run_ours(&[
-        "-i", fx.path("in.wav").to_str().unwrap(),
-        "-sample_fmt", "flt", "-ac", "2",
-        "-f", "wav", fx.path("out.wav").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.wav").to_str().unwrap(),
+        "-sample_fmt",
+        "flt",
+        "-ac",
+        "2",
+        "-f",
+        "wav",
+        fx.path("out.wav").to_str().unwrap(),
+        "-y",
     ]);
     assert!(ok, "ffmpeg_rs failed:\n{stderr}");
     // system ffmpeg spells it -c:a pcm_f32le (its -sample_fmt applies to
     // encoders that advertise the option, not PCM); ours uses -sample_fmt.
     fx.run_ffmpeg(&[
-        "-i", fx.path("in.wav").to_str().unwrap(),
-        "-c:a", "pcm_f32le", "-ac", "2",
-        "-f", "wav", fx.path("ref.wav").to_str().unwrap(), "-y",
+        "-i",
+        fx.path("in.wav").to_str().unwrap(),
+        "-c:a",
+        "pcm_f32le",
+        "-ac",
+        "2",
+        "-f",
+        "wav",
+        fx.path("ref.wav").to_str().unwrap(),
+        "-y",
     ]);
     let ours = wav_payload(&fx.path("out.wav"));
     let theirs = wav_payload(&fx.path("ref.wav"));

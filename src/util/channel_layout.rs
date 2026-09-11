@@ -64,348 +64,6 @@
 
 use super::error::{Error, Result};
 
-/// `enum AVChannel` (`channel_layout.h:47-112`) — exact C discriminants,
-/// including the unused gaps 19–28 (before `StereoLeft = 29`, `h:69`) and
-/// 45–60 (before `BinauralLeft = 61`, `h:87`), and the special ids past
-/// the mask range. There is **no** `AV_CHAN_NB` sentinel in C — none here.
-#[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Channel {
-    /// `AV_CHAN_NONE` = −1 — invalid channel index.
-    None = -1,
-    /// `AV_CHAN_FRONT_LEFT` = 0.
-    FrontLeft = 0,
-    /// `AV_CHAN_FRONT_RIGHT` = 1.
-    FrontRight = 1,
-    /// `AV_CHAN_FRONT_CENTER` = 2.
-    FrontCenter = 2,
-    /// `AV_CHAN_LOW_FREQUENCY` = 3.
-    LowFrequency = 3,
-    /// `AV_CHAN_BACK_LEFT` = 4.
-    BackLeft = 4,
-    /// `AV_CHAN_BACK_RIGHT` = 5.
-    BackRight = 5,
-    /// `AV_CHAN_FRONT_LEFT_OF_CENTER` = 6.
-    FrontLeftOfCenter = 6,
-    /// `AV_CHAN_FRONT_RIGHT_OF_CENTER` = 7.
-    FrontRightOfCenter = 7,
-    /// `AV_CHAN_BACK_CENTER` = 8.
-    BackCenter = 8,
-    /// `AV_CHAN_SIDE_LEFT` = 9.
-    SideLeft = 9,
-    /// `AV_CHAN_SIDE_RIGHT` = 10.
-    SideRight = 10,
-    /// `AV_CHAN_TOP_CENTER` = 11.
-    TopCenter = 11,
-    /// `AV_CHAN_TOP_FRONT_LEFT` = 12.
-    TopFrontLeft = 12,
-    /// `AV_CHAN_TOP_FRONT_CENTER` = 13.
-    TopFrontCenter = 13,
-    /// `AV_CHAN_TOP_FRONT_RIGHT` = 14.
-    TopFrontRight = 14,
-    /// `AV_CHAN_TOP_BACK_LEFT` = 15.
-    TopBackLeft = 15,
-    /// `AV_CHAN_TOP_BACK_CENTER` = 16.
-    TopBackCenter = 16,
-    /// `AV_CHAN_TOP_BACK_RIGHT` = 17.
-    TopBackRight = 17,
-    /// `AV_CHAN_STEREO_LEFT` = 29 — Dolby downmix left (gap 19–28 unused).
-    StereoLeft = 29,
-    /// `AV_CHAN_STEREO_RIGHT` = 30 — Dolby downmix right.
-    StereoRight = 30,
-    /// `AV_CHAN_WIDE_LEFT` = 31.
-    WideLeft = 31,
-    /// `AV_CHAN_WIDE_RIGHT` = 32.
-    WideRight = 32,
-    /// `AV_CHAN_SURROUND_DIRECT_LEFT` = 33.
-    SurroundDirectLeft = 33,
-    /// `AV_CHAN_SURROUND_DIRECT_RIGHT` = 34.
-    SurroundDirectRight = 34,
-    /// `AV_CHAN_LOW_FREQUENCY_2` = 35.
-    LowFrequency2 = 35,
-    /// `AV_CHAN_TOP_SIDE_LEFT` = 36.
-    TopSideLeft = 36,
-    /// `AV_CHAN_TOP_SIDE_RIGHT` = 37.
-    TopSideRight = 37,
-    /// `AV_CHAN_BOTTOM_FRONT_CENTER` = 38.
-    BottomFrontCenter = 38,
-    /// `AV_CHAN_BOTTOM_FRONT_LEFT` = 39.
-    BottomFrontLeft = 39,
-    /// `AV_CHAN_BOTTOM_FRONT_RIGHT` = 40.
-    BottomFrontRight = 40,
-    /// `AV_CHAN_SIDE_SURROUND_LEFT` = 41 (+90°, Lss/SiL).
-    SideSurroundLeft = 41,
-    /// `AV_CHAN_SIDE_SURROUND_RIGHT` = 42 (−90°, Rss/SiR).
-    SideSurroundRight = 42,
-    /// `AV_CHAN_TOP_SURROUND_LEFT` = 43 (+110°, Lvs/TpLS).
-    TopSurroundLeft = 43,
-    /// `AV_CHAN_TOP_SURROUND_RIGHT` = 44 (−110°, Rvs/TpRS).
-    TopSurroundRight = 44,
-    /// `AV_CHAN_BINAURAL_LEFT` = 61 (gap 45–60 unused).
-    BinauralLeft = 61,
-    /// `AV_CHAN_BINAURAL_RIGHT` = 62.
-    BinauralRight = 62,
-    /// `AV_CHAN_UNUSED` = 0x200 — channel is empty, safely skipped.
-    Unused = 0x200,
-    /// `AV_CHAN_UNKNOWN` = 0x300 — has data, position unknown.
-    Unknown = 0x300,
-    /// `AV_CHAN_AMBISONIC_BASE` = 0x400 — first ambisonic ACN id
-    /// (CUSTOM-order only in C; ambisonic not ported).
-    AmbisonicBase = 0x400,
-    /// `AV_CHAN_AMBISONIC_END` = 0x7ff — last ambisonic ACN id.
-    AmbisonicEnd = 0x7ff,
-}
-
-impl Channel {
-    /// The `AV_CH_*` bit of this channel (`channel_layout.h:175-210`):
-    /// `Some(1 << position)` for the 36 positional variants (values 0..=62 —
-    /// C only allows `ch < 63` in masks, `c:468`, `c:739`), `None` for the
-    /// specials `None`/`Unused`/`Unknown`/`AmbisonicBase`/`AmbisonicEnd`.
-    pub const fn mask_bit(self) -> Option<u64> {
-        let v = self as i32;
-        if v >= 0 && v < 63 {
-            Some(1u64 << v)
-        } else {
-            None
-        }
-    }
-
-    /// `av_channel_name` (`c:87-118`) — `channel_names[].name` (`c:48-85`)
-    /// for positional channels; `"NONE"`/`"UNK"`/`"UNSD"` for the specials
-    /// (`c:95-100`). C's `"USR%d"` and `"AMBI%d"` fallbacks are
-    /// unrepresentable here (closed enum — see module doc).
-    pub const fn name(self) -> &'static str {
-        match self {
-            Channel::FrontLeft => "FL",
-            Channel::FrontRight => "FR",
-            Channel::FrontCenter => "FC",
-            Channel::LowFrequency => "LFE",
-            Channel::BackLeft => "BL",
-            Channel::BackRight => "BR",
-            Channel::FrontLeftOfCenter => "FLC",
-            Channel::FrontRightOfCenter => "FRC",
-            Channel::BackCenter => "BC",
-            Channel::SideLeft => "SL",
-            Channel::SideRight => "SR",
-            Channel::TopCenter => "TC",
-            Channel::TopFrontLeft => "TFL",
-            Channel::TopFrontCenter => "TFC",
-            Channel::TopFrontRight => "TFR",
-            Channel::TopBackLeft => "TBL",
-            Channel::TopBackCenter => "TBC",
-            Channel::TopBackRight => "TBR",
-            // Dolby downmix pair — NOT front left/right.
-            Channel::StereoLeft => "DL",
-            Channel::StereoRight => "DR",
-            Channel::WideLeft => "WL",
-            Channel::WideRight => "WR",
-            Channel::SurroundDirectLeft => "SDL",
-            Channel::SurroundDirectRight => "SDR",
-            Channel::LowFrequency2 => "LFE2",
-            Channel::TopSideLeft => "TSL",
-            Channel::TopSideRight => "TSR",
-            Channel::BottomFrontCenter => "BFC",
-            Channel::BottomFrontLeft => "BFL",
-            Channel::BottomFrontRight => "BFR",
-            Channel::SideSurroundLeft => "SSL",
-            Channel::SideSurroundRight => "SSR",
-            Channel::TopSurroundLeft => "TTL",
-            Channel::TopSurroundRight => "TTR",
-            Channel::BinauralLeft => "BIL",
-            Channel::BinauralRight => "BIR",
-            // c:95-100
-            Channel::None => "NONE",
-            Channel::Unknown => "UNK",
-            Channel::Unused => "UNSD",
-            // Unreachable in ported paths (ambisonic dropped); kept total
-            // so name() needs no Option.
-            Channel::AmbisonicBase | Channel::AmbisonicEnd => "",
-        }
-    }
-
-    /// `av_channel_description` (`c:120-151`) — `channel_names[].description`
-    /// (`c:48-85`); `"none"`/`"unknown"`/`"unused"` for the specials
-    /// (`c:128-133`).
-    pub const fn description(self) -> &'static str {
-        match self {
-            Channel::FrontLeft => "front left",
-            Channel::FrontRight => "front right",
-            Channel::FrontCenter => "front center",
-            Channel::LowFrequency => "low frequency",
-            Channel::BackLeft => "back left",
-            Channel::BackRight => "back right",
-            Channel::FrontLeftOfCenter => "front left-of-center",
-            Channel::FrontRightOfCenter => "front right-of-center",
-            Channel::BackCenter => "back center",
-            Channel::SideLeft => "side left",
-            Channel::SideRight => "side right",
-            Channel::TopCenter => "top center",
-            Channel::TopFrontLeft => "top front left",
-            Channel::TopFrontCenter => "top front center",
-            Channel::TopFrontRight => "top front right",
-            Channel::TopBackLeft => "top back left",
-            Channel::TopBackCenter => "top back center",
-            Channel::TopBackRight => "top back right",
-            Channel::StereoLeft => "downmix left",
-            Channel::StereoRight => "downmix right",
-            Channel::WideLeft => "wide left",
-            Channel::WideRight => "wide right",
-            Channel::SurroundDirectLeft => "surround direct left",
-            Channel::SurroundDirectRight => "surround direct right",
-            Channel::LowFrequency2 => "low frequency 2",
-            Channel::TopSideLeft => "top side left",
-            Channel::TopSideRight => "top side right",
-            Channel::BottomFrontCenter => "bottom front center",
-            Channel::BottomFrontLeft => "bottom front left",
-            Channel::BottomFrontRight => "bottom front right",
-            Channel::SideSurroundLeft => "side surround left",
-            Channel::SideSurroundRight => "side surround right",
-            Channel::TopSurroundLeft => "top surround left",
-            Channel::TopSurroundRight => "top surround right",
-            Channel::BinauralLeft => "binaural left",
-            Channel::BinauralRight => "binaural right",
-            // c:128-133
-            Channel::None => "none",
-            Channel::Unknown => "unknown",
-            Channel::Unused => "unused",
-            Channel::AmbisonicBase | Channel::AmbisonicEnd => "",
-        }
-    }
-
-    /// `av_channel_from_string` (`c:153-183`), supported subset: exact,
-    /// case-sensitive match on [`Channel::name`] over the 36 positional
-    /// names (`c:166-169`), plus `"UNK"` → [`Unknown`] (`c:170-171`) and
-    /// `"UNSD"` → [`Unused`] (`c:172-173`). C's `"AMBI<n>"` (`c:159-164`)
-    /// and `"USR<n>"` (`c:175-178`) forms yield ids this closed enum cannot
-    /// represent → `None` (documented degradation, module doc).
-    pub fn from_name(s: &str) -> Option<Channel> {
-        Some(match s {
-            "FL" => Channel::FrontLeft,
-            "FR" => Channel::FrontRight,
-            "FC" => Channel::FrontCenter,
-            "LFE" => Channel::LowFrequency,
-            "BL" => Channel::BackLeft,
-            "BR" => Channel::BackRight,
-            "FLC" => Channel::FrontLeftOfCenter,
-            "FRC" => Channel::FrontRightOfCenter,
-            "BC" => Channel::BackCenter,
-            "SL" => Channel::SideLeft,
-            "SR" => Channel::SideRight,
-            "TC" => Channel::TopCenter,
-            "TFL" => Channel::TopFrontLeft,
-            "TFC" => Channel::TopFrontCenter,
-            "TFR" => Channel::TopFrontRight,
-            "TBL" => Channel::TopBackLeft,
-            "TBC" => Channel::TopBackCenter,
-            "TBR" => Channel::TopBackRight,
-            "DL" => Channel::StereoLeft,
-            "DR" => Channel::StereoRight,
-            "WL" => Channel::WideLeft,
-            "WR" => Channel::WideRight,
-            "SDL" => Channel::SurroundDirectLeft,
-            "SDR" => Channel::SurroundDirectRight,
-            "LFE2" => Channel::LowFrequency2,
-            "TSL" => Channel::TopSideLeft,
-            "TSR" => Channel::TopSideRight,
-            "BFC" => Channel::BottomFrontCenter,
-            "BFL" => Channel::BottomFrontLeft,
-            "BFR" => Channel::BottomFrontRight,
-            "SSL" => Channel::SideSurroundLeft,
-            "SSR" => Channel::SideSurroundRight,
-            "TTL" => Channel::TopSurroundLeft,
-            "TTR" => Channel::TopSurroundRight,
-            "BIL" => Channel::BinauralLeft,
-            "BIR" => Channel::BinauralRight,
-            // c:170-173
-            "UNK" => Channel::Unknown,
-            "UNSD" => Channel::Unused,
-            _ => return None,
-        })
-    }
-}
-
-impl std::fmt::Display for Channel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-/// The positional channel at mask bit `pos` — inverse of
-/// [`Channel::mask_bit`] for the 36 values C allows in masks.
-const fn channel_at(pos: u32) -> Option<Channel> {
-    Some(match pos {
-        0 => Channel::FrontLeft,
-        1 => Channel::FrontRight,
-        2 => Channel::FrontCenter,
-        3 => Channel::LowFrequency,
-        4 => Channel::BackLeft,
-        5 => Channel::BackRight,
-        6 => Channel::FrontLeftOfCenter,
-        7 => Channel::FrontRightOfCenter,
-        8 => Channel::BackCenter,
-        9 => Channel::SideLeft,
-        10 => Channel::SideRight,
-        11 => Channel::TopCenter,
-        12 => Channel::TopFrontLeft,
-        13 => Channel::TopFrontCenter,
-        14 => Channel::TopFrontRight,
-        15 => Channel::TopBackLeft,
-        16 => Channel::TopBackCenter,
-        17 => Channel::TopBackRight,
-        29 => Channel::StereoLeft,
-        30 => Channel::StereoRight,
-        31 => Channel::WideLeft,
-        32 => Channel::WideRight,
-        33 => Channel::SurroundDirectLeft,
-        34 => Channel::SurroundDirectRight,
-        35 => Channel::LowFrequency2,
-        36 => Channel::TopSideLeft,
-        37 => Channel::TopSideRight,
-        38 => Channel::BottomFrontCenter,
-        39 => Channel::BottomFrontLeft,
-        40 => Channel::BottomFrontRight,
-        41 => Channel::SideSurroundLeft,
-        42 => Channel::SideSurroundRight,
-        43 => Channel::TopSurroundLeft,
-        44 => Channel::TopSurroundRight,
-        61 => Channel::BinauralLeft,
-        62 => Channel::BinauralRight,
-        _ => return None,
-    })
-}
-
-/// `enum AVChannelOrder` (`channel_layout.h:114-160`) — the two orders
-/// representable without an explicit channel map.
-///
-/// `AV_CHANNEL_ORDER_CUSTOM` and `AV_CHANNEL_ORDER_AMBISONIC` (`h:126-155`)
-/// are **not ported**: every C site that can produce them returns
-/// [`Error::Unsupported`] instead (module doc lists them).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Order {
-    /// `AV_CHANNEL_ORDER_UNSPEC` — only `nb_channels` is meaningful; the
-    /// `mask` field is undefined and must not be used (`h:341-343`) —
-    /// conventionally 0 here.
-    #[default]
-    Unspecified,
-    /// `AV_CHANNEL_ORDER_NATIVE` — channels in [`Channel`] enum order;
-    /// the mask is the source of truth.
-    Native,
-}
-
-/// `AV_CH_FOO` (`channel_layout.h:175-210`) for the positional channels.
-const fn bit(c: Channel) -> u64 {
-    1u64 << (c as i32)
-}
-
-/// `AV_CHANNEL_LAYOUT_MASK(nb, m)` (`h:393-397`).
-const fn native(nb_channels: usize, mask: u64) -> ChannelLayout {
-    ChannelLayout {
-        order: Order::Native,
-        nb_channels,
-        mask,
-    }
-}
-
 /// `AVChannelLayout` (`channel_layout.h:328-386`) — native-order core.
 ///
 /// Field map: `order` (`h:333`), `nb_channels` (`h:338`, `int` → `usize`),
@@ -992,6 +650,347 @@ impl std::fmt::Display for ChannelLayout {
     }
 }
 
+/// `enum AVChannel` (`channel_layout.h:47-112`) — exact C discriminants,
+/// including the unused gaps 19–28 (before `StereoLeft = 29`, `h:69`) and
+/// 45–60 (before `BinauralLeft = 61`, `h:87`), and the special ids past
+/// the mask range. There is **no** `AV_CHAN_NB` sentinel in C — none here.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Channel {
+    /// `AV_CHAN_NONE` = −1 — invalid channel index.
+    None = -1,
+    /// `AV_CHAN_FRONT_LEFT` = 0.
+    FrontLeft = 0,
+    /// `AV_CHAN_FRONT_RIGHT` = 1.
+    FrontRight = 1,
+    /// `AV_CHAN_FRONT_CENTER` = 2.
+    FrontCenter = 2,
+    /// `AV_CHAN_LOW_FREQUENCY` = 3.
+    LowFrequency = 3,
+    /// `AV_CHAN_BACK_LEFT` = 4.
+    BackLeft = 4,
+    /// `AV_CHAN_BACK_RIGHT` = 5.
+    BackRight = 5,
+    /// `AV_CHAN_FRONT_LEFT_OF_CENTER` = 6.
+    FrontLeftOfCenter = 6,
+    /// `AV_CHAN_FRONT_RIGHT_OF_CENTER` = 7.
+    FrontRightOfCenter = 7,
+    /// `AV_CHAN_BACK_CENTER` = 8.
+    BackCenter = 8,
+    /// `AV_CHAN_SIDE_LEFT` = 9.
+    SideLeft = 9,
+    /// `AV_CHAN_SIDE_RIGHT` = 10.
+    SideRight = 10,
+    /// `AV_CHAN_TOP_CENTER` = 11.
+    TopCenter = 11,
+    /// `AV_CHAN_TOP_FRONT_LEFT` = 12.
+    TopFrontLeft = 12,
+    /// `AV_CHAN_TOP_FRONT_CENTER` = 13.
+    TopFrontCenter = 13,
+    /// `AV_CHAN_TOP_FRONT_RIGHT` = 14.
+    TopFrontRight = 14,
+    /// `AV_CHAN_TOP_BACK_LEFT` = 15.
+    TopBackLeft = 15,
+    /// `AV_CHAN_TOP_BACK_CENTER` = 16.
+    TopBackCenter = 16,
+    /// `AV_CHAN_TOP_BACK_RIGHT` = 17.
+    TopBackRight = 17,
+    /// `AV_CHAN_STEREO_LEFT` = 29 — Dolby downmix left (gap 19–28 unused).
+    StereoLeft = 29,
+    /// `AV_CHAN_STEREO_RIGHT` = 30 — Dolby downmix right.
+    StereoRight = 30,
+    /// `AV_CHAN_WIDE_LEFT` = 31.
+    WideLeft = 31,
+    /// `AV_CHAN_WIDE_RIGHT` = 32.
+    WideRight = 32,
+    /// `AV_CHAN_SURROUND_DIRECT_LEFT` = 33.
+    SurroundDirectLeft = 33,
+    /// `AV_CHAN_SURROUND_DIRECT_RIGHT` = 34.
+    SurroundDirectRight = 34,
+    /// `AV_CHAN_LOW_FREQUENCY_2` = 35.
+    LowFrequency2 = 35,
+    /// `AV_CHAN_TOP_SIDE_LEFT` = 36.
+    TopSideLeft = 36,
+    /// `AV_CHAN_TOP_SIDE_RIGHT` = 37.
+    TopSideRight = 37,
+    /// `AV_CHAN_BOTTOM_FRONT_CENTER` = 38.
+    BottomFrontCenter = 38,
+    /// `AV_CHAN_BOTTOM_FRONT_LEFT` = 39.
+    BottomFrontLeft = 39,
+    /// `AV_CHAN_BOTTOM_FRONT_RIGHT` = 40.
+    BottomFrontRight = 40,
+    /// `AV_CHAN_SIDE_SURROUND_LEFT` = 41 (+90°, Lss/SiL).
+    SideSurroundLeft = 41,
+    /// `AV_CHAN_SIDE_SURROUND_RIGHT` = 42 (−90°, Rss/SiR).
+    SideSurroundRight = 42,
+    /// `AV_CHAN_TOP_SURROUND_LEFT` = 43 (+110°, Lvs/TpLS).
+    TopSurroundLeft = 43,
+    /// `AV_CHAN_TOP_SURROUND_RIGHT` = 44 (−110°, Rvs/TpRS).
+    TopSurroundRight = 44,
+    /// `AV_CHAN_BINAURAL_LEFT` = 61 (gap 45–60 unused).
+    BinauralLeft = 61,
+    /// `AV_CHAN_BINAURAL_RIGHT` = 62.
+    BinauralRight = 62,
+    /// `AV_CHAN_UNUSED` = 0x200 — channel is empty, safely skipped.
+    Unused = 0x200,
+    /// `AV_CHAN_UNKNOWN` = 0x300 — has data, position unknown.
+    Unknown = 0x300,
+    /// `AV_CHAN_AMBISONIC_BASE` = 0x400 — first ambisonic ACN id
+    /// (CUSTOM-order only in C; ambisonic not ported).
+    AmbisonicBase = 0x400,
+    /// `AV_CHAN_AMBISONIC_END` = 0x7ff — last ambisonic ACN id.
+    AmbisonicEnd = 0x7ff,
+}
+
+impl Channel {
+    /// The `AV_CH_*` bit of this channel (`channel_layout.h:175-210`):
+    /// `Some(1 << position)` for the 36 positional variants (values 0..=62 —
+    /// C only allows `ch < 63` in masks, `c:468`, `c:739`), `None` for the
+    /// specials `None`/`Unused`/`Unknown`/`AmbisonicBase`/`AmbisonicEnd`.
+    pub const fn mask_bit(self) -> Option<u64> {
+        let v = self as i32;
+        if v >= 0 && v < 63 {
+            Some(1u64 << v)
+        } else {
+            None
+        }
+    }
+
+    /// `av_channel_name` (`c:87-118`) — `channel_names[].name` (`c:48-85`)
+    /// for positional channels; `"NONE"`/`"UNK"`/`"UNSD"` for the specials
+    /// (`c:95-100`). C's `"USR%d"` and `"AMBI%d"` fallbacks are
+    /// unrepresentable here (closed enum — see module doc).
+    pub const fn name(self) -> &'static str {
+        match self {
+            Channel::FrontLeft => "FL",
+            Channel::FrontRight => "FR",
+            Channel::FrontCenter => "FC",
+            Channel::LowFrequency => "LFE",
+            Channel::BackLeft => "BL",
+            Channel::BackRight => "BR",
+            Channel::FrontLeftOfCenter => "FLC",
+            Channel::FrontRightOfCenter => "FRC",
+            Channel::BackCenter => "BC",
+            Channel::SideLeft => "SL",
+            Channel::SideRight => "SR",
+            Channel::TopCenter => "TC",
+            Channel::TopFrontLeft => "TFL",
+            Channel::TopFrontCenter => "TFC",
+            Channel::TopFrontRight => "TFR",
+            Channel::TopBackLeft => "TBL",
+            Channel::TopBackCenter => "TBC",
+            Channel::TopBackRight => "TBR",
+            // Dolby downmix pair — NOT front left/right.
+            Channel::StereoLeft => "DL",
+            Channel::StereoRight => "DR",
+            Channel::WideLeft => "WL",
+            Channel::WideRight => "WR",
+            Channel::SurroundDirectLeft => "SDL",
+            Channel::SurroundDirectRight => "SDR",
+            Channel::LowFrequency2 => "LFE2",
+            Channel::TopSideLeft => "TSL",
+            Channel::TopSideRight => "TSR",
+            Channel::BottomFrontCenter => "BFC",
+            Channel::BottomFrontLeft => "BFL",
+            Channel::BottomFrontRight => "BFR",
+            Channel::SideSurroundLeft => "SSL",
+            Channel::SideSurroundRight => "SSR",
+            Channel::TopSurroundLeft => "TTL",
+            Channel::TopSurroundRight => "TTR",
+            Channel::BinauralLeft => "BIL",
+            Channel::BinauralRight => "BIR",
+            // c:95-100
+            Channel::None => "NONE",
+            Channel::Unknown => "UNK",
+            Channel::Unused => "UNSD",
+            // Unreachable in ported paths (ambisonic dropped); kept total
+            // so name() needs no Option.
+            Channel::AmbisonicBase | Channel::AmbisonicEnd => "",
+        }
+    }
+
+    /// `av_channel_description` (`c:120-151`) — `channel_names[].description`
+    /// (`c:48-85`); `"none"`/`"unknown"`/`"unused"` for the specials
+    /// (`c:128-133`).
+    pub const fn description(self) -> &'static str {
+        match self {
+            Channel::FrontLeft => "front left",
+            Channel::FrontRight => "front right",
+            Channel::FrontCenter => "front center",
+            Channel::LowFrequency => "low frequency",
+            Channel::BackLeft => "back left",
+            Channel::BackRight => "back right",
+            Channel::FrontLeftOfCenter => "front left-of-center",
+            Channel::FrontRightOfCenter => "front right-of-center",
+            Channel::BackCenter => "back center",
+            Channel::SideLeft => "side left",
+            Channel::SideRight => "side right",
+            Channel::TopCenter => "top center",
+            Channel::TopFrontLeft => "top front left",
+            Channel::TopFrontCenter => "top front center",
+            Channel::TopFrontRight => "top front right",
+            Channel::TopBackLeft => "top back left",
+            Channel::TopBackCenter => "top back center",
+            Channel::TopBackRight => "top back right",
+            Channel::StereoLeft => "downmix left",
+            Channel::StereoRight => "downmix right",
+            Channel::WideLeft => "wide left",
+            Channel::WideRight => "wide right",
+            Channel::SurroundDirectLeft => "surround direct left",
+            Channel::SurroundDirectRight => "surround direct right",
+            Channel::LowFrequency2 => "low frequency 2",
+            Channel::TopSideLeft => "top side left",
+            Channel::TopSideRight => "top side right",
+            Channel::BottomFrontCenter => "bottom front center",
+            Channel::BottomFrontLeft => "bottom front left",
+            Channel::BottomFrontRight => "bottom front right",
+            Channel::SideSurroundLeft => "side surround left",
+            Channel::SideSurroundRight => "side surround right",
+            Channel::TopSurroundLeft => "top surround left",
+            Channel::TopSurroundRight => "top surround right",
+            Channel::BinauralLeft => "binaural left",
+            Channel::BinauralRight => "binaural right",
+            // c:128-133
+            Channel::None => "none",
+            Channel::Unknown => "unknown",
+            Channel::Unused => "unused",
+            Channel::AmbisonicBase | Channel::AmbisonicEnd => "",
+        }
+    }
+
+    /// `av_channel_from_string` (`c:153-183`), supported subset: exact,
+    /// case-sensitive match on [`Channel::name`] over the 36 positional
+    /// names (`c:166-169`), plus `"UNK"` → [`Unknown`] (`c:170-171`) and
+    /// `"UNSD"` → [`Unused`] (`c:172-173`). C's `"AMBI<n>"` (`c:159-164`)
+    /// and `"USR<n>"` (`c:175-178`) forms yield ids this closed enum cannot
+    /// represent → `None` (documented degradation, module doc).
+    pub fn from_name(s: &str) -> Option<Channel> {
+        Some(match s {
+            "FL" => Channel::FrontLeft,
+            "FR" => Channel::FrontRight,
+            "FC" => Channel::FrontCenter,
+            "LFE" => Channel::LowFrequency,
+            "BL" => Channel::BackLeft,
+            "BR" => Channel::BackRight,
+            "FLC" => Channel::FrontLeftOfCenter,
+            "FRC" => Channel::FrontRightOfCenter,
+            "BC" => Channel::BackCenter,
+            "SL" => Channel::SideLeft,
+            "SR" => Channel::SideRight,
+            "TC" => Channel::TopCenter,
+            "TFL" => Channel::TopFrontLeft,
+            "TFC" => Channel::TopFrontCenter,
+            "TFR" => Channel::TopFrontRight,
+            "TBL" => Channel::TopBackLeft,
+            "TBC" => Channel::TopBackCenter,
+            "TBR" => Channel::TopBackRight,
+            "DL" => Channel::StereoLeft,
+            "DR" => Channel::StereoRight,
+            "WL" => Channel::WideLeft,
+            "WR" => Channel::WideRight,
+            "SDL" => Channel::SurroundDirectLeft,
+            "SDR" => Channel::SurroundDirectRight,
+            "LFE2" => Channel::LowFrequency2,
+            "TSL" => Channel::TopSideLeft,
+            "TSR" => Channel::TopSideRight,
+            "BFC" => Channel::BottomFrontCenter,
+            "BFL" => Channel::BottomFrontLeft,
+            "BFR" => Channel::BottomFrontRight,
+            "SSL" => Channel::SideSurroundLeft,
+            "SSR" => Channel::SideSurroundRight,
+            "TTL" => Channel::TopSurroundLeft,
+            "TTR" => Channel::TopSurroundRight,
+            "BIL" => Channel::BinauralLeft,
+            "BIR" => Channel::BinauralRight,
+            // c:170-173
+            "UNK" => Channel::Unknown,
+            "UNSD" => Channel::Unused,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The positional channel at mask bit `pos` — inverse of
+/// [`Channel::mask_bit`] for the 36 values C allows in masks.
+const fn channel_at(pos: u32) -> Option<Channel> {
+    Some(match pos {
+        0 => Channel::FrontLeft,
+        1 => Channel::FrontRight,
+        2 => Channel::FrontCenter,
+        3 => Channel::LowFrequency,
+        4 => Channel::BackLeft,
+        5 => Channel::BackRight,
+        6 => Channel::FrontLeftOfCenter,
+        7 => Channel::FrontRightOfCenter,
+        8 => Channel::BackCenter,
+        9 => Channel::SideLeft,
+        10 => Channel::SideRight,
+        11 => Channel::TopCenter,
+        12 => Channel::TopFrontLeft,
+        13 => Channel::TopFrontCenter,
+        14 => Channel::TopFrontRight,
+        15 => Channel::TopBackLeft,
+        16 => Channel::TopBackCenter,
+        17 => Channel::TopBackRight,
+        29 => Channel::StereoLeft,
+        30 => Channel::StereoRight,
+        31 => Channel::WideLeft,
+        32 => Channel::WideRight,
+        33 => Channel::SurroundDirectLeft,
+        34 => Channel::SurroundDirectRight,
+        35 => Channel::LowFrequency2,
+        36 => Channel::TopSideLeft,
+        37 => Channel::TopSideRight,
+        38 => Channel::BottomFrontCenter,
+        39 => Channel::BottomFrontLeft,
+        40 => Channel::BottomFrontRight,
+        41 => Channel::SideSurroundLeft,
+        42 => Channel::SideSurroundRight,
+        43 => Channel::TopSurroundLeft,
+        44 => Channel::TopSurroundRight,
+        61 => Channel::BinauralLeft,
+        62 => Channel::BinauralRight,
+        _ => return None,
+    })
+}
+
+/// `enum AVChannelOrder` (`channel_layout.h:114-160`) — the two orders
+/// representable without an explicit channel map.
+///
+/// `AV_CHANNEL_ORDER_CUSTOM` and `AV_CHANNEL_ORDER_AMBISONIC` (`h:126-155`)
+/// are **not ported**: every C site that can produce them returns
+/// [`Error::Unsupported`] instead (module doc lists them).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Order {
+    /// `AV_CHANNEL_ORDER_UNSPEC` — only `nb_channels` is meaningful; the
+    /// `mask` field is undefined and must not be used (`h:341-343`) —
+    /// conventionally 0 here.
+    #[default]
+    Unspecified,
+    /// `AV_CHANNEL_ORDER_NATIVE` — channels in [`Channel`] enum order;
+    /// the mask is the source of truth.
+    Native,
+}
+
+/// `AV_CH_FOO` (`channel_layout.h:175-210`) for the positional channels.
+const fn bit(c: Channel) -> u64 {
+    1u64 << (c as i32)
+}
+
+/// `AV_CHANNEL_LAYOUT_MASK(nb, m)` (`h:393-397`).
+const fn native(nb_channels: usize, mask: u64) -> ChannelLayout {
+    ChannelLayout {
+        order: Order::Native,
+        nb_channels,
+        mask,
+    }
+}
 /// `channel_layout_map[]` (`c:190-231`) — the 40 `(name, layout)` pairs
 /// **in C table order**. The order is behavior: `describe()` first-match
 /// and `default_for()` first-match both depend on it (e.g. `"5.0"` →

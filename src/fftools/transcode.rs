@@ -638,7 +638,6 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
     ictx.find_stream_info()?;
     let in_st = ictx.streams[0].clone();
 
-
     // ---- decoder ----------------------------------------------------------
     let mut decoder = PcmDecoder::new();
     decoder.init(&in_st.codecpar)?;
@@ -652,9 +651,7 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
             // must not ride into swr as the OUT side (init normalizes
             // s.out_ch_layout to native; unspec frames then compare as
             // CHANGED, swresample_frame.c:84-89).
-            if in_st.codecpar.ch_layout.order
-                == crate::util::channel_layout::Order::Unspecified
-            {
+            if in_st.codecpar.ch_layout.order == crate::util::channel_layout::Order::Unspecified {
                 ChannelLayout::default_for(in_st.codecpar.ch_layout.nb_channels)
             } else {
                 in_st.codecpar.ch_layout
@@ -787,13 +784,10 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
                     // path normalizes UNSPEC decoder layouts the same way
                     // (av_channel_layout_compare treats unspec-vs-native
                     // as CHANGED, swresample_frame.c:79-81 + chl.c:820).
-                    if frame.ch_layout.order
-                        == crate::util::channel_layout::Order::Unspecified
-                    {
-                        frame.ch_layout =
-                            crate::util::channel_layout::ChannelLayout::default_for(
-                                frame.ch_layout.nb_channels,
-                            );
+                    if frame.ch_layout.order == crate::util::channel_layout::Order::Unspecified {
+                        frame.ch_layout = crate::util::channel_layout::ChannelLayout::default_for(
+                            frame.ch_layout.nb_channels,
+                        );
                     }
                     push_frame(&mut swr, &mut encoder, &frame, &mut octx, &mut stats)?;
                 }
