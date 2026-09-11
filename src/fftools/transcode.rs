@@ -16,7 +16,6 @@
 
 use std::time::Instant;
 
-use crate::util::samplefmt::SampleFormat;
 use crate::{
     codec::{
         packet::Packet,
@@ -612,12 +611,15 @@ fn cli_sample_fmt(
 
 /// The audio transcode loop — `transcode()`'s AVMEDIA_TYPE_AUDIO branch.
 fn transcode_audio(cli: &Cli) -> Result<Stats> {
-    use crate::codec::params::MediaType;
-    use crate::codec::pcm::{PcmDecoder, PcmEncoder, codec_id_for_packed_le};
-    use crate::codec::traits::{AudioDecoder, AudioEncoder};
-    use crate::util::audio_frame::AudioFrame;
-    use crate::util::channel_layout::ChannelLayout;
-    use crate::util::samplefmt::SampleFormat;
+    use crate::{
+        codec::{
+            params::MediaType,
+            pcm::{PcmDecoder, PcmEncoder, codec_id_for_packed_le},
+            traits::{AudioDecoder, AudioEncoder},
+        },
+        util::{audio_frame::AudioFrame, channel_layout::ChannelLayout},
+    };
+    // use crate::util::samplefmt::SampleFormat;
 
     if std::path::Path::new(&cli.output_url).exists() {
         match cli.overwrite {
