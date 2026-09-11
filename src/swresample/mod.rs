@@ -75,12 +75,14 @@ pub mod rematrix;
 pub mod resample;
 pub mod version;
 
-use crate::util::{
-    channel_layout::{ChannelLayout, Order},
-    error::{Error, Result},
-    samplefmt::SampleFormat,
+use crate::{
+    util::{
+        channel_layout::{ChannelLayout, Order},
+        error::{Error, Result},
+        samplefmt::SampleFormat,
+    },
+    {log_debug, log_error, log_verbose, log_warning},
 };
-use crate::{log_debug, log_error, log_verbose, log_warning};
 
 use audioconvert::{AudioConvert, swri_audio_convert};
 use rematrix::{CustomRematrix, MatrixEncoding, RematrixContext, RematrixOptions};
