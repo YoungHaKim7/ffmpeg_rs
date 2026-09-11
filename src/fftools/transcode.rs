@@ -16,6 +16,7 @@
 
 use std::time::Instant;
 
+use crate::util::samplefmt::SampleFormat;
 use crate::{
     codec::{
         packet::Packet,
@@ -242,6 +243,22 @@ fn transcode(cli: &Cli) -> Result<Stats> {
     }
 
     // ---- input ------------------------------------------------------------
+    // Dispatch by media type: open the input, then hand off to the audio
+    // loop when stream 0 is audio (ffmpeg's per-stream-type scheduling
+    // collapsed to one branch).
+    {
+        let probe = InputFormatContext::open(
+            &cli.input_url,
+            cli.input_format.as_deref(),
+            &DemuxOptions {
+                raw_video: crate::format::demux::RawVideoDemuxOptions::default(),
+            },
+        )?;
+        if probe.streams[0].codecpar.codec_type == crate::codec::params::MediaType::Audio {
+            drop(probe);
+            return transcode_audio(cli);
+        }
+    }
     let demux_opts = DemuxOptions {
         raw_video: crate::format::demux::RawVideoDemuxOptions {
             pixel_format: cli.input_pixel_format.unwrap_or(PixelFormat::Yuv420p),
@@ -567,4 +584,241 @@ fn print_summary(stats: &Stats) {
         fps,
         dump::progress_time_string(end_pts, stats.time_base),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Audio path (Phase 4b): demux → PcmDecoder → swresample → PcmEncoder → mux
+// ---------------------------------------------------------------------------
+
+/// `-sample_fmt`'s packed mapping plus an explicit planar rejection.
+fn cli_sample_fmt(
+    cli: &Cli,
+    fallback: crate::util::samplefmt::SampleFormat,
+) -> Result<crate::util::samplefmt::SampleFormat> {
+    use crate::util::samplefmt::SampleFormat;
+    let fmt = match &cli.output_sample_fmt {
+        Some(name) => SampleFormat::from_name(name)
+            .ok_or_else(|| Error::InvalidArgument(format!("Unknown sample format '{name}'")))?,
+        None => fallback,
+    };
+    if fmt.is_planar() {
+        return Err(Error::InvalidArgument(format!(
+            "planar sample format '{}' cannot be stored in WAV; use a packed format",
+            fmt.name()
+        )));
+    }
+    Ok(fmt)
+}
+
+/// The audio transcode loop — `transcode()`'s AVMEDIA_TYPE_AUDIO branch.
+fn transcode_audio(cli: &Cli) -> Result<Stats> {
+    use crate::codec::params::MediaType;
+    use crate::codec::pcm::{PcmDecoder, PcmEncoder, codec_id_for_packed_le};
+    use crate::codec::traits::{AudioDecoder, AudioEncoder};
+    use crate::util::audio_frame::AudioFrame;
+    use crate::util::channel_layout::ChannelLayout;
+    use crate::util::samplefmt::SampleFormat;
+
+    if std::path::Path::new(&cli.output_url).exists() {
+        match cli.overwrite {
+            Overwrite::Always => {}
+            Overwrite::Never | Overwrite::Prompt => {
+                log_error!(
+                    None,
+                    "File '{}' exists. Exiting (use -y to overwrite).",
+                    cli.output_url
+                );
+                return Err(Error::InvalidArgument("output exists".into()));
+            }
+        }
+    }
+
+    let demux_opts = DemuxOptions {
+        raw_video: crate::format::demux::RawVideoDemuxOptions::default(),
+    };
+    let mut ictx =
+        InputFormatContext::open(&cli.input_url, cli.input_format.as_deref(), &demux_opts)?;
+    ictx.find_stream_info()?;
+    let in_st = ictx.streams[0].clone();
+    eprintln!(
+        "DBG in: rate={} ch={:?} fmt={:?} align={}",
+        in_st.codecpar.sample_rate,
+        in_st.codecpar.ch_layout,
+        in_st.codecpar.sample_fmt,
+        in_st.codecpar.block_align
+    );
+
+    // ---- decoder ----------------------------------------------------------
+    let mut decoder = PcmDecoder::new();
+    decoder.init(&in_st.codecpar)?;
+
+    // ---- output parameters (ffmpeg_filter.c's ofilter for audio) ----------
+    let out_rate = cli.output_sample_rate.unwrap_or(in_st.codecpar.sample_rate);
+    let out_layout = match cli.output_channels {
+        Some(n) => ChannelLayout::default_for(n),
+        None => in_st.codecpar.ch_layout,
+    };
+    let out_fmt = cli_sample_fmt(cli, in_st.codecpar.sample_fmt)?;
+    let codec_id = codec_id_for_packed_le(out_fmt)
+        .ok_or_else(|| Error::Unsupported(format!("no PCM codec for '{}'", out_fmt.name())))?;
+
+    let mut out_par = CodecParameters {
+        codec_type: MediaType::Audio,
+        codec_id,
+        sample_rate: out_rate,
+        ch_layout: out_layout,
+        sample_fmt: out_fmt,
+        ..CodecParameters::default()
+    };
+    out_par.block_align = (out_layout.nb_channels * out_fmt.bytes_per_sample()) as i32;
+    out_par.bit_rate = out_par.block_align as i64 * 8 * out_rate as i64;
+
+    let mut out_st = Stream::new_audio(0);
+    out_st.codecpar = out_par.clone();
+    out_st.set_pts_info(1, out_rate as i64);
+
+    let mut octx = OutputFormatContext::create(
+        &cli.output_url,
+        cli.output_format.as_deref(),
+        out_st.clone(),
+    )?;
+    octx.write_header()?;
+
+    // ---- converter + encoder ----------------------------------------------
+    let need_swr = out_rate != in_st.codecpar.sample_rate
+        || out_layout.nb_channels != in_st.codecpar.ch_layout.nb_channels
+        || out_layout.mask != in_st.codecpar.ch_layout.mask
+        || out_fmt != in_st.codecpar.sample_fmt;
+    let mut swr = if need_swr {
+        let mut s = crate::swresample::SwrContext::alloc_set_opts2(
+            None,
+            &out_layout,
+            out_fmt,
+            out_rate,
+            &in_st.codecpar.ch_layout,
+            in_st.codecpar.sample_fmt,
+            in_st.codecpar.sample_rate,
+        )?;
+        s.init()?;
+        Some(s)
+    } else {
+        None
+    };
+
+    let mut encoder = PcmEncoder::new();
+    encoder.init(&out_par)?;
+
+    let mut stats = Stats {
+        frames: 0,
+        bytes: 0,
+        time_base: out_st.time_base,
+        last_pts: 0,
+        last_duration: 1,
+        started: Instant::now(),
+    };
+
+    // The frame pump: decode → (convert) → encode.
+    let mut push_frame = |swr: &mut Option<crate::swresample::SwrContext>,
+                          encoder: &mut PcmEncoder,
+                          frame: &AudioFrame,
+                          octx: &mut OutputFormatContext,
+                          stats: &mut Stats|
+     -> Result<()> {
+        let converted: Vec<AudioFrame> = match swr {
+            Some(s) => {
+                let mut out = AudioFrame {
+                    format: out_fmt,
+                    ch_layout: out_layout,
+                    sample_rate: out_rate,
+                    time_base: out_st.time_base,
+                    ..AudioFrame::default()
+                };
+                let n = s.convert_frame(Some(&mut out), Some(frame))?;
+                out.pts = frame.pts;
+                if n > 0 {
+                    out.nb_samples = n;
+                    vec![out]
+                } else {
+                    vec![]
+                }
+            }
+            None => vec![frame.clone()],
+        };
+        for f in &converted {
+            encoder.send_frame(Some(f))?;
+            loop {
+                match encoder.receive_packet() {
+                    Ok(pkt) => write_packet(octx, &pkt, stats)?,
+                    Err(Error::Again) => break,
+                    Err(Error::Eof) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(())
+    };
+
+    let mut eof = false;
+    'pipeline: loop {
+        if !eof {
+            match ictx.read_frame() {
+                Ok(pkt) => decoder.send_packet(Some(&pkt))?,
+                Err(Error::Eof) => {
+                    decoder.send_packet(None)?;
+                    eof = true;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        loop {
+            match decoder.receive_frame() {
+                Ok(frame) => push_frame(&mut swr, &mut encoder, &frame, &mut octx, &mut stats)?,
+                Err(Error::Again) => break,
+                Err(Error::Eof) => {
+                    // Drain the resampler's delay (swr_convert with NULL in).
+                    if let Some(s) = swr.as_mut() {
+                        loop {
+                            let mut out = AudioFrame {
+                                format: out_fmt,
+                                ch_layout: out_layout,
+                                sample_rate: out_rate,
+                                time_base: out_st.time_base,
+                                ..AudioFrame::default()
+                            };
+                            let n = s.convert_frame(Some(&mut out), None)?;
+                            if n == 0 {
+                                break;
+                            }
+                            out.nb_samples = n;
+                            encoder.send_frame(Some(&out))?;
+                            loop {
+                                match encoder.receive_packet() {
+                                    Ok(pkt) => write_packet(&mut octx, &pkt, &mut stats)?,
+                                    Err(Error::Again) => break,
+                                    Err(Error::Eof) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        }
+                    }
+                    break 'pipeline;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    // Flush the encoder.
+    encoder.send_frame(None)?;
+    loop {
+        match encoder.receive_packet() {
+            Ok(pkt) => write_packet(&mut octx, &pkt, &mut stats)?,
+            Err(Error::Again) => (),
+            Err(Error::Eof) => break,
+            Err(e) => return Err(e),
+        }
+    }
+
+    octx.write_trailer()?;
+    Ok(stats)
 }

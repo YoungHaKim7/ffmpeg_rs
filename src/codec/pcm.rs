@@ -454,6 +454,20 @@ impl AudioEncoder for PcmEncoder {
     }
 }
 
+/// The CLI's `-sample_fmt` → WAV codec mapping (ffmpeg picks the PCM
+/// codec from the requested sample format; WAV is little-endian). Planar
+/// formats have no interleaved PCM codec — callers reject them.
+pub fn codec_id_for_packed_le(fmt: SampleFormat) -> Option<CodecId> {
+    Some(match fmt {
+        SampleFormat::U8 => CodecId::PcmU8,
+        SampleFormat::S16 => CodecId::PcmS16le,
+        SampleFormat::S32 => CodecId::PcmS32le,
+        SampleFormat::Flt => CodecId::PcmF32le,
+        SampleFormat::Dbl => CodecId::PcmF64le,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

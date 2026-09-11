@@ -252,6 +252,7 @@ impl IoContext {
     /// or explicit flush below).
     pub fn write_all(&mut self, buf: &[u8]) -> Result<()> {
         self.handler.write(buf).map_err(Error::Io)?;
+        self.pos += buf.len() as u64;
         Ok(())
     }
 

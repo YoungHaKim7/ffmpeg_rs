@@ -84,6 +84,24 @@ impl Stream {
         }
     }
 
+    /// A fresh audio stream.
+    pub fn new_audio(index: u32) -> Stream {
+        Stream {
+            index,
+            codecpar: CodecParameters {
+                codec_type: MediaType::Audio,
+                ..CodecParameters::default()
+            },
+            time_base: Rational::UNKNOWN,
+            avg_frame_rate: Rational::UNKNOWN,
+            r_frame_rate: Rational::UNKNOWN,
+            sample_aspect_ratio: Rational::UNKNOWN,
+            start_time: NOPTS,
+            duration: NOPTS,
+            nb_frames: 0,
+        }
+    }
+
     /// `avpriv_set_pts_info(st, 64, m, n)` — time_base `m/n` reduced, and
     /// `avg_frame_rate` its inverse.
     pub fn set_pts_info(&mut self, num: i64, den: i64) {

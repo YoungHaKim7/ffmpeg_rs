@@ -73,6 +73,7 @@
 pub mod audioconvert;
 pub mod rematrix;
 pub mod resample;
+pub mod version;
 
 use crate::util::{
     channel_layout::{ChannelLayout, Order},
@@ -104,293 +105,6 @@ pub const NOPTS: i64 = crate::NOPTS;
 /// `options.c:129-131` — the AVClass `class_name` is `"SWResampler"` but
 /// the default callback prints `item_name` = `"SWR"`).
 const LOG_CTX: Option<&str> = Some("SWR");
-
-// ---------------------------------------------------------------------------
-// version.c:36-44
-// ---------------------------------------------------------------------------
-
-/// `LIBSWRESAMPLE_VERSION_MAJOR` (`version_major.h:29`).
-pub const LIBSWRESAMPLE_VERSION_MAJOR: u32 = 7;
-/// `LIBSWRESAMPLE_VERSION_MINOR` (`version.h:23`).
-pub const LIBSWRESAMPLE_VERSION_MINOR: u32 = 3;
-/// `LIBSWRESAMPLE_VERSION_MICRO` (`version.h:24`).
-pub const LIBSWRESAMPLE_VERSION_MICRO: u32 = 100;
-/// `LIBSWRESAMPLE_VERSION_INT` = `AV_VERSION_INT(7, 3, 100)` (`version.h:26`).
-pub const LIBSWRESAMPLE_VERSION_INT: u32 = (LIBSWRESAMPLE_VERSION_MAJOR << 16)
-    | (LIBSWRESAMPLE_VERSION_MINOR << 8)
-    | LIBSWRESAMPLE_VERSION_MICRO;
-
-/// `swresample_version()` (`version.c:31`).
-pub fn swresample_version() -> u32 {
-    LIBSWRESAMPLE_VERSION_INT
-}
-
-/// `swresample_configuration()` (`version.c:36`) — C returns
-/// `FFMPEG_CONFIGURATION` from the build; a cargo build has no configure
-/// line, so `""`.
-pub fn swresample_configuration() -> &'static str {
-    ""
-}
-
-/// `swresample_license()` (`version.c:41`).
-pub fn swresample_license() -> &'static str {
-    "LGPL version 2.1 or later"
-}
-
-/// `AudioData` from `swresample_internal.h:47-55`: one `Arc<[u8]>` backing
-/// buffer replaces C's `uint8_t *data` + `ch[SWR_CH_MAX]` pointer array,
-/// reproducing the aliasing C sets up in `swri_realloc_audio`
-/// (`swresample.c:426-456`) and `fill_audiodata` (`swresample.c:471-483`):
-///
-/// * planar: channel `i` occupies `data[i*count*bps .. (i+1)*count*bps]`
-///   (C's 32-byte `ALIGN` stride padding at `swresample.c:31,438` is dropped —
-///   it exists only for SIMD and is invisible to every caller);
-/// * packed: channel `i` is the alias starting at `data[i*bps ..]` running to
-///   the end of the buffer (C `ch[i] = data + i*bps`, `swresample.c:448`).
-///
-/// `count` is the capacity in samples per channel (C's grow-by-doubling
-/// [`swri_realloc_audio`] is [`AudioData::realloc_audio`]). Occupancy is the
-/// driver's business (`in_buffer_count` etc.) — never this field.
-#[derive(Clone)]
-pub struct AudioData {
-    /// Backing buffer shared by all channels (aliases, not copies).
-    pub data: std::sync::Arc<[u8]>,
-    /// Number of channels (`ch_count`).
-    pub ch_count: usize,
-    /// Bytes per sample (`bps`).
-    pub bps: usize,
-    /// Capacity in samples per channel (`count`).
-    pub count: usize,
-    /// 1 if planar audio, 0 otherwise (`planar`).
-    pub planar: bool,
-    /// Sample format (`fmt`).
-    pub fmt: SampleFormat,
-}
-
-impl AudioData {
-    /// Zeroed buffer of `ch_count * count * bps` bytes (the `av_calloc`
-    /// analog of `swri_realloc_audio`, `swresample.c:438`).
-    pub fn new(fmt: SampleFormat, ch_count: usize, count: usize) -> Self {
-        let bps = fmt.bytes_per_sample();
-        AudioData {
-            data: vec![0u8; ch_count * count * bps].into(),
-            ch_count,
-            bps,
-            count,
-            planar: fmt.is_planar(),
-            fmt,
-        }
-    }
-
-    /// The `memset(a, 0, sizeof(*a))` of `free_temp` (`swresample.c:106-109`)
-    /// and `clear_context` — an empty descriptor with no channels.
-    pub(crate) fn empty() -> Self {
-        AudioData {
-            data: std::sync::Arc::from(Vec::new()),
-            ch_count: 0,
-            bps: 0,
-            count: 0,
-            planar: false,
-            fmt: SampleFormat::U8,
-        }
-    }
-
-    /// Channel `ch`'s plane — `None` when the channel's address falls outside
-    /// the backing buffer (C's NULL `ch[]` slot, the skip case at
-    /// `audioconvert.c:259-260`).
-    pub fn plane(&self, ch: usize) -> Option<&[u8]> {
-        let start = if self.planar {
-            ch * self.count * self.bps
-        } else {
-            ch * self.bps
-        };
-        if self.planar {
-            self.data.get(start..start + self.count * self.bps)
-        } else {
-            self.data.get(start..)
-        }
-    }
-
-    /// Mutable channel `ch` plane, via a single `Arc::make_mut` borrow so
-    /// packed channels (which alias one buffer) can be written at their
-    /// offsets without aliasing violations.
-    pub fn plane_bytes_mut(&mut self, ch: usize) -> Option<&mut [u8]> {
-        let data = std::sync::Arc::make_mut(&mut self.data);
-        let start = if self.planar {
-            ch * self.count * self.bps
-        } else {
-            ch * self.bps
-        };
-        if self.planar {
-            data.get_mut(start..start + self.count * self.bps)
-        } else {
-            data.get_mut(start..)
-        }
-    }
-
-    /// Whole backing buffer, mutable (for the driver zone).
-    pub fn data_mut(&mut self) -> &mut [u8] {
-        std::sync::Arc::make_mut(&mut self.data)
-    }
-
-    /// `swri_realloc_audio` (`swresample.c:426-456`): grow the buffer to at
-    /// least `count` samples per channel, doubling the request (C `:436`),
-    /// preserving the old contents (planar: per-channel prefix; packed: one
-    /// prefix — C `:448-451`) and zero-filling the rest (C's `av_calloc`,
-    /// `:444` — the grown `in_buffer` tail is silence).
-    ///
-    /// Returns `true` when the buffer grew (C's `1`; the dither
-    /// noise-regeneration trigger — unused once `dither.c` is dropped).
-    pub(crate) fn realloc_audio(&mut self, count: usize) -> Result<bool> {
-        // :441-442 — av_assert0(a->bps); av_assert0(a->ch_count).
-        debug_assert!(self.bps != 0 && self.ch_count != 0);
-        if self.bps == 0 || self.ch_count == 0 {
-            return Err(Error::InvalidArgument(
-                "swri_realloc_audio on a channel-less AudioData".into(),
-            ));
-        }
-        // :430 — count < 0 is impossible for usize; the INT_MAX/2 clamp stays.
-        if count > (i32::MAX as usize) / 2 / self.bps / self.ch_count {
-            return Err(Error::InvalidArgument(
-                "swri_realloc_audio: sample count out of range".into(),
-            ));
-        }
-        if self.count >= count {
-            return Ok(false);
-        }
-        let new_count = count * 2; // :436
-        let mut data = vec![0u8; self.ch_count * new_count * self.bps];
-        if self.planar {
-            for ch in 0..self.ch_count {
-                let from = ch * self.count * self.bps;
-                let to = ch * new_count * self.bps;
-                data[to..to + self.count * self.bps]
-                    .copy_from_slice(&self.data[from..from + self.count * self.bps]);
-            }
-        } else {
-            let n = self.count * self.ch_count * self.bps;
-            data[..n].copy_from_slice(&self.data[..n]);
-        }
-        self.data = data.into();
-        self.count = new_count;
-        Ok(true)
-    }
-}
-
-/// `set_audiodata_fmt` (`swresample.c:98-104`) — and the mono exception:
-/// `if (a->ch_count == 1) a->planar = 1` (`:102-103`). Mono interleaved is
-/// treated as planar everywhere downstream, which changes `fill_audiodata`
-/// semantics for mono packed input (the single caller slice doubles as the
-/// one plane).
-fn set_audiodata_fmt(a: &mut AudioData, fmt: SampleFormat) {
-    a.fmt = fmt;
-    a.bps = fmt.bytes_per_sample();
-    a.planar = fmt.is_planar();
-    if a.ch_count == 1 {
-        a.planar = true;
-    }
-}
-
-/// C's `buf_set(&view, &a, off)` (`swresample.c:499-508`): a sample-offset
-/// read view of `a`. The port has no borrowed pointer form, so this copies
-/// each plane from `off` to the end of its capacity — the tail bytes past
-/// occupancy are preserved verbatim because the resampler's kernels may
-/// legally read one stale sample past `src_size` within capacity (the
-/// `resample.rs` divergences note). `off` counts samples (frames).
-pub(crate) fn view(a: &AudioData, off: usize) -> AudioData {
-    debug_assert!(
-        off <= a.count,
-        "view offset {off} past capacity {}",
-        a.count
-    );
-    let ncount = a.count - off;
-    let mut out = AudioData {
-        data: std::sync::Arc::from(vec![0u8; a.ch_count * ncount * a.bps]),
-        ch_count: a.ch_count,
-        bps: a.bps,
-        count: ncount,
-        planar: a.planar,
-        fmt: a.fmt,
-    };
-    if a.planar {
-        for ch in 0..a.ch_count {
-            let from = ch * a.count * a.bps + off * a.bps;
-            let to = ch * ncount * a.bps;
-            let n = ncount * a.bps;
-            out.data_mut()[to..to + n].copy_from_slice(&a.data[from..from + n]);
-        }
-    } else {
-        let from = off * a.ch_count * a.bps;
-        let n = ncount * a.ch_count * a.bps;
-        out.data_mut()[..n].copy_from_slice(&a.data[from..from + n]);
-    }
-    out
-}
-
-/// C's `copy()` (`swresample.c:458-469`) with a destination sample offset:
-/// write `count` samples of `src` (from its plane starts) into `dst` at
-/// `off`. Same-geometry requirement as C's `av_assert0`s (`:460-462`).
-pub(crate) fn splice(dst: &mut AudioData, off: usize, src: &AudioData, count: usize) {
-    debug_assert_eq!(dst.planar, src.planar);
-    debug_assert_eq!(dst.bps, src.bps);
-    debug_assert_eq!(dst.ch_count, src.ch_count);
-    debug_assert!(off + count <= dst.count);
-    if dst.planar {
-        for ch in 0..dst.ch_count {
-            let to = ch * dst.count * dst.bps + off * dst.bps;
-            let from = ch * src.count * dst.bps;
-            let n = count * dst.bps;
-            dst.data_mut()[to..to + n].copy_from_slice(&src.data[from..from + n]);
-        }
-    } else {
-        let to = off * dst.ch_count * dst.bps;
-        let n = count * dst.ch_count * dst.bps;
-        dst.data_mut()[to..to + n].copy_from_slice(&src.data[..n]);
-    }
-}
-
-/// The in-buffer compaction of `swresample.c:576-578, 828-830` — C's
-/// overlapping `copy(&s->in_buffer, &tmp, count)` after `buf_set` to
-/// `in_buffer_index`, i.e. a per-plane `memmove` of the occupancy to the
-/// front (plain `copy_from_slice` on an overlapping range would be
-/// UB-adjacent; C relies on glibc's forward copy).
-pub(crate) fn compact(a: &mut AudioData, idx: usize, count: usize) {
-    debug_assert!(idx + count <= a.count);
-    let bps = a.bps;
-    if a.planar {
-        for ch in 0..a.ch_count {
-            let base = ch * a.count * bps;
-            let n = count * bps;
-            let data = a.data_mut();
-            data.copy_within(base + idx * bps..base + idx * bps + n, base);
-        }
-    } else {
-        let n = count * a.ch_count * bps;
-        let from = idx * a.ch_count * bps;
-        a.data_mut().copy_within(from..from + n, 0);
-    }
-}
-
-/// C's `copy(out, in, count)` (`swresample.c:458-469`) over two whole
-/// buffers — the `swr_convert_internal:659` direct-copy path.
-pub(crate) fn copy_views(out: &mut AudioData, in_: &AudioData, count: usize) {
-    splice(out, 0, in_, count);
-}
-
-/// A fresh zeroed buffer with `a`'s geometry and `count` samples of
-/// capacity — the write-side staging stand-in for C's caller planes.
-/// `planar` is taken from `a` verbatim so the mono-forced-planar rule of
-/// [`set_audiodata_fmt`] carries over.
-pub(crate) fn scratch_like(a: &AudioData, count: usize) -> AudioData {
-    AudioData {
-        data: std::sync::Arc::from(vec![0u8; a.ch_count * count * a.bps]),
-        ch_count: a.ch_count,
-        bps: a.bps,
-        count,
-        planar: a.planar,
-        fmt: a.fmt,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Public enums — swresample.h:143-177
@@ -2367,6 +2081,260 @@ impl SwrContext {
     }
 }
 
+/// `AudioData` from `swresample_internal.h:47-55`: one `Arc<[u8]>` backing
+/// buffer replaces C's `uint8_t *data` + `ch[SWR_CH_MAX]` pointer array,
+/// reproducing the aliasing C sets up in `swri_realloc_audio`
+/// (`swresample.c:426-456`) and `fill_audiodata` (`swresample.c:471-483`):
+///
+/// * planar: channel `i` occupies `data[i*count*bps .. (i+1)*count*bps]`
+///   (C's 32-byte `ALIGN` stride padding at `swresample.c:31,438` is dropped —
+///   it exists only for SIMD and is invisible to every caller);
+/// * packed: channel `i` is the alias starting at `data[i*bps ..]` running to
+///   the end of the buffer (C `ch[i] = data + i*bps`, `swresample.c:448`).
+///
+/// `count` is the capacity in samples per channel (C's grow-by-doubling
+/// [`swri_realloc_audio`] is [`AudioData::realloc_audio`]). Occupancy is the
+/// driver's business (`in_buffer_count` etc.) — never this field.
+#[derive(Clone)]
+pub struct AudioData {
+    /// Backing buffer shared by all channels (aliases, not copies).
+    pub data: std::sync::Arc<[u8]>,
+    /// Number of channels (`ch_count`).
+    pub ch_count: usize,
+    /// Bytes per sample (`bps`).
+    pub bps: usize,
+    /// Capacity in samples per channel (`count`).
+    pub count: usize,
+    /// 1 if planar audio, 0 otherwise (`planar`).
+    pub planar: bool,
+    /// Sample format (`fmt`).
+    pub fmt: SampleFormat,
+}
+
+impl AudioData {
+    /// Zeroed buffer of `ch_count * count * bps` bytes (the `av_calloc`
+    /// analog of `swri_realloc_audio`, `swresample.c:438`).
+    pub fn new(fmt: SampleFormat, ch_count: usize, count: usize) -> Self {
+        let bps = fmt.bytes_per_sample();
+        AudioData {
+            data: vec![0u8; ch_count * count * bps].into(),
+            ch_count,
+            bps,
+            count,
+            planar: fmt.is_planar(),
+            fmt,
+        }
+    }
+
+    /// The `memset(a, 0, sizeof(*a))` of `free_temp` (`swresample.c:106-109`)
+    /// and `clear_context` — an empty descriptor with no channels.
+    pub(crate) fn empty() -> Self {
+        AudioData {
+            data: std::sync::Arc::from(Vec::new()),
+            ch_count: 0,
+            bps: 0,
+            count: 0,
+            planar: false,
+            fmt: SampleFormat::U8,
+        }
+    }
+
+    /// Channel `ch`'s plane — `None` when the channel's address falls outside
+    /// the backing buffer (C's NULL `ch[]` slot, the skip case at
+    /// `audioconvert.c:259-260`).
+    pub fn plane(&self, ch: usize) -> Option<&[u8]> {
+        let start = if self.planar {
+            ch * self.count * self.bps
+        } else {
+            ch * self.bps
+        };
+        if self.planar {
+            self.data.get(start..start + self.count * self.bps)
+        } else {
+            self.data.get(start..)
+        }
+    }
+
+    /// Mutable channel `ch` plane, via a single `Arc::make_mut` borrow so
+    /// packed channels (which alias one buffer) can be written at their
+    /// offsets without aliasing violations.
+    pub fn plane_bytes_mut(&mut self, ch: usize) -> Option<&mut [u8]> {
+        let data = std::sync::Arc::make_mut(&mut self.data);
+        let start = if self.planar {
+            ch * self.count * self.bps
+        } else {
+            ch * self.bps
+        };
+        if self.planar {
+            data.get_mut(start..start + self.count * self.bps)
+        } else {
+            data.get_mut(start..)
+        }
+    }
+
+    /// Whole backing buffer, mutable (for the driver zone).
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        std::sync::Arc::make_mut(&mut self.data)
+    }
+
+    /// `swri_realloc_audio` (`swresample.c:426-456`): grow the buffer to at
+    /// least `count` samples per channel, doubling the request (C `:436`),
+    /// preserving the old contents (planar: per-channel prefix; packed: one
+    /// prefix — C `:448-451`) and zero-filling the rest (C's `av_calloc`,
+    /// `:444` — the grown `in_buffer` tail is silence).
+    ///
+    /// Returns `true` when the buffer grew (C's `1`; the dither
+    /// noise-regeneration trigger — unused once `dither.c` is dropped).
+    pub(crate) fn realloc_audio(&mut self, count: usize) -> Result<bool> {
+        // :441-442 — av_assert0(a->bps); av_assert0(a->ch_count).
+        debug_assert!(self.bps != 0 && self.ch_count != 0);
+        if self.bps == 0 || self.ch_count == 0 {
+            return Err(Error::InvalidArgument(
+                "swri_realloc_audio on a channel-less AudioData".into(),
+            ));
+        }
+        // :430 — count < 0 is impossible for usize; the INT_MAX/2 clamp stays.
+        if count > (i32::MAX as usize) / 2 / self.bps / self.ch_count {
+            return Err(Error::InvalidArgument(
+                "swri_realloc_audio: sample count out of range".into(),
+            ));
+        }
+        if self.count >= count {
+            return Ok(false);
+        }
+        let new_count = count * 2; // :436
+        let mut data = vec![0u8; self.ch_count * new_count * self.bps];
+        if self.planar {
+            for ch in 0..self.ch_count {
+                let from = ch * self.count * self.bps;
+                let to = ch * new_count * self.bps;
+                data[to..to + self.count * self.bps]
+                    .copy_from_slice(&self.data[from..from + self.count * self.bps]);
+            }
+        } else {
+            let n = self.count * self.ch_count * self.bps;
+            data[..n].copy_from_slice(&self.data[..n]);
+        }
+        self.data = data.into();
+        self.count = new_count;
+        Ok(true)
+    }
+}
+
+/// `set_audiodata_fmt` (`swresample.c:98-104`) — and the mono exception:
+/// `if (a->ch_count == 1) a->planar = 1` (`:102-103`). Mono interleaved is
+/// treated as planar everywhere downstream, which changes `fill_audiodata`
+/// semantics for mono packed input (the single caller slice doubles as the
+/// one plane).
+fn set_audiodata_fmt(a: &mut AudioData, fmt: SampleFormat) {
+    a.fmt = fmt;
+    a.bps = fmt.bytes_per_sample();
+    a.planar = fmt.is_planar();
+    if a.ch_count == 1 {
+        a.planar = true;
+    }
+}
+
+/// C's `buf_set(&view, &a, off)` (`swresample.c:499-508`): a sample-offset
+/// read view of `a`. The port has no borrowed pointer form, so this copies
+/// each plane from `off` to the end of its capacity — the tail bytes past
+/// occupancy are preserved verbatim because the resampler's kernels may
+/// legally read one stale sample past `src_size` within capacity (the
+/// `resample.rs` divergences note). `off` counts samples (frames).
+pub(crate) fn view(a: &AudioData, off: usize) -> AudioData {
+    debug_assert!(
+        off <= a.count,
+        "view offset {off} past capacity {}",
+        a.count
+    );
+    let ncount = a.count - off;
+    let mut out = AudioData {
+        data: std::sync::Arc::from(vec![0u8; a.ch_count * ncount * a.bps]),
+        ch_count: a.ch_count,
+        bps: a.bps,
+        count: ncount,
+        planar: a.planar,
+        fmt: a.fmt,
+    };
+    if a.planar {
+        for ch in 0..a.ch_count {
+            let from = ch * a.count * a.bps + off * a.bps;
+            let to = ch * ncount * a.bps;
+            let n = ncount * a.bps;
+            out.data_mut()[to..to + n].copy_from_slice(&a.data[from..from + n]);
+        }
+    } else {
+        let from = off * a.ch_count * a.bps;
+        let n = ncount * a.ch_count * a.bps;
+        out.data_mut()[..n].copy_from_slice(&a.data[from..from + n]);
+    }
+    out
+}
+
+/// C's `copy()` (`swresample.c:458-469`) with a destination sample offset:
+/// write `count` samples of `src` (from its plane starts) into `dst` at
+/// `off`. Same-geometry requirement as C's `av_assert0`s (`:460-462`).
+pub(crate) fn splice(dst: &mut AudioData, off: usize, src: &AudioData, count: usize) {
+    debug_assert_eq!(dst.planar, src.planar);
+    debug_assert_eq!(dst.bps, src.bps);
+    debug_assert_eq!(dst.ch_count, src.ch_count);
+    debug_assert!(off + count <= dst.count);
+    if dst.planar {
+        for ch in 0..dst.ch_count {
+            let to = ch * dst.count * dst.bps + off * dst.bps;
+            let from = ch * src.count * dst.bps;
+            let n = count * dst.bps;
+            dst.data_mut()[to..to + n].copy_from_slice(&src.data[from..from + n]);
+        }
+    } else {
+        let to = off * dst.ch_count * dst.bps;
+        let n = count * dst.ch_count * dst.bps;
+        dst.data_mut()[to..to + n].copy_from_slice(&src.data[..n]);
+    }
+}
+
+/// The in-buffer compaction of `swresample.c:576-578, 828-830` — C's
+/// overlapping `copy(&s->in_buffer, &tmp, count)` after `buf_set` to
+/// `in_buffer_index`, i.e. a per-plane `memmove` of the occupancy to the
+/// front (plain `copy_from_slice` on an overlapping range would be
+/// UB-adjacent; C relies on glibc's forward copy).
+pub(crate) fn compact(a: &mut AudioData, idx: usize, count: usize) {
+    debug_assert!(idx + count <= a.count);
+    let bps = a.bps;
+    if a.planar {
+        for ch in 0..a.ch_count {
+            let base = ch * a.count * bps;
+            let n = count * bps;
+            let data = a.data_mut();
+            data.copy_within(base + idx * bps..base + idx * bps + n, base);
+        }
+    } else {
+        let n = count * a.ch_count * bps;
+        let from = idx * a.ch_count * bps;
+        a.data_mut().copy_within(from..from + n, 0);
+    }
+}
+
+/// C's `copy(out, in, count)` (`swresample.c:458-469`) over two whole
+/// buffers — the `swr_convert_internal:659` direct-copy path.
+pub(crate) fn copy_views(out: &mut AudioData, in_: &AudioData, count: usize) {
+    splice(out, 0, in_, count);
+}
+
+/// A fresh zeroed buffer with `a`'s geometry and `count` samples of
+/// capacity — the write-side staging stand-in for C's caller planes.
+/// `planar` is taken from `a` verbatim so the mono-forced-planar rule of
+/// [`set_audiodata_fmt`] carries over.
+pub(crate) fn scratch_like(a: &AudioData, count: usize) -> AudioData {
+    AudioData {
+        data: std::sync::Arc::from(vec![0u8; a.ch_count * count * a.bps]),
+        ch_count: a.ch_count,
+        bps: a.bps,
+        count,
+        planar: a.planar,
+        fmt: a.fmt,
+    }
+}
 /// Split an `Option<&mut AudioFrame>` + `Option<&AudioFrame>` pair into two
 /// shared refs for the config queries (both only read). Returns
 /// `(out_shared, in_shared)`.
