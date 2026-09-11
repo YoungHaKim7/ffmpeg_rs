@@ -29,3 +29,17 @@ pub fn swresample_configuration() -> &'static str {
 pub fn swresample_license() -> &'static str {
     "LGPL version 2.1 or later"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_accessors() {
+        // version.c + version.h: AV_VERSION_INT(7, 3, 100).
+        assert_eq!(LIBSWRESAMPLE_VERSION_INT, 7 << 16 | 3 << 8 | 100);
+        assert_eq!(LIBSWRESAMPLE_VERSION_INT, 459620);
+        assert_eq!(swresample_version(), 459620);
+        assert_eq!(swresample_license(), "LGPL version 2.1 or later");
+    }
+}
