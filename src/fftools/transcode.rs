@@ -642,13 +642,6 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
         InputFormatContext::open(&cli.input_url, cli.input_format.as_deref(), &demux_opts)?;
     ictx.find_stream_info()?;
     let in_st = ictx.streams[0].clone();
-    eprintln!(
-        "DBG in: rate={} ch={:?} fmt={:?} align={}",
-        in_st.codecpar.sample_rate,
-        in_st.codecpar.ch_layout,
-        in_st.codecpar.sample_fmt,
-        in_st.codecpar.block_align
-    );
 
     // ---- decoder ----------------------------------------------------------
     let mut decoder = PcmDecoder::new();
@@ -658,7 +651,19 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
     let out_rate = cli.output_sample_rate.unwrap_or(in_st.codecpar.sample_rate);
     let out_layout = match cli.output_channels {
         Some(n) => ChannelLayout::default_for(n),
-        None => in_st.codecpar.ch_layout,
+        None => {
+            // The graph-negotiation default again: an UNSPEC input layout
+            // must not ride into swr as the OUT side (init normalizes
+            // s.out_ch_layout to native; unspec frames then compare as
+            // CHANGED, swresample_frame.c:84-89).
+            if in_st.codecpar.ch_layout.order
+                == crate::util::channel_layout::Order::Unspecified
+            {
+                ChannelLayout::default_for(in_st.codecpar.ch_layout.nb_channels)
+            } else {
+                in_st.codecpar.ch_layout
+            }
+        }
     };
     let out_fmt = cli_sample_fmt(cli, in_st.codecpar.sample_fmt)?;
     let codec_id = codec_id_for_packed_le(out_fmt)
@@ -719,7 +724,9 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
         started: Instant::now(),
     };
 
-    // The frame pump: decode → (convert) → encode.
+    // The frame pump: decode → (convert) → encode. Output pts run on a
+    // sample counter (swr_next_pts's linear-chain equivalent).
+    let mut out_pts: i64 = 0;
     let mut push_frame = |swr: &mut Option<crate::swresample::SwrContext>,
                           encoder: &mut PcmEncoder,
                           frame: &AudioFrame,
@@ -747,7 +754,11 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
             None => vec![frame.clone()],
         };
         for f in &converted {
-            encoder.send_frame(Some(f))?;
+            let mut f = f.clone();
+            f.pts = out_pts;
+            out_pts += f.nb_samples as i64;
+            f.duration = f.nb_samples as i64;
+            encoder.send_frame(Some(&f))?;
             loop {
                 match encoder.receive_packet() {
                     Ok(pkt) => write_packet(octx, &pkt, stats)?,
@@ -774,7 +785,22 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
         }
         loop {
             match decoder.receive_frame() {
-                Ok(frame) => push_frame(&mut swr, &mut encoder, &frame, &mut octx, &mut stats)?,
+                Ok(mut frame) => {
+                    // ffmpeg's filtergraph negotiates REAL layouts before
+                    // swr sees a frame (aformat defaults); the port's CLI
+                    // path normalizes UNSPEC decoder layouts the same way
+                    // (av_channel_layout_compare treats unspec-vs-native
+                    // as CHANGED, swresample_frame.c:79-81 + chl.c:820).
+                    if frame.ch_layout.order
+                        == crate::util::channel_layout::Order::Unspecified
+                    {
+                        frame.ch_layout =
+                            crate::util::channel_layout::ChannelLayout::default_for(
+                                frame.ch_layout.nb_channels,
+                            );
+                    }
+                    push_frame(&mut swr, &mut encoder, &frame, &mut octx, &mut stats)?;
+                }
                 Err(Error::Again) => break,
                 Err(Error::Eof) => {
                     // Drain the resampler's delay (swr_convert with NULL in).
@@ -792,6 +818,9 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
                                 break;
                             }
                             out.nb_samples = n;
+                            out.pts = out_pts;
+                            out.duration = n as i64;
+                            out_pts += n as i64;
                             encoder.send_frame(Some(&out))?;
                             loop {
                                 match encoder.receive_packet() {
