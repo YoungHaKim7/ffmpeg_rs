@@ -310,15 +310,17 @@ pub fn parse(args: &[String]) -> Result<Cli> {
             }
             "-ar" => {
                 let v = next(arg)?;
-                cli.output_sample_rate = Some(v.trim().parse().map_err(|_| {
-                    Error::InvalidArgument(format!("Invalid sample rate: {v}"))
-                })?);
+                cli.output_sample_rate =
+                    Some(v.trim().parse().map_err(|_| {
+                        Error::InvalidArgument(format!("Invalid sample rate: {v}"))
+                    })?);
             }
             "-ac" => {
                 let v = next(arg)?;
-                let n: usize = v.trim().parse().map_err(|_| {
-                    Error::InvalidArgument(format!("Invalid channel count: {v}"))
-                })?;
+                let n: usize = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| Error::InvalidArgument(format!("Invalid channel count: {v}")))?;
                 if n == 0 || n > crate::swresample::SWR_CH_MAX {
                     return Err(Error::InvalidArgument(format!(
                         "Invalid channel count: {n} (1..={})",

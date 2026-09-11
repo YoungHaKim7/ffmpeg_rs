@@ -419,8 +419,7 @@ impl AudioEncoder for PcmEncoder {
             CodecId::PcmS24le | CodecId::PcmS24be => {
                 let mut out = Vec::with_capacity(n * 3);
                 for chunk in src.chunks_exact(4) {
-                    let v = (i32::from_le_bytes(chunk.try_into().unwrap()) >> 8) as u32
-                        & 0xFF_FFFF;
+                    let v = (i32::from_le_bytes(chunk.try_into().unwrap()) >> 8) as u32 & 0xFF_FFFF;
                     let b = v.to_le_bytes(); // [lo, mid, hi]
                     if codec_id == CodecId::PcmS24le {
                         out.extend_from_slice(&b[..3]);
@@ -773,7 +772,10 @@ mod tests {
         let f = frame(SampleFormat::S16, &bytes, 2, 1);
         assert_eq!(enc_one(CodecId::PcmS16le, &f).as_slice(), &bytes);
 
-        let bytes: Vec<u8> = [1.5f32, -2.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes: Vec<u8> = [1.5f32, -2.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         let f = frame(SampleFormat::Flt, &bytes, 2, 1);
         assert_eq!(enc_one(CodecId::PcmF32le, &f).as_slice(), &bytes[..]);
 
@@ -782,7 +784,10 @@ mod tests {
         assert_eq!(enc_one(CodecId::PcmF64le, &f).as_slice(), &bytes[..]);
 
         let f = frame(SampleFormat::U8, &[0x80, 0x7F, 0x00, 0xFF], 2, 2);
-        assert_eq!(enc_one(CodecId::PcmU8, &f).as_slice(), &[0x80, 0x7F, 0x00, 0xFF]);
+        assert_eq!(
+            enc_one(CodecId::PcmU8, &f).as_slice(),
+            &[0x80, 0x7F, 0x00, 0xFF]
+        );
     }
 
     #[test]
@@ -794,13 +799,13 @@ mod tests {
             &[0x02, 0x01, 0x04, 0x03]
         );
         let f = frame(SampleFormat::S32, &[1, 2, 3, 4], 1, 1);
-        assert_eq!(
-            enc_one(CodecId::PcmS32be, &f).as_slice(),
-            &[4, 3, 2, 1]
-        );
+        assert_eq!(enc_one(CodecId::PcmS32be, &f).as_slice(), &[4, 3, 2, 1]);
         let f = frame(
             SampleFormat::Flt,
-            &[1.0f32].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+            &[1.0f32]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>(),
             1,
             1,
         );
@@ -849,8 +854,7 @@ mod tests {
     fn encoder_reads_only_unpadded_samples() {
         // AudioFrame::alloc pads linesize to a 32-sample multiple; the
         // encoder must encode exactly nb_samples (C's n-loop, pcm.c:110).
-        let mut f = AudioFrame::alloc(SampleFormat::S16, ChannelLayout::unspecified(1), 3)
-            .unwrap();
+        let mut f = AudioFrame::alloc(SampleFormat::S16, ChannelLayout::unspecified(1), 3).unwrap();
         assert_eq!(f.plane(0).len(), 64); // 32 samples of padding
         f.plane_mut(0)[..6].copy_from_slice(&[0x01, 0x00, 0x02, 0x00, 0x03, 0x00]);
         let pkt = enc_one(CodecId::PcmS16le, &f);
@@ -945,7 +949,11 @@ mod tests {
         // (s24 narrows then re-widens with the same << 8 the decoder test
         // pins — identity for 24-bit-representable inputs).
         let cases: Vec<(CodecId, SampleFormat, Vec<i64>)> = vec![
-            (CodecId::PcmU8, SampleFormat::U8, vec![0x80, 0x00, 0xFF, 0x7F]),
+            (
+                CodecId::PcmU8,
+                SampleFormat::U8,
+                vec![0x80, 0x00, 0xFF, 0x7F],
+            ),
             (
                 CodecId::PcmS16le,
                 SampleFormat::S16,
@@ -970,7 +978,11 @@ mod tests {
                 SampleFormat::S32,
                 vec![i32::MIN as i64, -1, 0, 1, i32::MAX as i64],
             ),
-            (CodecId::PcmS32be, SampleFormat::S32, vec![i32::MIN as i64, i32::MAX as i64]),
+            (
+                CodecId::PcmS32be,
+                SampleFormat::S32,
+                vec![i32::MIN as i64, i32::MAX as i64],
+            ),
             (CodecId::PcmF32le, SampleFormat::Flt, vec![1, 0, 1]), // bytewise below
             (CodecId::PcmF64le, SampleFormat::Dbl, vec![1]),
             (CodecId::PcmF32be, SampleFormat::Flt, vec![1]),
@@ -992,9 +1004,11 @@ mod tests {
                     .iter()
                     .flat_map(|&v| (v as i32).to_le_bytes())
                     .collect(),
-                SampleFormat::Flt => {
-                    le_f32(1.0).into_iter().chain(le_f32(-0.5)).chain(le_f32(1.0)).collect()
-                }
+                SampleFormat::Flt => le_f32(1.0)
+                    .into_iter()
+                    .chain(le_f32(-0.5))
+                    .chain(le_f32(1.0))
+                    .collect(),
                 SampleFormat::Dbl => le_f64(-0.25),
                 _ => unreachable!(),
             };
