@@ -1069,6 +1069,21 @@ pub enum Order {
     Native,
 }
 
+/// Outcome of the channel-list parse (`parse_channel_list`, c:266-311).
+enum ListParse {
+    /// A valid strictly-increasing positional list → native layout.
+    Ok(ChannelLayout),
+    /// C would build an `AV_CHANNEL_ORDER_CUSTOM`/ambisonic layout here;
+    /// not ported.
+    Unsupported(String),
+    /// The branch failed the way C's `EINVAL` does (c:290-292, 300-301) —
+    /// caller falls through to the mask/number branches (c:401-402).
+    NoMatch,
+    /// Terminal EINVAL (c:406): the wrapped count mismatches the list —
+    /// C returns AVERROR(EINVAL) without falling through.
+    Invalid(String),
+}
+
 /// `AV_CH_FOO` (`channel_layout.h:175-210`) for the positional channels.
 const fn bit(c: Channel) -> u64 {
     1u64 << (c as i32)
@@ -1087,21 +1102,6 @@ const fn native(nb_channels: usize, mask: u64) -> ChannelLayout {
 /// standard layouts, in `channel_layout_map` order.
 pub fn standard() -> &'static [ChannelLayout] {
     STANDARD_LAYOUTS
-}
-
-/// Outcome of the channel-list parse (`parse_channel_list`, c:266-311).
-enum ListParse {
-    /// A valid strictly-increasing positional list → native layout.
-    Ok(ChannelLayout),
-    /// C would build an `AV_CHANNEL_ORDER_CUSTOM`/ambisonic layout here;
-    /// not ported.
-    Unsupported(String),
-    /// The branch failed the way C's `EINVAL` does (c:290-292, 300-301) —
-    /// caller falls through to the mask/number branches (c:401-402).
-    NoMatch,
-    /// Terminal EINVAL (c:406): the wrapped count mismatches the list —
-    /// C returns AVERROR(EINVAL) without falling through.
-    Invalid(String),
 }
 
 /// `parse_channel_list` + the `"N channels (…)"` wrapper handling of
