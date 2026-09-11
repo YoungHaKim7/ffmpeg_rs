@@ -75,6 +75,7 @@ deliberately skipped C paths with the guard that makes them unreachable.
 
 ## Roadmap
 
+```bash
 1. ✅ Phase 1 — CPU pipeline
 2. ✅ Phase 2 — Vulkan swscale: headless compute (`vulkano`), port of
    `vf_scale_vulkan.c`'s shape + the `libswscale` kernels,
@@ -85,11 +86,18 @@ deliberately skipped C paths with the guard that makes them unreachable.
    via `-scale_algo` with filter-width widening on downscale, CPU fallback
    for algorithms the Vulkan engine cannot run
 4. ✅ Phase 3b — filtergraph (`libavfilter`: buffersrc/sink, `scale`/`format`)
-5. Phase 4 — `swresample` + audio paths
-  - ◼ Phase 4a: audio foundations + swresample core (spec→implement→integrate)
-  - ◻ Phase 4b: WAV container + PCM codec + CLI + goldens
+5. ✅ Phase 4 — `swresample` + audio paths
+   ✅ ◼ Phase 4a: audio foundations + swresample core (spec→implement→integrate)
+   ✅ ◼ Phase 4b: WAV container + PCM codec + CLI + goldens
 6. Phase 5 — NUT container, more filters
-7. Stretch — winit player window on the Vulkan pipeline
+
+7. Add SIMD
+
+8. Find more C code that hasn’t been implemented
+
+# I’m totally going to do Winit later, so for now, put it on hold
+put it on hold Stretch — winit player window on the Vulkan pipeline
+```
 
 ## Tests
 
