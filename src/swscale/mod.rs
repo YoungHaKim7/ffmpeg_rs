@@ -91,28 +91,6 @@ pub enum ConversionMode {
     Gray8ToGray8,
 }
 
-/// Can `ScaleContext` consume `fmt` as a SOURCE? Pure export of the
-/// `ConversionMode` gates in `ScaleContext::new` (mod.rs:284-298) — the
-/// input side of the conversion matrix, for the filtergraph's format
-/// negotiation (`vf_scale` query_formats builds its one-sided input list
-/// from this).
-///
-/// NOTE the deliberately narrower-than-C subset (C's `sws_isSupportedInput`
-/// accepts ~every YUV/RGB/gray format): C422/C444/10-bit inputs fail
-/// conversion graphs exactly like today's `-pix_fmt` path does; `-vf null`
-/// still passes them through untouched.
-pub fn supported_input(fmt: PixelFormat) -> bool {
-    matches!(fmt, PixelFormat::Yuv420p | PixelFormat::Gray8)
-}
-
-/// Can `ScaleContext` produce `fmt` as a DESTINATION? The output side of the
-/// same matrix: same-format resampling for the two supported planar inputs,
-/// plus every packed-RGB output. See [`supported_input`] for the
-/// narrower-than-C caveat.
-pub fn supported_output(fmt: PixelFormat) -> bool {
-    matches!(fmt, PixelFormat::Yuv420p | PixelFormat::Gray8) || RGB_OUTPUTS.contains(&fmt)
-}
-
 /// Which kernel resamples with (`SWS_*` flags subset).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScaleAlgorithm {
@@ -836,6 +814,28 @@ pub(crate) fn rgb_offsets(fmt: PixelFormat) -> (usize, usize, usize) {
         d.comp[1].offset as usize,
         d.comp[2].offset as usize,
     )
+}
+
+/// Can `ScaleContext` consume `fmt` as a SOURCE? Pure export of the
+/// `ConversionMode` gates in `ScaleContext::new` (mod.rs:284-298) — the
+/// input side of the conversion matrix, for the filtergraph's format
+/// negotiation (`vf_scale` query_formats builds its one-sided input list
+/// from this).
+///
+/// NOTE the deliberately narrower-than-C subset (C's `sws_isSupportedInput`
+/// accepts ~every YUV/RGB/gray format): C422/C444/10-bit inputs fail
+/// conversion graphs exactly like today's `-pix_fmt` path does; `-vf null`
+/// still passes them through untouched.
+pub fn supported_input(fmt: PixelFormat) -> bool {
+    matches!(fmt, PixelFormat::Yuv420p | PixelFormat::Gray8)
+}
+
+/// Can `ScaleContext` produce `fmt` as a DESTINATION? The output side of the
+/// same matrix: same-format resampling for the two supported planar inputs,
+/// plus every packed-RGB output. See [`supported_input`] for the
+/// narrower-than-C caveat.
+pub fn supported_output(fmt: PixelFormat) -> bool {
+    matches!(fmt, PixelFormat::Yuv420p | PixelFormat::Gray8) || RGB_OUTPUTS.contains(&fmt)
 }
 
 #[cfg(test)]
