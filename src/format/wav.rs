@@ -177,14 +177,14 @@ fn rl32(io: &mut IoContext) -> Result<u32> {
 /// answer. All other C rows (ADPCM, MP3, WMA, …) map to `CodecId::None`,
 /// exactly C's `AV_CODEC_ID_NONE` for unknown tags.
 const WAV_CODEC_TAGS: &[(CodecId, u32)] = &[
-    (CodecId::PcmS16le, 0x0001),  // riff.c:526
-    (CodecId::PcmU8, 0x0001),     // riff.c:528 — muxer-only row
-    (CodecId::PcmS24le, 0x0001),  // riff.c:529 — muxer-only row
-    (CodecId::PcmS32le, 0x0001),  // riff.c:530 — muxer-only row
-    (CodecId::PcmF32le, 0x0003),  // riff.c:533
-    (CodecId::PcmF64le, 0x0003),  // riff.c:535 — muxer-only row
-    (CodecId::PcmAlaw, 0x0006),   // riff.c:536
-    (CodecId::PcmMulaw, 0x0007),  // riff.c:537
+    (CodecId::PcmS16le, 0x0001), // riff.c:526
+    (CodecId::PcmU8, 0x0001),    // riff.c:528 — muxer-only row
+    (CodecId::PcmS24le, 0x0001), // riff.c:529 — muxer-only row
+    (CodecId::PcmS32le, 0x0001), // riff.c:530 — muxer-only row
+    (CodecId::PcmF32le, 0x0003), // riff.c:533
+    (CodecId::PcmF64le, 0x0003), // riff.c:535 — muxer-only row
+    (CodecId::PcmAlaw, 0x0006),  // riff.c:536
+    (CodecId::PcmMulaw, 0x0007), // riff.c:537
     // ('u' << 8) | 'l' — the "rogue" mu-law tag (riff.c:602).
     (CodecId::PcmMulaw, 0x6c75),
 ];
@@ -196,7 +196,10 @@ const WAV_CODEC_TAGS: &[(CodecId, u32)] = &[
 /// its `!par->codec_tag` gate (`riffenc.c:65-66`) and `wav_write_header`
 /// bails with `ENOSYS` (`wavenc.c:333-337`).
 pub fn wav_codec_get_tag(id: CodecId) -> Option<u32> {
-    WAV_CODEC_TAGS.iter().find(|&&(i, _)| i == id).map(|&(_, t)| t)
+    WAV_CODEC_TAGS
+        .iter()
+        .find(|&&(i, _)| i == id)
+        .map(|&(_, t)| t)
 }
 
 /// `ff_get_pcm_codec_id` (`libavformat/utils.c:154-198`) — LE arms only
@@ -827,7 +830,14 @@ fn put_wav_header(io: &mut IoContext, par: &CodecParameters, tag: u32) -> Result
         || (bps > 16 && tag != 0x0003);
 
     // wFormatTag (riffenc.c:86-89).
-    wl16(io, if waveformatextensible { 0xfffe } else { tag as u16 })?;
+    wl16(
+        io,
+        if waveformatextensible {
+            0xfffe
+        } else {
+            tag as u16
+        },
+    )?;
     wl16(io, channels as u16)?; // riffenc.c:91
     wl32(io, par.sample_rate as u32)?; // riffenc.c:92
 
@@ -1007,7 +1017,12 @@ impl Muxer for WavMuxer {
     /// `wav_write_packet` (`wavenc.c:382-420`), peak paths out: payload
     /// passthrough plus the pts bookkeeping the fact chunk needs
     /// (`wavenc.c:413-418`).
-    fn write_packet(&mut self, io: &mut IoContext, _streams: &[Stream], pkt: &Packet) -> Result<()> {
+    fn write_packet(
+        &mut self,
+        io: &mut IoContext,
+        _streams: &[Stream],
+        pkt: &Packet,
+    ) -> Result<()> {
         io.write_all(pkt.as_slice())?;
         if pkt.pts != NOPTS {
             self.minpts = self.minpts.min(pkt.pts);
@@ -1053,7 +1068,9 @@ impl Muxer for WavMuxer {
         //              (AVRational){1, sample_rate}).
         if self.codec_tag != 0x01 {
             let number_of_samples = rescale_q(
-                self.maxpts.wrapping_sub(self.minpts).wrapping_add(self.last_duration),
+                self.maxpts
+                    .wrapping_sub(self.minpts)
+                    .wrapping_add(self.last_duration),
                 st.time_base,
                 Rational::new(1, st.codecpar.sample_rate.max(1)),
             );
@@ -1064,7 +1081,6 @@ impl Muxer for WavMuxer {
         Ok(())
     }
 }
-
 
 /// score `AVPROBE_SCORE_MAX - 1` (kept below MAX so the ACT demuxer can
 /// still win — see the C comment at wavdec.c:168-171). The RF64/BW64 arm
@@ -1083,12 +1099,11 @@ pub fn probe(buf: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::pcm::PcmDecoder;
-    use crate::codec::traits::AudioDecoder;
-    use crate::format::demux::DemuxOptions;
-    use crate::format::testutil::MemHandler;
-    use crate::util::channel_layout::Order;
-    use crate::util::samplefmt::SampleFormat;
+    use crate::{
+        codec::{pcm::PcmDecoder, traits::AudioDecoder},
+        format::{demux::DemuxOptions, testutil::MemHandler},
+        util::{channel_layout::Order, samplefmt::SampleFormat},
+    };
 
     // ---- fixture builders ----
 
