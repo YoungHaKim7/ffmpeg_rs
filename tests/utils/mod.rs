@@ -1,3 +1,4 @@
+mod channel_layout;
 mod error;
 mod frame;
 mod imgutils;
