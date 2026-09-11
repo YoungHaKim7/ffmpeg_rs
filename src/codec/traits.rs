@@ -71,3 +71,22 @@ pub trait Encoder {
     /// `avcodec_receive_packet` — same handshake as the decoder's frames.
     fn receive_packet(&mut self) -> Result<Packet>;
 }
+
+/// Audio encoder interface — the [`Encoder`] handshake with
+/// [`AudioFrame`] input (`FFCodec` with `FF_CODEC_ENCODE_CB`,
+/// `p.type == AVMEDIA_TYPE_AUDIO`). Mirrors [`AudioDecoder`].
+pub trait AudioEncoder {
+    /// `avcodec_open2` — configure output parameters.
+    fn init(&mut self, params: &CodecParameters) -> Result<()>;
+
+    /// `avcodec_send_frame` — queue one frame; `None` flushes
+    /// (C: `avcodec_send_frame(avctx, NULL)`).
+    fn send_frame(&mut self, frame: Option<&AudioFrame>) -> Result<()>;
+
+    /// `avcodec_receive_packet` — pull the next coded packet.
+    ///
+    /// * `Ok(packet)` — a packet is ready
+    /// * `Err(Error::Again)` — needs more input first
+    /// * `Err(Error::Eof)` — flush requested and all packets were emitted
+    fn receive_packet(&mut self) -> Result<Packet>;
+}

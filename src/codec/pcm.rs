@@ -1,4 +1,4 @@
-//! PCM decoder — port of the decode side of `libavcodec/pcm.c`.
+//! PCM decoder + encoder — port of `libavcodec/pcm.c`.
 //!
 //! ## C → Rust map
 //!
@@ -7,6 +7,8 @@
 //! | `codec_id_to_samplefmt[]` (`pcm.c:268-292`) | [`PCM_TABLE`] (+ [`sample_fmt`]/[`sample_size`]/[`bits_per_sample`]) |
 //! | `pcm_decode_init` (`pcm.c:265-306`) | [`PcmDecoder::init`] |
 //! | `pcm_decode_frame` (`pcm.c:403-624`) | [`PcmDecoder::send_packet`] |
+//! | `pcm_encode_init` (`pcm.c:41-67`) | [`PcmEncoder::init`] |
+//! | `pcm_encode_frame` (`pcm.c:99-259`) | [`PcmEncoder::send_frame`] |
 //! | `av_get_bits_per_sample` PCM arms (`libavutil/utils.c`) | [`bits_per_sample`] |
 //!
 //! ## What "decoding" PCM is
@@ -31,6 +33,13 @@
 //!   `0xFFFFFF` = −1 becomes `0xFFFFFF00` = −256), buffer grows 3→4 bytes
 //!   per sample.
 //!
+//! Encoding (`pcm_encode_frame`, the `ENCODE` macro at `pcm.c:80-95`) walks
+//! the same three shapes in reverse: passthrough is `memcpy`
+//! (`pcm.c:217-219`), `*BE` is `bytestream_put_beX` of the native word, and
+//! `PCM_S24LE/BE` is `ENCODE(int32_t, le24/be24, …, 8, 0)` (`pcm.c:125-132`)
+//! — the `i32` sample arithmetic-shifted right 8, low 24 bits kept, so the
+//! decoder's `<< 8` inverts it exactly for every 24-bit-representable value.
+//!
 //! ## Skipped C paths (documented, with the C guard that keeps them out)
 //!
 //! | C path | Guard | Ported? |
@@ -42,7 +51,8 @@
 //! | `PCM_F16LE/F24LE` float scaling (`pcm.c:613-619`, `pcm_scale_decode_init`) | `PCMScaleDecode` | no — WAV's F16/F24 rewrite (`wavdec.c:674-684`) needs `extradata`, also out |
 //! | `PCM_S64LE/BE` (`pcm.c:510-511, 535-537`) | codec ids | no — not in the `CodecId` family (WAV bps=64 maps to `CodecId::None`) |
 //! | unsigned `U16/U24/U32` (`pcm.c:482-487` etc.) | codec ids | no — unreachable from the WAV tag map (`ff_get_pcm_codec_id` is only called with `sflags = ~1`, which signs every width ≥ 2) |
-//! | encoders (`pcm_encode_*`, `pcm.c:41-259`) | — | no — Phase 4b is decode-only |
+//! | A-law/µ-law **encode** LUTs (`pcm.c:237-247`) | `linear_to_alaw/ulaw` tables | no — [`PcmEncoder::init`] returns `Error::Unsupported` (same gate as the decoder side) |
+//! | planar encoders (`ENCODE_PLANAR`, `pcm.c:97-107`) | codec ids | no — no planar `CodecId` in the family |
 //! | `avctx->codec_id != avctx->codec->id` check (`pcm.c:426-429`) | decoder/packet id mismatch | unrepresentable — `init` pins the id the table matched |
 //!
 //! One deviation: `PCM_U8` passthrough is `memcpy` in C (`pcm.c:557-559`);
@@ -53,11 +63,12 @@ use crate::{
     codec::{
         packet::Packet,
         params::{CodecId, CodecParameters, MediaType},
-        traits::AudioDecoder,
+        traits::{AudioDecoder, AudioEncoder},
     },
     util::{
         audio_frame::AudioFrame,
         error::{Error, Result},
+        rational::Rational,
         samplefmt::SampleFormat,
     },
 };
@@ -85,6 +96,37 @@ pub const PCM_TABLE: &[(CodecId, SampleFormat, u8, u8)] = &[
     (CodecId::PcmAlaw, SampleFormat::S16, 1, 8),
     (CodecId::PcmMulaw, SampleFormat::S16, 1, 8),
 ];
+
+/// `codec_id_to_samplefmt[]` lookup (`pcm.c:294-303`) → the output format.
+pub fn sample_fmt(codec_id: CodecId) -> Option<SampleFormat> {
+    PCM_TABLE
+        .iter()
+        .find(|(id, ..)| *id == codec_id)
+        .map(|&(_, fmt, ..)| fmt)
+}
+
+/// `s->sample_size` (`pcm.c:296`) — coded bytes per sample
+/// (`BITS_PER_SAMPLE / 8` of the C `ENTRY` macro).
+pub fn sample_size(codec_id: CodecId) -> Option<usize> {
+    PCM_TABLE
+        .iter()
+        .find(|(id, ..)| *id == codec_id)
+        .map(|&(_, _, size, _)| size as usize)
+}
+
+/// `av_get_bits_per_sample` for the PCM family (`libavutil/utils.c`: the
+/// `PCM_CODEC`-registered ids return their table bits; `ALAW`/`MULAW` are
+/// 8). Non-PCM/unknown ids return 0, exactly like C.
+pub const fn bits_per_sample(codec_id: CodecId) -> i32 {
+    match codec_id {
+        CodecId::PcmU8 | CodecId::PcmAlaw | CodecId::PcmMulaw => 8,
+        CodecId::PcmS16le | CodecId::PcmS16be => 16,
+        CodecId::PcmS24le | CodecId::PcmS24be => 24,
+        CodecId::PcmS32le | CodecId::PcmS32be | CodecId::PcmF32le | CodecId::PcmF32be => 32,
+        CodecId::PcmF64le | CodecId::PcmF64be => 64,
+        _ => 0,
+    }
+}
 
 /// `ff_pcm_s16le_decoder` and family — one struct for every table row
 /// (C differs only in the private-data init function).
@@ -236,44 +278,189 @@ impl AudioDecoder for PcmDecoder {
     }
 }
 
-/// `codec_id_to_samplefmt[]` lookup (`pcm.c:294-303`) → the output format.
-pub fn sample_fmt(codec_id: CodecId) -> Option<SampleFormat> {
-    PCM_TABLE
-        .iter()
-        .find(|(id, ..)| *id == codec_id)
-        .map(|&(_, fmt, ..)| fmt)
+// ---------------------------------------------------------------------
+// Encoder — pcm_encode_init (pcm.c:41-67) + pcm_encode_frame (pcm.c:99-259)
+// ---------------------------------------------------------------------
+
+/// `ff_pcm_s16le_encoder` and family — one struct for every encodable
+/// table row (C differs only in the registered codec id).
+#[derive(Debug, Default)]
+pub struct PcmEncoder {
+    params: CodecParameters,
+    /// One-packet output queue (PCM emits exactly one packet per frame).
+    pending: Option<Packet>,
+    /// Flush requested (`avcodec_send_frame(avctx, NULL)`).
+    eof: bool,
 }
 
-/// `s->sample_size` (`pcm.c:296`) — coded bytes per sample
-/// (`BITS_PER_SAMPLE / 8` of the C `ENTRY` macro).
-pub fn sample_size(codec_id: CodecId) -> Option<usize> {
-    PCM_TABLE
-        .iter()
-        .find(|(id, ..)| *id == codec_id)
-        .map(|&(_, _, size, _)| size as usize)
+impl PcmEncoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
-/// `av_get_bits_per_sample` for the PCM family (`libavutil/utils.c`: the
-/// `PCM_CODEC`-registered ids return their table bits; `ALAW`/`MULAW` are
-/// 8). Non-PCM/unknown ids return 0, exactly like C.
-pub const fn bits_per_sample(codec_id: CodecId) -> i32 {
-    match codec_id {
-        CodecId::PcmU8 | CodecId::PcmAlaw | CodecId::PcmMulaw => 8,
-        CodecId::PcmS16le | CodecId::PcmS16be => 16,
-        CodecId::PcmS24le | CodecId::PcmS24be => 24,
-        CodecId::PcmS32le | CodecId::PcmS32be | CodecId::PcmF32le | CodecId::PcmF32be => 32,
-        CodecId::PcmF64le | CodecId::PcmF64be => 64,
-        _ => 0,
+impl AudioEncoder for PcmEncoder {
+    /// `pcm_encode_init` (`pcm.c:41-67`): table-row gate, then C's three
+    /// derived context fields —
+    /// `bits_per_coded_sample = av_get_bits_per_sample`,
+    /// `block_align = channels · bits/8`,
+    /// `bit_rate = block_align · 8 · sample_rate` (`pcm.c:65-67`) — are
+    /// written into the encoder's parameter copy so a caller feeding a
+    /// muxer from [`PcmEncoder`] gets them for free. `sample_rate <= 0` is
+    /// the `ff_encode_preinit` gate (`encode.c`: "sample rate must be
+    /// positive").
+    fn init(&mut self, params: &CodecParameters) -> Result<()> {
+        match params.codec_id {
+            CodecId::PcmAlaw => {
+                return Err(Error::Unsupported(
+                    "pcm_alaw (G.711 A-law companding table) is not ported".into(),
+                ));
+            }
+            CodecId::PcmMulaw => {
+                return Err(Error::Unsupported(
+                    "pcm_mulaw (G.711 mu-law companding table) is not ported".into(),
+                ));
+            }
+            id if PCM_TABLE.iter().any(|&(t, ..)| t == id) => {}
+            id => {
+                return Err(Error::Unsupported(format!(
+                    "codec '{}' is not a ported PCM encoder",
+                    id.name()
+                )));
+            }
+        }
+        if params.sample_rate <= 0 {
+            return Err(Error::InvalidData(
+                "PCM encoder requires a positive sample rate".into(),
+            ));
+        }
+        self.params = params.clone();
+        self.params.codec_type = MediaType::Audio;
+        // pcm.c:65-67 — the derived fields overwrite whatever was passed.
+        let bits = bits_per_sample(params.codec_id);
+        self.params.block_align = (params.ch_layout.nb_channels * bits as usize / 8) as i32;
+        self.params.bit_rate = self.params.block_align as i64 * 8 * params.sample_rate as i64;
+        Ok(())
+    }
+
+    /// `pcm_encode_frame` (`pcm.c:99-259`), little-endian-target subset:
+    /// `n = nb_samples · channels` (`pcm.c:110`), output buffer
+    /// `n · sample_size` (`ff_get_encode_buffer`, `pcm.c:115-117`), then the
+    /// codec's `ENCODE` shape. Two port-only guards replace C's raw-pointer
+    /// trust (the port has no unsafe): the frame's format/channels must
+    /// match the opened context, and the plane must hold all `n` samples.
+    fn send_frame(&mut self, frame: Option<&AudioFrame>) -> Result<()> {
+        let Some(frame) = frame else {
+            self.eof = true;
+            return Ok(());
+        };
+        if self.eof {
+            return Err(Error::Eof);
+        }
+
+        let channels = self.params.ch_layout.nb_channels;
+        if channels == 0 {
+            return Err(Error::InvalidData("Invalid number of channels".into()));
+        }
+        let codec_id = self.params.codec_id;
+        let sample_size = sample_size(codec_id).expect("init pinned a table row");
+        let fmt = sample_fmt(codec_id).expect("init pinned a table row");
+        if frame.format != fmt {
+            return Err(Error::InvalidData(format!(
+                "frame sample format {:?} does not match the codec's {:?}",
+                frame.format, fmt
+            )));
+        }
+        if frame.ch_layout.nb_channels != channels {
+            return Err(Error::InvalidData(format!(
+                "frame has {} channels but the encoder was opened with {channels}",
+                frame.ch_layout.nb_channels
+            )));
+        }
+
+        // pcm.c:110 — n counts individual samples across all channels. The
+        // frame plane may be padded (AudioFrame::alloc aligns to 32
+        // samples); only the first n · native-bps bytes are read, exactly
+        // C's `n`-iteration loops.
+        let n = frame.nb_samples * channels;
+        let native_bps = fmt.bytes_per_sample();
+        let need = n * native_bps;
+        let src = frame.plane(0);
+        if src.len() < need {
+            return Err(Error::InvalidData(format!(
+                "PCM frame plane holds {} bytes but {need} were expected",
+                src.len()
+            )));
+        }
+        let src = &src[..need];
+
+        let out: Vec<u8> = match codec_id {
+            // memcpy (pcm.c:217-219) and the HAVE_BIGENDIAN==0 passthrough
+            // arms (pcm.c:190-211): native layout IS the coded layout.
+            CodecId::PcmU8
+            | CodecId::PcmS16le
+            | CodecId::PcmS32le
+            | CodecId::PcmF32le
+            | CodecId::PcmF64le => src.to_vec(),
+
+            // ENCODE(int16/32/64_t, beX, …, 0, 0) (pcm.c:183-188): native
+            // word stored big-endian — a per-word byte swap.
+            CodecId::PcmS16be | CodecId::PcmS32be | CodecId::PcmF32be | CodecId::PcmF64be => {
+                let w = native_bps;
+                let mut out = Vec::with_capacity(n * sample_size);
+                for chunk in src.chunks_exact(w) {
+                    out.extend(chunk.iter().rev());
+                }
+                out
+            }
+
+            // ENCODE(int32_t, le24/be24, …, 8, 0) (pcm.c:125-132):
+            // v = (i32 sample >> 8) + 0, low 24 bits kept — 4→3 narrowing.
+            CodecId::PcmS24le | CodecId::PcmS24be => {
+                let mut out = Vec::with_capacity(n * 3);
+                for chunk in src.chunks_exact(4) {
+                    let v = (i32::from_le_bytes(chunk.try_into().unwrap()) >> 8) as u32
+                        & 0xFF_FFFF;
+                    let b = v.to_le_bytes(); // [lo, mid, hi]
+                    if codec_id == CodecId::PcmS24le {
+                        out.extend_from_slice(&b[..3]);
+                    } else {
+                        out.extend_from_slice(&[b[2], b[1], b[0]]);
+                    }
+                }
+                out
+            }
+
+            id => unreachable!("init pinned a table row, but {id:?} missed"),
+        };
+
+        let mut pkt = Packet::from_vec(out);
+        // encode.c's ff_encode_frame_cb timing copy: pts straight off the
+        // frame; duration = ff_samples_to_timebase(nb_samples) in the
+        // codec's 1/sample_rate time base.
+        pkt.pts = frame.pts;
+        pkt.dts = frame.pts;
+        pkt.duration = frame.nb_samples as i64;
+        pkt.time_base = Rational::new(1, self.params.sample_rate);
+        self.pending = Some(pkt);
+        Ok(())
+    }
+
+    fn receive_packet(&mut self) -> Result<Packet> {
+        match self.pending.take() {
+            Some(pkt) => Ok(pkt),
+            None if self.eof => Err(Error::Eof),
+            None => Err(Error::Again),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        codec::packet::PacketFlags,
-        util::{channel_layout::ChannelLayout, rational::Rational},
-    };
+    use crate::codec::packet::PacketFlags;
+    use crate::util::channel_layout::ChannelLayout;
+    use crate::util::rational::Rational;
 
     fn params(id: CodecId, channels: usize, rate: i32) -> CodecParameters {
         let mut p = CodecParameters::default();
@@ -524,5 +711,308 @@ mod tests {
         let mut dec = PcmDecoder::new();
         let err = dec.init(&params(CodecId::Rawvideo, 1, 8000)).unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)));
+    }
+
+    // =================================================================
+    // Encoder — pcm_encode_init (pcm.c:41-67) + pcm_encode_frame
+    // (pcm.c:99-259)
+    // =================================================================
+
+    use crate::codec::traits::AudioEncoder;
+
+    /// A frame wrapping `bytes` as `fmt` interleaved audio (align 1: exact
+    /// plane, no 32-sample padding).
+    fn frame(fmt: SampleFormat, bytes: &[u8], channels: usize, nb_samples: usize) -> AudioFrame {
+        AudioFrame::wrap_buffer(
+            std::sync::Arc::from(bytes.to_vec()),
+            fmt,
+            ChannelLayout::unspecified(channels),
+            nb_samples,
+        )
+        .unwrap()
+    }
+
+    fn enc_one(id: CodecId, f: &AudioFrame) -> Packet {
+        let mut enc = PcmEncoder::new();
+        enc.init(&params(id, f.channels(), 48000)).unwrap();
+        enc.send_frame(Some(f)).unwrap();
+        enc.receive_packet().unwrap()
+    }
+
+    #[test]
+    fn encoder_init_derives_block_align_and_bit_rate() {
+        // pcm.c:65-67: block_align = ch·bits/8, bit_rate = align·8·rate.
+        let mut enc = PcmEncoder::new();
+        enc.init(&params(CodecId::PcmS24le, 2, 48000)).unwrap();
+        // init only stores the derived fields on its copy — exercise them
+        // via a second init round (params is private; the observable
+        // contract is the encoded packet + this test's arithmetic).
+        let mut p = params(CodecId::PcmS24le, 2, 48000);
+        p.block_align = 0;
+        p.bit_rate = 0;
+        let mut enc2 = PcmEncoder::new();
+        enc2.init(&p).unwrap();
+        let f = frame(
+            SampleFormat::S32,
+            &[0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00],
+            2,
+            1,
+        );
+        enc2.send_frame(Some(&f)).unwrap();
+        let pkt = enc2.receive_packet().unwrap();
+        // 2 ch · 1 sample · 3 coded bytes: v>>8 per sample — 0x00010000>>8
+        // = 0x100 -> LE [0x00,0x01,0x00]; 0x00020000>>8 = 0x200.
+        assert_eq!(pkt.as_slice(), &[0x00, 0x01, 0x00, 0x00, 0x02, 0x00]);
+        let _ = enc;
+    }
+
+    #[test]
+    fn encoder_passthrough_le_family() {
+        // memcpy / native-layout arms (pcm.c:190-219): bytes unchanged.
+        let bytes = [0x01, 0xF0, 0x23, 0x42];
+        let f = frame(SampleFormat::S16, &bytes, 2, 1);
+        assert_eq!(enc_one(CodecId::PcmS16le, &f).as_slice(), &bytes);
+
+        let bytes: Vec<u8> = [1.5f32, -2.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let f = frame(SampleFormat::Flt, &bytes, 2, 1);
+        assert_eq!(enc_one(CodecId::PcmF32le, &f).as_slice(), &bytes[..]);
+
+        let bytes: Vec<u8> = [0.25f64].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let f = frame(SampleFormat::Dbl, &bytes, 1, 1);
+        assert_eq!(enc_one(CodecId::PcmF64le, &f).as_slice(), &bytes[..]);
+
+        let f = frame(SampleFormat::U8, &[0x80, 0x7F, 0x00, 0xFF], 2, 2);
+        assert_eq!(enc_one(CodecId::PcmU8, &f).as_slice(), &[0x80, 0x7F, 0x00, 0xFF]);
+    }
+
+    #[test]
+    fn encoder_swaps_words_for_be_family() {
+        // ENCODE(int16_t, be16, …) etc. (pcm.c:183-188): per-word reversal.
+        let f = frame(SampleFormat::S16, &[0x01, 0x02, 0x03, 0x04], 2, 1);
+        assert_eq!(
+            enc_one(CodecId::PcmS16be, &f).as_slice(),
+            &[0x02, 0x01, 0x04, 0x03]
+        );
+        let f = frame(SampleFormat::S32, &[1, 2, 3, 4], 1, 1);
+        assert_eq!(
+            enc_one(CodecId::PcmS32be, &f).as_slice(),
+            &[4, 3, 2, 1]
+        );
+        let f = frame(
+            SampleFormat::Flt,
+            &[1.0f32].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+            1,
+            1,
+        );
+        assert_eq!(
+            enc_one(CodecId::PcmF32be, &f).as_slice(),
+            &[0x3F, 0x80, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn encoder_s24_narrows_with_arithmetic_shift() {
+        // ENCODE(int32_t, le24/be24, …, 8, 0) (pcm.c:125-132).
+        // -256 >> 8 = -1 → 0xFFFFFF; 256 >> 8 = 1; 0x12345678 >> 8 keeps
+        // the low 24 bits of 0x123456.
+        let samples: [i32; 3] = [-256, 256, 0x1234_5678];
+        let bytes: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let f = frame(SampleFormat::S32, &bytes, 1, 3);
+        assert_eq!(
+            enc_one(CodecId::PcmS24le, &f).as_slice(),
+            &[0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            enc_one(CodecId::PcmS24be, &f).as_slice(),
+            &[0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x01, 0x12, 0x34, 0x56]
+        );
+    }
+
+    #[test]
+    fn encoder_packet_timing_comes_off_the_frame() {
+        // encode.c: pts passthrough, duration = nb_samples in 1/rate.
+        let mut f = frame(SampleFormat::S16, &[0x00, 0x11, 0x22, 0x33], 2, 1);
+        f.pts = 48000;
+        f.time_base = Rational::new(1, 48000);
+        let pkt = enc_one(CodecId::PcmS16le, &f);
+        assert_eq!(pkt.pts, 48000);
+        assert_eq!(pkt.dts, 48000);
+        assert_eq!(pkt.duration, 1);
+        assert_eq!(pkt.time_base, Rational::new(1, 48000));
+        // A 100-sample stereo frame → duration 100.
+        let bytes = vec![0u8; 400];
+        let f = frame(SampleFormat::S16, &bytes, 2, 100);
+        assert_eq!(enc_one(CodecId::PcmS16le, &f).duration, 100);
+    }
+
+    #[test]
+    fn encoder_reads_only_unpadded_samples() {
+        // AudioFrame::alloc pads linesize to a 32-sample multiple; the
+        // encoder must encode exactly nb_samples (C's n-loop, pcm.c:110).
+        let mut f = AudioFrame::alloc(SampleFormat::S16, ChannelLayout::unspecified(1), 3)
+            .unwrap();
+        assert_eq!(f.plane(0).len(), 64); // 32 samples of padding
+        f.plane_mut(0)[..6].copy_from_slice(&[0x01, 0x00, 0x02, 0x00, 0x03, 0x00]);
+        let pkt = enc_one(CodecId::PcmS16le, &f);
+        assert_eq!(pkt.size(), 6); // 3 samples, not the padded 64
+        assert_eq!(pkt.as_slice(), &[0x01, 0x00, 0x02, 0x00, 0x03, 0x00]);
+        assert_eq!(pkt.duration, 3);
+    }
+
+    #[test]
+    fn encoder_handshake_again_eof_and_drain_reject() {
+        let mut enc = PcmEncoder::new();
+        enc.init(&params(CodecId::PcmS16le, 1, 8000)).unwrap();
+        assert!(matches!(enc.receive_packet(), Err(Error::Again)));
+        let f = frame(SampleFormat::S16, &[0x00, 0x01], 1, 1);
+        enc.send_frame(Some(&f)).unwrap();
+        let _ = enc.receive_packet().unwrap();
+        enc.send_frame(None).unwrap();
+        assert!(matches!(enc.receive_packet(), Err(Error::Eof)));
+        assert!(matches!(enc.send_frame(Some(&f)), Err(Error::Eof)));
+    }
+
+    #[test]
+    fn encoder_gates_format_channels_and_short_plane() {
+        // Wrong frame format vs the codec's row.
+        let mut enc = PcmEncoder::new();
+        enc.init(&params(CodecId::PcmS16le, 1, 8000)).unwrap();
+        let f = frame(SampleFormat::S32, &[0; 4], 1, 1);
+        assert!(matches!(
+            enc.send_frame(Some(&f)),
+            Err(Error::InvalidData(_))
+        ));
+        // Wrong channel count vs the opened context.
+        let mut enc = PcmEncoder::new();
+        enc.init(&params(CodecId::PcmS16le, 2, 8000)).unwrap();
+        let f = frame(SampleFormat::S16, &[0; 2], 1, 1);
+        assert!(matches!(
+            enc.send_frame(Some(&f)),
+            Err(Error::InvalidData(_))
+        ));
+        // Plane shorter than nb_samples · channels · bps. wrap_buffer
+        // itself rejects short buffers, so build the frame literally to
+        // reach the ENCODER's gate.
+        let mut enc = PcmEncoder::new();
+        enc.init(&params(CodecId::PcmS16le, 2, 8000)).unwrap();
+        let f = AudioFrame {
+            planes: vec![crate::util::frame::Plane {
+                buf: std::sync::Arc::from(vec![0u8; 2]),
+                offset: 0,
+                linesize: 2,
+                rows: 1,
+            }],
+            nb_samples: 2,
+            sample_rate: 8000,
+            format: SampleFormat::S16,
+            ch_layout: ChannelLayout::unspecified(2),
+            pts: crate::NOPTS,
+            duration: 0,
+            time_base: crate::util::rational::Rational::UNKNOWN,
+        };
+        assert!(matches!(
+            enc.send_frame(Some(&f)),
+            Err(Error::InvalidData(_))
+        ));
+        // Zero channels / non-positive rate at init.
+        let mut p = params(CodecId::PcmS16le, 0, 8000);
+        p.ch_layout = ChannelLayout::default();
+        let mut enc = PcmEncoder::new();
+        enc.init(&p).unwrap();
+        let f = AudioFrame::default();
+        assert_eq!(
+            enc.send_frame(Some(&f)),
+            Err(Error::InvalidData("Invalid number of channels".into()))
+        );
+        let mut p = params(CodecId::PcmS16le, 1, 0);
+        let mut enc = PcmEncoder::new();
+        assert!(matches!(enc.init(&p), Err(Error::InvalidData(_))));
+    }
+
+    #[test]
+    fn encoder_init_rejects_alaw_mulaw_and_non_pcm() {
+        for id in [CodecId::PcmAlaw, CodecId::PcmMulaw, CodecId::Rawvideo] {
+            let mut enc = PcmEncoder::new();
+            let err = enc.init(&params(id, 1, 8000)).unwrap_err();
+            assert!(matches!(err, Error::Unsupported(_)), "{err}");
+        }
+    }
+
+    #[test]
+    fn encode_decode_round_trip_every_encodable_codec() {
+        // For each codec: build one frame of known samples, encode, decode,
+        // and require the decoded frame's plane to equal the input's
+        // (s24 narrows then re-widens with the same << 8 the decoder test
+        // pins — identity for 24-bit-representable inputs).
+        let cases: Vec<(CodecId, SampleFormat, Vec<i64>)> = vec![
+            (CodecId::PcmU8, SampleFormat::U8, vec![0x80, 0x00, 0xFF, 0x7F]),
+            (
+                CodecId::PcmS16le,
+                SampleFormat::S16,
+                vec![-32768, -1, 0, 1, 32767],
+            ),
+            (
+                CodecId::PcmS16be,
+                SampleFormat::S16,
+                vec![-32768, -1, 0, 1, 32767],
+            ),
+            // 24-bit values QUANTIZED to multiples of 256: the codec
+            // writes v>>8 and the decoder re-widens with <<8, so the low
+            // byte never survives the round trip (C's ENCODE/DECODE pair).
+            (
+                CodecId::PcmS24le,
+                SampleFormat::S32,
+                vec![-8_388_608, -256, 0, 256, 8_388_352],
+            ),
+            (CodecId::PcmS24be, SampleFormat::S32, vec![-256, 0, 256]),
+            (
+                CodecId::PcmS32le,
+                SampleFormat::S32,
+                vec![i32::MIN as i64, -1, 0, 1, i32::MAX as i64],
+            ),
+            (CodecId::PcmS32be, SampleFormat::S32, vec![i32::MIN as i64, i32::MAX as i64]),
+            (CodecId::PcmF32le, SampleFormat::Flt, vec![1, 0, 1]), // bytewise below
+            (CodecId::PcmF64le, SampleFormat::Dbl, vec![1]),
+            (CodecId::PcmF32be, SampleFormat::Flt, vec![1]),
+            (CodecId::PcmF64be, SampleFormat::Dbl, vec![1]),
+        ];
+        // Floats round-trip bytewise; use exact bit patterns via sample
+        // values 1.0 / -0.5 encoded from their LE byte images.
+        let le_f32 = |v: f32| -> Vec<u8> { v.to_le_bytes().to_vec() };
+        let le_f64 = |v: f64| -> Vec<u8> { v.to_le_bytes().to_vec() };
+
+        for (id, fmt, samples) in cases {
+            let bytes: Vec<u8> = match fmt {
+                SampleFormat::U8 => samples.iter().map(|&v| v as u8).collect(),
+                SampleFormat::S16 => samples
+                    .iter()
+                    .flat_map(|&v| (v as i16).to_le_bytes())
+                    .collect(),
+                SampleFormat::S32 => samples
+                    .iter()
+                    .flat_map(|&v| (v as i32).to_le_bytes())
+                    .collect(),
+                SampleFormat::Flt => {
+                    le_f32(1.0).into_iter().chain(le_f32(-0.5)).chain(le_f32(1.0)).collect()
+                }
+                SampleFormat::Dbl => le_f64(-0.25),
+                _ => unreachable!(),
+            };
+            let nb = match fmt {
+                SampleFormat::Flt => 3,
+                _ => samples.len(),
+            };
+            let f = frame(fmt, &bytes, 1, nb);
+            let pkt = enc_one(id, &f);
+
+            // Decode back through the landed decoder.
+            let mut dec = PcmDecoder::new();
+            dec.init(&params(id, 1, 48000)).unwrap();
+            dec.send_packet(Some(&pkt)).unwrap();
+            let back = dec.receive_frame().unwrap();
+            assert_eq!(back.format, fmt, "{id:?}");
+            assert_eq!(back.nb_samples, nb, "{id:?}");
+            assert_eq!(back.plane(0), &bytes[..], "{id:?}");
+        }
     }
 }

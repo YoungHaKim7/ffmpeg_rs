@@ -24,6 +24,17 @@ pub static OUTPUT_FORMATS: &[OutputFormat] = &[
         video_codec: CodecId::Rawvideo,
         make: || Box::new(super::rawvideo::RawVideoMuxer),
     },
+    OutputFormat {
+        name: "wav",
+        long_name: "WAV / WAVE (Waveform Audio)",
+        extensions: &["wav"],
+        // C's ff_wav_muxer declares video_codec NONE + audio_codec
+        // PCM_S16LE (wavenc.c:533-534); the registry row has an audio
+        // counterpart only as this None — the stream gate lives in
+        // WavMuxer::init/write_header.
+        video_codec: CodecId::None,
+        make: || Box::new(super::wav::WavMuxer::new()),
+    },
 ];
 
 /// `FFOutputFormat` — one row of the muxer registry.

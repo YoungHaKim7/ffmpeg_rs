@@ -1,7 +1,9 @@
-//! WAV demuxer — port of `libavformat/wavdec.c` (the RIFF/WAVE core) plus
-//! the pieces it leans on: `ff_get_wav_header` (`riffdec.c`), the WAV
-//! codec-tag map (`ff_codec_wav_tags`, `riff.c`) and `ff_get_pcm_codec_id`
-//! (`libavformat/utils.c`).
+//! WAV demuxer + muxer — ports of `libavformat/wavdec.c` (the RIFF/WAVE
+//! read core) and `libavformat/wavenc.c` (the PCM/WAVE write core), plus
+//! the pieces they lean on: `ff_get_wav_header` (`riffdec.c`),
+//! `ff_put_wav_header` (`riffenc.c`), the WAV codec-tag map
+//! (`ff_codec_wav_tags`, `riff.c`, used in both directions) and
+//! `ff_get_pcm_codec_id` (`libavformat/utils.c`).
 //!
 //! ## C → Rust map
 //!
@@ -20,6 +22,13 @@
 //! | `set_max_size` (`wavdec.c:82-88`) | end of `read_header` |
 //! | `ff_pcm_default_packet_size` (`libavformat/pcm.c:29-55`) | [`pcm_default_packet_size`] |
 //! | `wav_read_packet` (`wavdec.c:724-815`) | [`WavDemuxer::read_packet`] |
+//! | `WAVMuxContext` (`wavenc.c:69-91`) | [`WavMuxer`] (RIFF-reachable fields, defaults only) |
+//! | `wav_write_header` (`wavenc.c:302-380`) | [`WavMuxer::write_header`] |
+//! | `wav_write_packet` (`wavenc.c:382-420`) | [`WavMuxer::write_packet`] |
+//! | `wav_write_trailer` (`wavenc.c:422-500`) | [`WavMuxer::write_trailer`] |
+//! | `ff_put_wav_header` (`riffenc.c:54-233`) | [`put_wav_header`] (PCM subset) |
+//! | `ff_start_tag`/`ff_end_tag` (`riffenc.c:31-50`) | [`start_tag`]/[`end_tag`] |
+//! | `ff_codec_get_tag` over `ff_codec_wav_tags` (`riff.c:525-625`) | [`wav_codec_get_tag`] |
 //!
 //! ## The core path, exactly as C walks it
 //!
@@ -32,6 +41,23 @@
 //!   data <u32 size> → data_end bounds
 //! → packets: block-aligned slices of the data chunk, sized by
 //!   ff_pcm_default_packet_size (~1/10 s, power-of-two sample blocks)
+//! ```
+//!
+//! ## The muxer's core path (`wav_write_header`/`wav_write_trailer`)
+//!
+//! ```text
+//! RIFF <u32 -1 placeholder> WAVE
+//!   fmt  <u32 -1> put_wav_header body           ← 16 B PCMWAVEFORMAT,
+//!   │    18 B WAVEFORMATEX (tag ≠ 1 or float),  size patched by end_tag
+//!   │    40 B WAVEFORMATEXTENSIBLE per riffenc.c:79-84
+//!   │      (>2ch native layout | rate > 48000 | bps > 16 with tag ≠ 3)
+//!   fact <u32 4> <u32 0>                         ← only tag ≠ 0x01
+//!   │    (floats, alaw, mulaw; count patched in the trailer)
+//!   data <u32 -1> payload…                       ← passthrough packets
+//! → trailer: end_tag(data) (odd payload gains a pad byte the size
+//!   excludes), RIFF size = file_size − 8 backpatched at offset 4,
+//!   fact sample count = maxpts − minpts + last_duration rescaled
+//!   (wavenc.c:455-469)
 //! ```
 //!
 //! ## Out of scope (documented divergences, all guarded in C)
@@ -51,6 +77,21 @@
 //! | sample-count sanity checks vs `fact`/bit_rate (`wavdec.c:640-660`), F16LE/F24LE/XMA/ADPCM block fix-ups (`wavdec.c:674-691`) | need `fact`/extradata/absent codec ids |
 //! | `wav->unaligned` odd-offset handling (`wavdec.c:67, 134-139, 147-148`) | ID3-prefixed inputs are out; chunks are opened at offset 0, so the even-align adjustment reduces to `next_tag_ofs` (already padded by `size + (size & 1)`) |
 //!
+//! ### Muxer-side omissions (documented divergences, all guarded in C)
+//!
+//! | C path | Guard / reason |
+//! |---|---|
+//! | W64 muxer (`w64_write_header`/`w64_write_trailer`, `wavenc.c:547-643`) | separate container dialect (GUIDs, 8-byte sizes) |
+//! | RF64 (`rf64` AVOption, `wavenc.c:308-328, 340-348, 471-496`) | default `RF64_NEVER` (`wavenc.c:510`); >4 GiB outputs need the ds64 rewrite |
+//! | BWF `bext` chunk (`write_bext` AVOption, `wavenc.c:94-146, 358-359`) | default off; needs a metadata dictionary |
+//! | Peak Envelope chunk (`write_peak` AVOption, `wavenc.c:157-300`) | default off (`PEAK_OFF`) |
+//! | `ff_riff_write_info` LIST/INFO chunk (`riffenc.c:357-377`) | no metadata dictionary in the port; C writes nothing when no valid tag is set (`riff_has_valid_tags`, `riffenc.c:346-355`) — byte-identical for metadata-free output |
+//! | `PCM_S64LE` tag 0x0001 (`riff.c:531`), `*BE` pcm ids | no `ff_codec_wav_tags` row → `wav_codec_get_tag` → `None` → `write_header` fails (C: `ff_put_wav_header` −1, `wavenc.c:333-337` `ENOSYS`) |
+//! | MP2/MP3/AC3/AAC/G723/ATRAC3/GSM/ADPCM `blkalign`/`bytespersec` arms and extradata writing (`riffenc.c:93-99, 115-124, 129-148, 152-186`) | codec ids not in the `CodecId` family; PCM reaches only the generic arms (`riffenc.c:125-128, 129-135`) |
+//! | EAC3/DFPWM extensible GUIDs (`riffenc.c:83, 199-201`), HEAAC/ADTS cbSize (`riffenc.c:211-222`) | codec ids not in the family — the subformat GUID is always the `codec_tag` + base tail (`riffenc.c:202-205`) |
+//! | `par->bits_per_coded_sample` bps fallback (`riffenc.c:102-106`) | no such field in the port's `CodecParameters`; every family codec has `bits_per_sample > 0` |
+//! | `avpriv_set_pts_info` in `write_header` (`wavenc.c:367`) | the port's `Muxer` gets `&[Stream]` (immutable); callers set `time_base = 1/sample_rate` (`Stream::set_pts_info`) as every C caller ends up with |
+//!
 //! Packet timing note: C's `wav_read_packet` leaves `pts`/`duration` unset
 //! (the generic demux layer fills them from the stream's `cur_dts`, which
 //! `ff_pcm_read_seek` computes as `pos * time_base.den / byte_rate` =
@@ -66,9 +107,9 @@ use crate::{
         params::{CodecId, CodecParameters, MediaType},
         pcm,
     },
-    log_warning,
+    log_error, log_warning,
     util::{
-        channel_layout::ChannelLayout,
+        channel_layout::{ChannelLayout, Order},
         error::{Error, Result},
         rational::Rational,
     },
@@ -78,6 +119,7 @@ use super::{
     Stream,
     demux::{Demuxer, PROBE_SCORE_MAX},
     io::IoContext,
+    mux::Muxer,
 };
 
 // ---------------------------------------------------------------------
@@ -123,18 +165,39 @@ fn rl32(io: &mut IoContext) -> Result<u32> {
 // ---------------------------------------------------------------------
 
 /// `ff_codec_wav_tags` (`riff.c:525-625`) — every row whose codec id is in
-/// the `CodecId` family. First match wins (`ff_codec_get_id`), so the C
-/// table order (`PCM_S16LE` before `PCM_U8` under tag 0x0001, etc.) is
-/// preserved. All other C rows (ADPCM, MP3, WMA, …) map to
-/// `CodecId::None`, exactly C's `AV_CODEC_ID_NONE` for unknown tags.
+/// the `CodecId` family, in C table order. The table serves both
+/// directions: the demuxer's tag→id scan takes the *first row with a
+/// matching tag* (`ff_codec_get_id`; `PCM_S16LE` wins under tag 0x0001,
+/// `PCM_F32LE` under 0x0003 — the bps refinements in
+/// [`wav_codec_get_id`] then resolve the width), and the muxer's
+/// id→tag scan takes the *first row with a matching id*
+/// (`ff_codec_get_tag`). Rows that only the muxer needs (`PCM_U8`,
+/// `PCM_S24LE`, `PCM_S32LE`, `PCM_F64LE` — riff.c:528-530, 535) sit after
+/// the demuxer's 0x0001/0x0003 winners, so both scans return exactly C's
+/// answer. All other C rows (ADPCM, MP3, WMA, …) map to `CodecId::None`,
+/// exactly C's `AV_CODEC_ID_NONE` for unknown tags.
 const WAV_CODEC_TAGS: &[(CodecId, u32)] = &[
-    (CodecId::PcmS16le, 0x0001),
-    (CodecId::PcmF32le, 0x0003),
-    (CodecId::PcmAlaw, 0x0006),
-    (CodecId::PcmMulaw, 0x0007),
+    (CodecId::PcmS16le, 0x0001),  // riff.c:526
+    (CodecId::PcmU8, 0x0001),     // riff.c:528 — muxer-only row
+    (CodecId::PcmS24le, 0x0001),  // riff.c:529 — muxer-only row
+    (CodecId::PcmS32le, 0x0001),  // riff.c:530 — muxer-only row
+    (CodecId::PcmF32le, 0x0003),  // riff.c:533
+    (CodecId::PcmF64le, 0x0003),  // riff.c:535 — muxer-only row
+    (CodecId::PcmAlaw, 0x0006),   // riff.c:536
+    (CodecId::PcmMulaw, 0x0007),  // riff.c:537
     // ('u' << 8) | 'l' — the "rogue" mu-law tag (riff.c:602).
     (CodecId::PcmMulaw, 0x6c75),
 ];
+
+/// `ff_codec_get_tag(ff_wav_codec_tags_list, id)` (`libavformat/utils.c`'s
+/// tag scan over `ff_codec_wav_tags`) — the muxer's id→tag direction:
+/// first row whose id matches. `None` = no row (the `*BE` PCM ids,
+/// `PCM_S64LE`, every non-PCM codec) — C's `ff_put_wav_header` then fails
+/// its `!par->codec_tag` gate (`riffenc.c:65-66`) and `wav_write_header`
+/// bails with `ENOSYS` (`wavenc.c:333-337`).
+pub fn wav_codec_get_tag(id: CodecId) -> Option<u32> {
+    WAV_CODEC_TAGS.iter().find(|&&(i, _)| i == id).map(|&(_, t)| t)
+}
 
 /// `ff_get_pcm_codec_id` (`libavformat/utils.c:154-198`) — LE arms only
 /// (the WAV call sites pass `be = 0`). Where C's answer is a PCM flavor
@@ -669,7 +732,340 @@ impl Demuxer for WavDemuxer {
     }
 }
 
-/// `wav_probe` (`wavdec.c:161-178`) — RIFF/RIFX magic at 0, `WAVE` at 8,
+// ---------------------------------------------------------------------
+// The muxer — wavenc.c + riffenc.c
+// ---------------------------------------------------------------------
+
+/// `avio_wl16`.
+fn wl16(io: &mut IoContext, v: u16) -> Result<()> {
+    io.write_all(&v.to_le_bytes())
+}
+
+/// `avio_wl32`. C's `avio_wl32(pb, -1)` size placeholders are `u32::MAX`.
+fn wl32(io: &mut IoContext, v: u32) -> Result<()> {
+    io.write_all(&v.to_le_bytes())
+}
+
+/// Seek with C's `avio_seek` write-flush semantics: C's buffered writer
+/// writes out pending bytes before repositioning (`avio_seek` →
+/// `writeout`, `aviobuf.c`); the port's file write side is a `BufWriter`
+/// whose seek goes around the buffer, so the muxer flushes first. Without
+/// this the trailer's backpatch would land after (or be overwritten by)
+/// buffered payload bytes.
+fn seek_flushed(io: &mut IoContext, pos: u64) -> Result<()> {
+    io.flush()?;
+    io.seek(pos)
+}
+
+/// `ff_start_tag` (`riffenc.c:31-36`) — chunk fourcc + a `−1` size
+/// placeholder; returns the offset of the chunk *body* (`avio_tell`).
+fn start_tag(io: &mut IoContext, tag: &[u8; 4]) -> Result<u64> {
+    io.write_all(tag)?;
+    wl32(io, u32::MAX)?;
+    Ok(io.tell())
+}
+
+/// `ff_end_tag` (`riffenc.c:38-50`) — pad the body to an even offset, then
+/// backpatch the chunk size at `start − 4` to the *unpadded* body length
+/// (`pos − start` before the pad byte) and continue after the padding
+/// (`FFALIGN(pos, 2)`).
+fn end_tag(io: &mut IoContext, start: u64) -> Result<()> {
+    debug_assert!(start & 1 == 0, "av_assert0((start&1) == 0), riffenc.c:42");
+    let pos = io.tell();
+    if pos & 1 != 0 {
+        io.write_all(&[0u8])?;
+    }
+    seek_flushed(io, start - 4)?;
+    wl32(io, (pos - start) as u32)?;
+    seek_flushed(io, (pos + 1) & !1)
+}
+
+/// `av_rescale_q(a, bq, cq)` (`libavutil/mathematics.c`) as the trailer's
+/// fact-chunk call needs it: `a · bq / cq` with round-to-nearest and 128-bit
+/// intermediates. At every WAV call site `bq` is the stream's
+/// `1/sample_rate` base and `cq` is `(1, sample_rate)` (`wavenc.c:455-457`),
+/// so the quotient is an identity; the general form is kept for callers
+/// that set a reduced time base. `0/0` (`Rational::UNKNOWN`) yields 0.
+fn rescale_q(a: i64, bq: Rational, cq: Rational) -> i64 {
+    let num = a as i128 * bq.num as i128 * cq.den as i128;
+    let den = bq.den as i128 * cq.num as i128;
+    if den == 0 {
+        return 0;
+    }
+    // av_rescale_rnd(AV_ROUND_NEAR_INF): round half away from zero.
+    let half = den.abs() / 2;
+    let q = if num >= 0 {
+        (num + half) / den
+    } else {
+        -((-num + half) / den)
+    };
+    q.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
+
+/// `ff_put_wav_header` (`riffenc.c:54-233`), the PCM subset (see the
+/// module map for the dropped codec arms). `tag` is the resolved
+/// `codec_tag` (`ff_codec_get_tag`'s answer — the port resolves it in
+/// [`WavMuxer::write_header`], which fails first for tagless codecs, so
+/// the `!par->codec_tag` gate at `riffenc.c:65-66` is unreachable here).
+/// Writes the chunk *body* (the caller wraps it in `fmt ` via
+/// [`start_tag`]/[`end_tag`]).
+fn put_wav_header(io: &mut IoContext, par: &CodecParameters, tag: u32) -> Result<()> {
+    let channels = par.ch_layout.nb_channels;
+    // av_get_bits_per_sample (riffenc.c:101-106); every family codec has
+    // bits > 0, so the bits_per_coded_sample/16 fallbacks are out.
+    let bps = pcm::bits_per_sample(par.codec_id);
+    debug_assert!(bps > 0, "family codecs always carry bits_per_sample");
+
+    // riffenc.c:79-84 — WAVEFORMATEXTENSIBLE when the native layout is
+    // neither mono nor stereo, the rate exceeds 48000, or the samples are
+    // wider than 16 bits outside the IEEE-float tag. (The EAC3/DFPWM arm
+    // needs codec ids outside the family.)
+    let waveformatextensible = (par.ch_layout.order == Order::Native
+        && par.ch_layout != ChannelLayout::MONO
+        && par.ch_layout != ChannelLayout::STEREO)
+        || par.sample_rate > 48000
+        || (bps > 16 && tag != 0x0003);
+
+    // wFormatTag (riffenc.c:86-89).
+    wl16(io, if waveformatextensible { 0xfffe } else { tag as u16 })?;
+    wl16(io, channels as u16)?; // riffenc.c:91
+    wl32(io, par.sample_rate as u32)?; // riffenc.c:92
+
+    // blkalign (riffenc.c:125-128): block_align specified by the codec
+    // wins; otherwise bps · channels / gcd(8, bps) — 8 for every
+    // multiple-of-8 family width.
+    let blkalign = if par.block_align != 0 {
+        par.block_align
+    } else {
+        let gcd8 = 8u32.min(bps as u32); // gcd(8, bps): bps is a multiple of 8
+        bps * channels as i32 / gcd8 as i32
+    };
+    // bytespersec (riffenc.c:129-135): the fixed-rate PCM arm; alaw/mulaw
+    // fall through to bit_rate/8 (riffenc.c:147).
+    let bytespersec = if matches!(
+        par.codec_id,
+        CodecId::PcmU8
+            | CodecId::PcmS24le
+            | CodecId::PcmS32le
+            | CodecId::PcmF32le
+            | CodecId::PcmF64le
+            | CodecId::PcmS16le
+    ) {
+        par.sample_rate as i64 * blkalign as i64
+    } else {
+        par.bit_rate / 8
+    };
+    wl32(io, bytespersec as u32)?; // nAvgBytesPerSec (riffenc.c:149)
+    wl16(io, blkalign as u16)?; // nBlockAlign (riffenc.c:150)
+    wl16(io, bps as u16)?; // wBitsPerSample (riffenc.c:151)
+
+    if waveformatextensible {
+        // riffenc.c:188-206. cbSize = 22 (no extradata in the port);
+        // ValidBitsPerSample = bps; dwChannelMask per the default-compliance
+        // rule (riffenc.c:189-191): masks ≥ 0x40000 are withheld, an
+        // Unspecified layout contributes its conventional 0.
+        let mask = if par.ch_layout.mask < 0x40000 {
+            par.ch_layout.mask as u32
+        } else {
+            0
+        };
+        wl16(io, 22)?; // cbSize (riffenc.c:193)
+        wl16(io, bps as u16)?; // ValidBitsPerSample (riffenc.c:195)
+        wl32(io, mask)?; // dwChannelMask (riffenc.c:197)
+        wl32(io, tag)?; // SubFormat GUID: the tag (riffenc.c:202)
+        wl32(io, 0x0010_0000)?; // … + the MEDIASUBTYPE base tail
+        wl32(io, 0xAA00_0080)?; //    (riffenc.c:203-205; the mirror of
+        wl32(io, 0x719B_3800)?; //    MEDIASUBTYPE_BASE in the demuxer)
+    } else if tag != 0x0001 {
+        // WAVEFORMATEX tail (riffenc.c:207-223): a plain cbSize = 0 —
+        // no extradata, and the HEAAC/ADTS branches need absent tags.
+        wl16(io, 0)?; // riffenc.c:223
+    }
+    // else: PCMWAVEFORMAT — 16 bytes, no tail (riffenc.c:224).
+
+    // riffenc.c:226-230 — pad the body to an even length; the three
+    // shapes (16 PCMWAVEFORMAT / 18 WAVEFORMATEX / 40 EXTENSIBLE) are
+    // always even, so the pad byte never fires for PCM — C's `if
+    // (hdrsize & 1)` likewise.
+    let body = 16
+        + if waveformatextensible {
+            24
+        } else if tag != 0x0001 {
+            2
+        } else {
+            0
+        };
+    if body & 1 != 0 {
+        io.write_all(&[0u8])?;
+    }
+    Ok(())
+}
+
+/// `WAVMuxContext` (`wavenc.c:69-91`) — the fields the RIFF (non-RF64,
+/// non-peak) write path reaches, with C's AVOption defaults: `rf64` =
+/// `RF64_NEVER` (`wavenc.c:510`), `write_bext`/`write_peak` off.
+pub struct WavMuxer {
+    /// `wav->data` — offset of the `data` chunk body (0 until the header
+    /// is written; every real offset is past the 12-byte RIFF prefix).
+    data: u64,
+    /// `wav->fact_pos` — offset of the `fact` chunk's sample-count u32;
+    /// 0 = no fact chunk was written (the PCM tag-0x0001 case).
+    fact_pos: u64,
+    /// The stream's resolved `codec_tag` (C re-reads `par->codec_tag` in
+    /// the trailer, wavenc.c:459; the port caches it at `write_header`).
+    codec_tag: u32,
+    /// `wav->minpts` / `wav->maxpts` / `wav->last_duration`
+    /// (`wavenc.c:74-75, 413-418`), for the trailer's fact sample count.
+    minpts: i64,
+    maxpts: i64,
+    last_duration: i64,
+}
+
+impl WavMuxer {
+    pub fn new() -> Self {
+        WavMuxer {
+            data: 0,
+            fact_pos: 0,
+            codec_tag: 0,
+            minpts: i64::MAX, // wavenc.c:369
+            maxpts: 0,
+            last_duration: 0,
+        }
+    }
+}
+
+impl Default for WavMuxer {
+    fn default() -> Self {
+        WavMuxer::new()
+    }
+}
+
+impl Muxer for WavMuxer {
+    /// The generic `init_muxer` stream gate (`mux.c`: a stream's type must
+    /// be one the format declares — wav is `video_codec = NONE`,
+    /// `audio_codec = PCM_S16LE`, `wavenc.c:533-535`): audio only. The
+    /// codec gate lives in `write_header`, exactly where C's
+    /// `ff_put_wav_header` failure surfaces (`wavenc.c:333-337`).
+    fn init(&mut self, streams: &[Stream]) -> Result<()> {
+        if streams[0].codecpar.codec_type != MediaType::Audio {
+            return Err(Error::InvalidData(
+                "wav muxer requires an audio stream".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// `wav_write_header` (`wavenc.c:302-380`), `RF64_NEVER` /
+    /// no-peak / no-bext defaults: RIFF + `fmt ` + optional `fact` + `data`
+    /// headers, all sizes as `−1` placeholders for the trailer.
+    fn write_header(&mut self, io: &mut IoContext, streams: &[Stream]) -> Result<()> {
+        let par = &streams[0].codecpar;
+
+        // The tag the generic layer would resolve (init_muxer's
+        // ff_codec_get_tag); without one, ff_put_wav_header returns −1
+        // (riffenc.c:65-66) and C bails with ENOSYS + "Codec %s not
+        // supported in WAVE format" (wavenc.c:333-337).
+        let Some(tag) = wav_codec_get_tag(par.codec_id) else {
+            log_error!(
+                Some("wav"),
+                "Codec {} not supported in WAVE format",
+                par.codec_id.name()
+            );
+            return Err(Error::Unsupported(format!(
+                "codec '{}' is not supported in WAVE format",
+                par.codec_id.name()
+            )));
+        };
+        self.codec_tag = tag;
+
+        // wavenc.c:312-320 — RIFF + file size placeholder + WAVE.
+        io.write_all(b"RIFF")?;
+        wl32(io, u32::MAX)?;
+        io.write_all(b"WAVE")?;
+
+        // wavenc.c:330-349 — the fmt chunk.
+        let fmt = start_tag(io, b"fmt ")?;
+        put_wav_header(io, par, tag)?;
+        end_tag(io, fmt)?;
+
+        // wavenc.c:351-356 — fact for every non-PCM tag (floats, alaw,
+        // mulaw), seekable output (always true for the port's IoContext).
+        if tag != 0x01 {
+            self.fact_pos = start_tag(io, b"fact")?;
+            wl32(io, 0)?;
+            end_tag(io, self.fact_pos)?;
+        }
+
+        // ff_riff_write_info (wavenc.c:373): no metadata dictionary →
+        // C writes nothing (riffenc.c:366-368).
+
+        // wavenc.c:376 — the data chunk header.
+        self.data = start_tag(io, b"data")?;
+        Ok(())
+    }
+
+    /// `wav_write_packet` (`wavenc.c:382-420`), peak paths out: payload
+    /// passthrough plus the pts bookkeeping the fact chunk needs
+    /// (`wavenc.c:413-418`).
+    fn write_packet(&mut self, io: &mut IoContext, _streams: &[Stream], pkt: &Packet) -> Result<()> {
+        io.write_all(pkt.as_slice())?;
+        if pkt.pts != NOPTS {
+            self.minpts = self.minpts.min(pkt.pts);
+            self.maxpts = self.maxpts.max(pkt.pts);
+            self.last_duration = pkt.duration;
+        } else {
+            // wavenc.c:417-418 — C logs and leaves the counters alone.
+            log_error!(Some("wav"), "wav_write_packet: NOPTS");
+        }
+        Ok(())
+    }
+
+    /// `wav_write_trailer` (`wavenc.c:422-500`), the seekable arm with
+    /// `rf64 == RF64_NEVER`: close the `data` chunk (even-pad + backpatch),
+    /// backpatch the RIFF size at offset 4, and patch the fact sample
+    /// count (`wavenc.c:455-469`).
+    fn write_trailer(&mut self, io: &mut IoContext, streams: &[Stream]) -> Result<()> {
+        let st = &streams[0];
+
+        // wavenc.c:432-436 — data_size before the pad byte; sizes ≥ 4 GiB
+        // keep the −1 placeholder (RF64 would rewrite them; out).
+        let data_size = io.tell() - self.data;
+        if data_size < u32::MAX as u64 {
+            end_tag(io, self.data)?;
+        }
+
+        // wavenc.c:442-454 — the RIFF size.
+        let file_size = io.tell();
+        if file_size - 8 <= u32::MAX as u64 {
+            seek_flushed(io, 4)?;
+            wl32(io, (file_size - 8) as u32)?;
+            seek_flushed(io, file_size)?;
+        } else {
+            // wavenc.c:450-454 — RF64_NEVER can only log.
+            log_error!(
+                Some("wav"),
+                "Filesize {file_size} invalid for wav, output file will be broken"
+            );
+        }
+
+        // wavenc.c:455-469 — the fact sample count:
+        // av_rescale_q(maxpts − minpts + last_duration, st->time_base,
+        //              (AVRational){1, sample_rate}).
+        if self.codec_tag != 0x01 {
+            let number_of_samples = rescale_q(
+                self.maxpts.wrapping_sub(self.minpts).wrapping_add(self.last_duration),
+                st.time_base,
+                Rational::new(1, st.codecpar.sample_rate.max(1)),
+            );
+            seek_flushed(io, self.fact_pos)?;
+            wl32(io, number_of_samples as u32)?;
+            seek_flushed(io, file_size)?;
+        }
+        Ok(())
+    }
+}
+
+
 /// score `AVPROBE_SCORE_MAX - 1` (kept below MAX so the ACT demuxer can
 /// still win — see the C comment at wavdec.c:168-171). The RF64/BW64 arm
 /// (wavdec.c:172-175) is out with the ds64 support.
