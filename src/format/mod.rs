@@ -27,6 +27,7 @@
 pub mod demux;
 pub mod io;
 pub mod mux;
+pub mod nut;
 pub mod rawvideo;
 #[cfg(test)]
 pub mod testutil;
