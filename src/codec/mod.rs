@@ -17,6 +17,7 @@ pub mod packet;
 pub mod params;
 pub mod rawvideo;
 pub mod traits;
+pub mod video;
 
 pub use packet::{Packet, PacketFlags};
 pub use params::{CodecId, CodecParameters, FieldOrder, MediaType};
