@@ -168,6 +168,8 @@ use super::{
     mux::Muxer,
 };
 
+mod flag;
+
 // ---------------------------------------------------------------------
 // nut.h:29-56 — startcodes, limits, frame flags
 // ---------------------------------------------------------------------
@@ -192,34 +194,6 @@ pub const NUT_MAX_VERSION: u64 = 4;
 pub const NUT_STABLE_VERSION: u64 = 3;
 /// `nut.h:41`.
 pub const NUT_MIN_VERSION: u64 = 2;
-
-/// `nut.h:43-56` (`Flag`) — frame-code / frame-header flags.
-pub mod flag {
-    /// if set, frame is keyframe
-    pub const KEY: u32 = 1;
-    /// if set, stream has no relevance on presentation. (EOR)
-    pub const EOR: u32 = 2;
-    /// if set, coded_pts is in the frame header
-    pub const CODED_PTS: u32 = 8;
-    /// if set, stream_id is coded in the frame header
-    pub const STREAM_ID: u32 = 16;
-    /// if set, data_size_msb is at frame header, otherwise data_size_msb is 0
-    pub const SIZE_MSB: u32 = 32;
-    /// if set, the frame header contains a checksum
-    pub const CHECKSUM: u32 = 64;
-    /// if set, reserved_count is coded in the frame header
-    pub const RESERVED: u32 = 128;
-    /// if set, side / meta data is stored in the frame header.
-    pub const SM_DATA: u32 = 256;
-    /// If set, header_idx is coded in the frame header.
-    pub const HEADER_IDX: u32 = 1024;
-    /// If set, match_time_delta is coded in the frame header
-    pub const MATCH_TIME: u32 = 2048;
-    /// if set, coded_flags are stored in the frame header
-    pub const CODED: u32 = 4096;
-    /// if set, frame_code is invalid
-    pub const INVALID: u32 = 8192;
-}
 
 /// `NUT_BROADCAST` (`nut.h:113`) — bit 0 of the version-4 main-header flags.
 pub const NUT_BROADCAST: u64 = 1;
@@ -1568,12 +1542,7 @@ impl NutDemuxer {
 
     /// `nut_read_packet` (`nutdec.c:1147-1205`).
     fn read_packet_impl(&mut self, r: &mut NutReader) -> Result<Packet> {
-        let mut dbg_iters: u64 = 0;
         loop {
-            dbg_iters += 1;
-            if dbg_iters % 1000 == 0 {
-                eprintln!("DBG read_packet iter={dbg_iters} tell={}", r.tell());
-            }
             let pos = r.tell() as i64; // C keeps `pos` for the resync log
             let mut tmp = self.next_startcode;
             self.next_startcode = 0;
@@ -2655,6 +2624,12 @@ impl NutMuxer {
                     }
                     k += 1;
                 }
+                // C's outer `for (j=0; j<sp_count; j++)` INCREMENTS j every
+                // iteration — the run loop above may exit at the FIRST
+                // non-matching entry (n == 0), and without this step the
+                // group never advances: the infinite-loop bug the five
+                // disabled mux tests hung in.
+                j += 1;
             }
         }
 
@@ -4486,26 +4461,9 @@ mod mux_tests {
     /// THE acceptance bar: video frames with varying sizes and pts ride
     /// mux → demux with identical payload, pts, duration, flags.
     // FIXME - infinite loop? check fn.
-    // #[test]
-    fn dbg_mux_only() {
-        let st = video_stream(64, 48);
-        let pkts: Vec<Packet> = (0..4)
-            .map(|i| {
-                pkt(
-                    vec![(i * 7 % 251) as u8; 64 * 48 * 3 / 2],
-                    i as i64,
-                    i % 3 == 0,
-                )
-            })
-            .collect();
-        eprintln!("DBG: muxing starts");
-        let bytes = mux_bytes(&st, &pkts);
-        eprintln!("DBG: muxed {} bytes", bytes.len());
-        assert!(bytes.len() < 100_000);
-    }
 
     // FIXME - infinite loop.
-    // #[test]
+    #[test]
     fn mux_demux_round_trip_video() {
         let st = video_stream(64, 48);
         let sizes = [(64 * 48 * 3 / 2), (64 * 48 * 3 / 2), (64 * 48 * 3 / 2), 100];
@@ -4522,16 +4480,21 @@ mod mux_tests {
         assert_eq!(out_st.codecpar.height, 48);
         assert_eq!(out_st.codecpar.format, st.codecpar.format);
         assert_eq!(out.len(), pkts.len());
+        // pts compare in the FILE's time base: the muxer re-bases the
+        // stream (avpriv_set_pts_info, nutenc.c:756 — 1/25 becomes 1/51200
+        // via choose_timebase), so the demuxed stream reports pts in that
+        // base, exactly like C's caller after nut_write_header.
         for (a, b) in pkts.iter().zip(&out) {
             assert_eq!(a.as_slice(), b.as_slice(), "payload round trips");
-            assert_eq!(a.pts, b.pts);
+            let exp = rescale_q_near(a.pts, st.time_base, out_st.time_base);
+            assert_eq!(exp, b.pts);
             assert_eq!(a.flags, b.flags);
         }
     }
 
     /// Audio round trip: PCM s16le stereo frames.
     // FIXME - infinite loop.
-    // #[test]
+    #[test]
     fn mux_demux_round_trip_audio() {
         let mut st = Stream::new_audio(0);
         st.codecpar.codec_id = CodecId::PcmS16le;
@@ -4560,7 +4523,7 @@ mod mux_tests {
 
     /// Large pts deltas trigger the coded-pts path (msb_pts_shift).
     // FIXME - infinite loop.
-    // #[test]
+    #[test]
     fn mux_demux_round_trip_coded_pts() {
         let st = video_stream(32, 32);
         let pts = [0i64, 1, 1 << 20, (1 << 20) + 5, 1, 0];
@@ -4570,10 +4533,12 @@ mod mux_tests {
             .map(|(i, &p)| pkt(vec![(i * 13 % 251) as u8; 32 * 32 * 3 / 2], p, i % 2 == 0))
             .collect();
         let bytes = mux_bytes(&st, &pkts);
-        let (_, out) = demux_bytes(&bytes);
+        let (out_st, out) = demux_bytes(&bytes);
         assert_eq!(out.len(), pkts.len());
+        // pts in the file's (re-based) time base, as above.
         for (a, b) in pkts.iter().zip(&out) {
-            assert_eq!(a.pts, b.pts, "coded pts round trips");
+            let exp = rescale_q_near(a.pts, st.time_base, out_st.time_base);
+            assert_eq!(exp, b.pts, "coded pts round trips");
             assert_eq!(a.as_slice(), b.as_slice());
         }
     }
@@ -4581,7 +4546,7 @@ mod mux_tests {
     /// Byte-shape pin: the main header of a fixed config opens with the
     /// NUT magic and the main startcode layout (nut.h spec bytes).
     // FIXME - infinite loop.
-    // #[test]
+    #[test]
     fn main_header_byte_shape() {
         let bytes = mux_bytes(
             &video_stream(64, 48),
