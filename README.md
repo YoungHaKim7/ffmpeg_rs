@@ -101,6 +101,7 @@ deliberately skipped C paths with the guard that makes them unreachable.
       9. AV1
       10. MKV
 6. Phase 5 — NUT container, more filters
+  bug fix - `./src/codec/pcm.rs`
 
 7. Add SIMD
 

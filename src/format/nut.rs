@@ -1568,7 +1568,12 @@ impl NutDemuxer {
 
     /// `nut_read_packet` (`nutdec.c:1147-1205`).
     fn read_packet_impl(&mut self, r: &mut NutReader) -> Result<Packet> {
+        let mut dbg_iters: u64 = 0;
         loop {
+            dbg_iters += 1;
+            if dbg_iters % 1000 == 0 {
+                eprintln!("DBG read_packet iter={dbg_iters} tell={}", r.tell());
+            }
             let pos = r.tell() as i64; // C keeps `pos` for the resync log
             let mut tmp = self.next_startcode;
             self.next_startcode = 0;
@@ -4446,8 +4451,13 @@ mod mux_tests {
         let mut d = NutDemuxer::new();
         let st = d.read_header(&mut io).unwrap();
         let mut pkts = Vec::new();
-        while let Ok(p) = d.read_packet(&mut io) {
-            pkts.push(p);
+        // Hard cap: a correct file yields exactly its packets then Eof —
+        // the cap turns any runaway into a test failure, not a hang.
+        for _ in 0..64 {
+            match d.read_packet(&mut io) {
+                Ok(p) => pkts.push(p),
+                Err(_) => break,
+            }
         }
         (st, pkts)
     }
@@ -4475,8 +4485,18 @@ mod mux_tests {
 
     /// THE acceptance bar: video frames with varying sizes and pts ride
     /// mux → demux with identical payload, pts, duration, flags.
-    // TODO - check) The CPU is running too much, so I need to recheck the code sometime.
-    ///
+    #[test]
+    fn dbg_mux_only() {
+        let st = video_stream(64, 48);
+        let pkts: Vec<Packet> = (0..4)
+            .map(|i| pkt(vec![(i * 7 % 251) as u8; 64 * 48 * 3 / 2], i as i64, i % 3 == 0))
+            .collect();
+        eprintln!("DBG: muxing starts");
+        let bytes = mux_bytes(&st, &pkts);
+        eprintln!("DBG: muxed {} bytes", bytes.len());
+        assert!(bytes.len() < 100_000);
+    }
+
     // #[test]
     fn mux_demux_round_trip_video() {
         let st = video_stream(64, 48);
