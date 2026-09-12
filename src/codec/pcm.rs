@@ -97,37 +97,6 @@ pub const PCM_TABLE: &[(CodecId, SampleFormat, u8, u8)] = &[
     (CodecId::PcmMulaw, SampleFormat::S16, 1, 8),
 ];
 
-/// `codec_id_to_samplefmt[]` lookup (`pcm.c:294-303`) → the output format.
-pub fn sample_fmt(codec_id: CodecId) -> Option<SampleFormat> {
-    PCM_TABLE
-        .iter()
-        .find(|(id, ..)| *id == codec_id)
-        .map(|&(_, fmt, ..)| fmt)
-}
-
-/// `s->sample_size` (`pcm.c:296`) — coded bytes per sample
-/// (`BITS_PER_SAMPLE / 8` of the C `ENTRY` macro).
-pub fn sample_size(codec_id: CodecId) -> Option<usize> {
-    PCM_TABLE
-        .iter()
-        .find(|(id, ..)| *id == codec_id)
-        .map(|&(_, _, size, _)| size as usize)
-}
-
-/// `av_get_bits_per_sample` for the PCM family (`libavutil/utils.c`: the
-/// `PCM_CODEC`-registered ids return their table bits; `ALAW`/`MULAW` are
-/// 8). Non-PCM/unknown ids return 0, exactly like C.
-pub const fn bits_per_sample(codec_id: CodecId) -> i32 {
-    match codec_id {
-        CodecId::PcmU8 | CodecId::PcmAlaw | CodecId::PcmMulaw => 8,
-        CodecId::PcmS16le | CodecId::PcmS16be => 16,
-        CodecId::PcmS24le | CodecId::PcmS24be => 24,
-        CodecId::PcmS32le | CodecId::PcmS32be | CodecId::PcmF32le | CodecId::PcmF32be => 32,
-        CodecId::PcmF64le | CodecId::PcmF64be => 64,
-        _ => 0,
-    }
-}
-
 /// `ff_pcm_s16le_decoder` and family — one struct for every table row
 /// (C differs only in the private-data init function).
 #[derive(Debug, Default)]
@@ -451,6 +420,37 @@ impl AudioEncoder for PcmEncoder {
             None if self.eof => Err(Error::Eof),
             None => Err(Error::Again),
         }
+    }
+}
+
+/// `codec_id_to_samplefmt[]` lookup (`pcm.c:294-303`) → the output format.
+pub fn sample_fmt(codec_id: CodecId) -> Option<SampleFormat> {
+    PCM_TABLE
+        .iter()
+        .find(|(id, ..)| *id == codec_id)
+        .map(|&(_, fmt, ..)| fmt)
+}
+
+/// `s->sample_size` (`pcm.c:296`) — coded bytes per sample
+/// (`BITS_PER_SAMPLE / 8` of the C `ENTRY` macro).
+pub fn sample_size(codec_id: CodecId) -> Option<usize> {
+    PCM_TABLE
+        .iter()
+        .find(|(id, ..)| *id == codec_id)
+        .map(|&(_, _, size, _)| size as usize)
+}
+
+/// `av_get_bits_per_sample` for the PCM family (`libavutil/utils.c`: the
+/// `PCM_CODEC`-registered ids return their table bits; `ALAW`/`MULAW` are
+/// 8). Non-PCM/unknown ids return 0, exactly like C.
+pub const fn bits_per_sample(codec_id: CodecId) -> i32 {
+    match codec_id {
+        CodecId::PcmU8 | CodecId::PcmAlaw | CodecId::PcmMulaw => 8,
+        CodecId::PcmS16le | CodecId::PcmS16be => 16,
+        CodecId::PcmS24le | CodecId::PcmS24be => 24,
+        CodecId::PcmS32le | CodecId::PcmS32be | CodecId::PcmF32le | CodecId::PcmF32be => 32,
+        CodecId::PcmF64le | CodecId::PcmF64be => 64,
+        _ => 0,
     }
 }
 

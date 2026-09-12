@@ -18,6 +18,17 @@ impl MemHandler {
             pos: 0,
         }))
     }
+
+    /// [`io`] plus the shared buffer handle — muxer tests write through
+    /// the IoContext and read the produced bytes back through the Arc.
+    pub fn shared(data: &[u8]) -> (IoContext, Arc<Mutex<Vec<u8>>>) {
+        let data = Arc::new(Mutex::new(data.to_vec()));
+        let io = IoContext::new(Box::new(MemHandler {
+            data: Arc::clone(&data),
+            pos: 0,
+        }));
+        (io, data)
+    }
 }
 
 impl IoHandler for MemHandler {

@@ -1,8 +1,8 @@
-//! NUT demuxer — port of `libavformat/nutdec.c` plus the framing core the
+//! NUT demuxer + muxer — ports of `libavformat/nutdec.c` (the read side) and
+//! `libavformat/nutenc.c` (the write side), plus the framing core the
 //! container's two halves share (`nut.c`/`nut.h`, the `ffio_read_varlen`
 //! vint of `aviobuf.c:919-928`, and the `AV_CRC_32_IEEE` table of
-//! `libavutil/crc.c`). The write side (`nutenc.c`) lands next and reuses
-//! [`put_v`]/[`put_s`]/[`put_packet`] and the CRC core from here.
+//! `libavutil/crc.c`).
 //!
 //! ## C → Rust map
 //!
@@ -39,6 +39,23 @@
 //! | `nut_read_packet` (`nutdec.c:1147-1205`) | [`NutDemuxer::read_packet`] |
 //! | `ff_nut_video_tags`/`ff_codec_bmp_tags` RAWVIDEO rows (`nut.c:44-220`, `riff.c`) | [`RAWVIDEO_TAGS`] |
 //! | `ff_nut_audio_tags` + `ff_codec_wav_tags` + `ff_nut_audio_extra_tags` (`nut.c:222-264`, `riff.c`) | [`NUT_AUDIO_TAGS`] |
+//! | `choose_timebase` (`nutenc.c:48-59`) | [`choose_timebase`] |
+//! | `get_v_length` (`nutenc.c:306-313`) | [`get_v_length`] |
+//! | `build_elision_headers` (`nutenc.c:145-165`) | [`ELISION_HEADERS`] |
+//! | `build_frame_code` (`nutenc.c:167-301`) | [`NutMuxer::build_frame_code`] |
+//! | `write_mainheader` (`nutenc.c:372-450`) | [`NutMuxer::write_mainheader`] |
+//! | `write_streamheader` (`nutenc.c:452-507`) | [`NutMuxer::write_streamheader`] |
+//! | `write_globalinfo`/`write_streaminfo` (`nutenc.c:517-585`) | [`NutMuxer::write_globalinfo`]/[`NutMuxer::write_streaminfo`] |
+//! | `write_headers` (`nutenc.c:667-717`) | [`NutMuxer::write_headers`] |
+//! | `nut_write_header` (`nutenc.c:719-803`) | [`NutMuxer::write_header`] (the `Muxer` callback) |
+//! | `get_needed_flags` (`nutenc.c:805-832`) | [`NutMuxer::get_needed_flags`] |
+//! | `find_best_header_idx` (`nutenc.c:834-851`) | [`NutMuxer::find_best_header_idx`] |
+//! | `nut_write_packet` (`nutenc.c:963-1184`) | [`NutMuxer::write_packet`] (the `Muxer` callback) |
+//! | `write_index` (`nutenc.c:615-665`) | [`NutMuxer::write_index`] |
+//! | `nut_write_trailer` (`nutenc.c:1186-1207`) | [`NutMuxer::write_trailer`] (the `Muxer` callback) |
+//! | `ff_nut_add_sp` + syncpoint tree (`nut.c:296-333`) | [`NutMuxer::add_sp`] (a sorted `Vec` of positions) |
+//! | `avcodec_pix_fmt_to_codec_tag` (`raw.c:31-40` over `raw_pix_fmt_tags.h`) | [`PIX_FMT_CODEC_TAGS`] |
+//! | `av_codec_get_tag(ff_nut_codec_tags, …)` (`nut.c:261-264`, `mux.c:324`) | [`NUT_CODEC_GET_TAG`] |
 //!
 //! ## The byte format, exactly as the demuxer walks it
 //!
@@ -99,6 +116,34 @@
 //! | `get_fourcc` lengths ≠ 2/4 (`nutdec.c:87`) | C logs `\"Unsupported fourcc length\"` and continues with tag `-1`; port does the same (no error) |
 //! | `AVERROR(ENOMEM)` early-out of the main-header retry loop (`nutdec.c:825-826`) | Rust allocation failure aborts; the loop retries on parse errors only, like C |
 //! | ELI (elision) headers | fully ported (main header table + `FLAG_HEADER_IDX` + `size > 4096` reset, `nutdec.c:322-346, 1055-1061`) |
+//!
+//! ## Muxer-side skipped C paths (documented divergences, with the C guard)
+//!
+//! | C path | Guard / reason |
+//! |---|---|
+//! | `syncpoints`/`write_index` AVOptions, version-4 flags (`NUT_BROADCAST`/`NUT_PIPE`, `nutenc.c:1226-1233`) | not ported (no option plumbing): `flags` stays 0 so `version` stays `NUT_STABLE_VERSION` = 3 (`nutenc.c:727`) and the experimental gate (`nutenc.c:728-735`) can never fire; `write_index` is fixed at its default `true` (`nutenc.c:1231`) |
+//! | packet side data (`write_sm_data`, `nutenc.c:853-961`) + `FLAG_SM_DATA` | version 4 only (`nutenc.c:988`) and `Packet` has no side-data fields — neither can trigger |
+//! | metadata/chapters (`write_chapter`, `ff_metadata_conv_ctx`, `ff_nut_dispositions`) | no dictionary in the port: `write_globalinfo` writes C's empty-metadata shape (count 0) and `write_streaminfo` writes only the unconditional `r_frame_rate` entry a video stream always gets (`nutenc.c:562-569`) |
+//! | `find_expected_header`'s MPEG4/H264/MP3 arms (`nutenc.c:71-124`) | only those codec ids produce a non-zero length; the port's family (rawvideo + PCM) always gets 0, so `find_header_idx` (`nutenc.c:128-143`) collapses to "0" |
+//! | `ff_parse_specific_params` call (`nutenc.c:748`) | dead store in C: both branches that follow overwrite `time_base` (`nutenc.c:750-754`) |
+//! | `par->video_delay` (`nutenc.c:260, 477`) | no such field; rawvideo/PCM carry 0, and the pred-table arm it selects needs a positive delay |
+//! | `avoid_negative_ts` shift (`nutenc.c:799-800` + `mux.c`'s `mux_ts_offset`) | the port applies the make-non-negative offset itself (first negative dts fixes one shift for the whole file), which is the only family-reachable effect |
+//! | dts-monotonic / pts≥dts validation (`mux.c:777-826 prepare_input_packet`) | generic-layer checks, not nutenc's; the port ports only the two effects that reach the bytes: the `!reorder` dts=pts fill and the `is_intra_only` KEY fill |
+//!
+//! ## Time bases (the one structural divergence)
+//!
+//! C's `nut_write_header` *replaces* each stream's time base via
+//! `avpriv_set_pts_info(st, 64, tb.num, tb.den)` (`nutenc.c:756`) before any
+//! packet flows, so callers naturally hand `nut_write_packet` timestamps
+//! already in the chosen (possibly much finer) base — `choose_timebase`
+//! (`nutenc.c:48-59`) coarsens/finishes e.g. 1/25 into 1/51200. The port's
+//! [`Muxer`](super::mux::Muxer) trait hands over an immutable `&[Stream]`,
+//! so [`NutMuxer`] captures the caller's base at `write_header` and rescales
+//! every packet's pts/dts into the chosen base at the door
+//! (`av_rescale_q`, round-nearest — the identity whenever the bases match,
+//! as they always do for audio). Demuxing such a file reports timestamps in
+//! the *file's* base; the round-trip tests compare instants (rationals),
+//! not raw integers.
 
 use crate::{
     NOPTS,
@@ -120,6 +165,7 @@ use super::{
     Stream,
     demux::{Demuxer, PROBE_SCORE_MAX},
     io::IoContext,
+    mux::Muxer,
 };
 
 // ---------------------------------------------------------------------
@@ -1816,6 +1862,1295 @@ pub fn probe(buf: &[u8]) -> u32 {
     0
 }
 
+// ---------------------------------------------------------------------
+// nutenc.c — the muxer
+// ---------------------------------------------------------------------
+
+/// `get_v_length` (`nutenc.c:306-313`) — bytes [`put_v`] needs for `val`.
+/// The frame-code search (nutenc.c:1100-1111) prices its candidate fields
+/// with this.
+pub fn get_v_length(val: u64) -> usize {
+    let mut i = 1usize;
+    let mut v = val;
+    while {
+        v >>= 7;
+        v != 0
+    } {
+        i += 1;
+    }
+    i
+}
+
+/// `choose_timebase` (`nutenc.c:48-59`) — pick the base a stream is muxed
+/// in: at least as precise as `1/min_precision`, reached by first dividing
+/// the numerator by the small primes `j = 2, 3, 5, 7, 9, 11, 13`
+/// (`j += 1 + (j > 2)`, nutenc.c:52) and then doubling the denominator
+/// until the precision target is met (capped at `1 << 24`, nutenc.c:55).
+/// A 1/25 video stream becomes 1/51200, exactly as C's files do.
+fn choose_timebase(q: Rational, min_precision: i64) -> Rational {
+    let mut num = i64::from(q.num);
+    let mut den = i64::from(q.den);
+    let mut j = 2i64;
+    while j < 14 {
+        while den / num < min_precision && num % j == 0 {
+            num /= j;
+        }
+        j += 1 + i64::from(j > 2);
+    }
+    while den / num < min_precision && den < (1 << 24) {
+        den <<= 1;
+    }
+    Rational::new(num as i32, den as i32)
+}
+
+/// `av_rescale_q(a, bq, cq)` with `AV_ROUND_NEAR_INF` (mathematics.c) —
+/// round half away from zero, 128-bit intermediates. The identity fast path
+/// (`bq == cq`, av_rescale_q_rnd's first check) keeps exact tbs exact.
+fn rescale_q_near(a: i64, bq: Rational, cq: Rational) -> i64 {
+    if bq == cq || a == 0 {
+        return a;
+    }
+    let num = a as i128 * bq.num as i128 * cq.den as i128;
+    let den = bq.den as i128 * cq.num as i128;
+    if den == 0 {
+        return 0;
+    }
+    let half = den.abs() / 2;
+    let q = if num >= 0 {
+        (num + half) / den
+    } else {
+        -((-num + half) / den)
+    };
+    q.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
+
+/// `av_compare_ts(a, a_tb, b, b_tb)` (mathematics.c) as the max_pts
+/// tracking needs it (nutenc.c:1175): which instant is later. Exact
+/// cross-multiplication with 128-bit intermediates — for the magnitudes a
+/// NUT file can reach this agrees with C's rescale-then-compare.
+fn compare_ts(a: i64, a_tb: Rational, b: i64, b_tb: Rational) -> std::cmp::Ordering {
+    let l = a as i128 * a_tb.num as i128 * b_tb.den as i128;
+    let r = b as i128 * b_tb.num as i128 * a_tb.den as i128;
+    l.cmp(&r)
+}
+
+/// `av_index_search_timestamp(st, wanted_ts, AVSEEK_FLAG_BACKWARD)` as the
+/// syncpoint back-pointer loop needs it (nutenc.c:1024-1027): the latest
+/// entry with `timestamp <= wanted` (`None` = C's `-1`). Entries are
+/// appended in increasing ts order (`av_add_index_entry` from
+/// nut_write_packet), so the early-exit scan is C's answer.
+fn index_search_backward(entries: &[(u64, i64)], wanted: i64) -> Option<usize> {
+    let mut best = None;
+    for (i, &(_, ts)) in entries.iter().enumerate() {
+        if ts <= wanted {
+            best = Some(i);
+        } else {
+            break;
+        }
+    }
+    best
+}
+
+/// `ff_is_intra_only` (libavcodec) over the `CodecId` family: rawvideo and
+/// every PCM flavor are intra-only, so the generic write layer's flag fill
+/// (`prepare_input_packet`, `mux.c`: `if (sti->is_intra_only)
+/// pkt->flags |= AV_PKT_FLAG_KEY`) marks every family packet KEY — the port
+/// applies the same fill in [`NutMuxer::write_packet`].
+fn is_intra_only(id: CodecId) -> bool {
+    !matches!(id, CodecId::None)
+}
+
+/// `build_elision_headers` (`nutenc.c:145-165`) — the fixed six candidate
+/// prefixes (`headers[i-1][1..]` in C; the leading length byte is C's
+/// packing). Written verbatim into the main header; a packet whose payload
+/// starts with one of them can reference it via `header_idx` (see
+/// [`NutMuxer::find_best_header_idx`]).
+const ELISION_HEADERS: [&[u8]; 6] = [
+    &[0x00, 0x00, 0x01],        // nutenc.c:152
+    &[0x00, 0x00, 0x01, 0xB6],  // nutenc.c:153
+    &[0xFF, 0xFA],              // nutenc.c:154 — mp3+crc
+    &[0xFF, 0xFB],              // nutenc.c:155 — mp3
+    &[0xFF, 0xFC],              // nutenc.c:156 — mp2+crc
+    &[0xFF, 0xFD],              // nutenc.c:157 — mp2
+];
+
+/// `avcodec_pix_fmt_to_codec_tag` (`raw.c:31-40`) — the *first* row of
+/// `raw_pix_fmt_tags.h` for every pixel format of the port's family. C's
+/// rawvideo encoder sets exactly this tag (`rawenc.c:42-43
+/// avctx->codec_tag = avcodec_pix_fmt_to_codec_tag(avctx->pix_fmt)`), which
+/// `init_muxer` then keeps (`mux.c:314` — it validates against the NUT
+/// tables and every row here is in them). Every tag is one the demuxer's
+/// [`RAWVIDEO_TAGS`] resolves back to the same format, so the pair of
+/// tables round-trips.
+const PIX_FMT_CODEC_TAGS: &[(u32, PixelFormat)] = &[
+    (tag(b'I', b'4', b'2', b'0'), PixelFormat::Yuv420p),  // raw_pix_fmt_tags.h:29
+    (tag(b'Y', b'4', b'2', b'B'), PixelFormat::Yuv422p),  // :37
+    (tag(b'I', b'4', b'4', b'4'), PixelFormat::Yuv444p),  // :63
+    (tag(b'Y', b'3', 11, 10), PixelFormat::Yuv420p10le),  // :140
+    (tag(b'Y', b'3', 10, 10), PixelFormat::Yuv422p10le),  // :142
+    (tag(b'Y', b'3', 0, 10), PixelFormat::Yuv444p10le),   // :144
+    (tag(b'Y', b'3', 11, 16), PixelFormat::Yuv420p16le),  // :156
+    (tag(b'Y', b'3', 0, 16), PixelFormat::Yuv444p16le),   // :158
+    (tag(b'N', b'V', b'1', b'2'), PixelFormat::Nv12),     // :70
+    (tag(b'N', b'V', b'2', b'1'), PixelFormat::Nv21),     // :71
+    (tag(b'Y', b'U', b'Y', b'2'), PixelFormat::Yuyv422),  // :48
+    (tag(b'U', b'Y', b'V', b'Y'), PixelFormat::Uyvy422),  // :55
+    (tag(b'Y', b'8', b'0', b'0'), PixelFormat::Gray8),    // :39
+    (tag(b'Y', b'1', 0, 16), PixelFormat::Gray16le),      // :132
+    (tag(b'R', b'G', b'B', 24), PixelFormat::Rgb24),      // :103
+    (tag(b'B', b'G', b'R', 24), PixelFormat::Bgr24),      // :104
+    (tag(b'R', b'G', b'B', b'A'), PixelFormat::Rgba),     // :95
+    (tag(b'B', b'G', b'R', b'A'), PixelFormat::Bgra),     // :97
+    (tag(b'A', b'R', b'G', b'B'), PixelFormat::Argb),     // :101
+    (tag(b'A', b'B', b'G', b'R'), PixelFormat::Abgr),     // :99
+    (tag(b'R', b'G', b'B', 16), PixelFormat::Rgb565le),   // :81
+    (tag(b'G', b'3', 0, 8), PixelFormat::Gbrp),           // :193
+    (tag(b'G', b'4', 0, 8), PixelFormat::Gbrap),          // :209
+];
+
+/// `avcodec_pix_fmt_to_codec_tag(pix_fmt)` (`raw.c:31-40`): first row of
+/// [`PIX_FMT_CODEC_TAGS`] matching the format — what the rawvideo encoder
+/// would have put in `codec_tag`.
+fn pixfmt_codec_tag(fmt: PixelFormat) -> Option<u32> {
+    PIX_FMT_CODEC_TAGS
+        .iter()
+        .find(|&&(_, f)| f == fmt)
+        .map(|&(t, _)| t)
+}
+
+/// `av_codec_get_tag(ff_nut_codec_tags, id)` (`mux.c:324`) — the first row
+/// whose *codec id* matches, scanned in `ff_nut_codec_tags` order
+/// (`nut.c:261-264`: nut video → nut audio → subtitle → bmp → wav → nut
+/// audio-extra → data). For the family's PCM ids the `ff_nut_audio_tags`
+/// rows (`nut.c:232-258`) win; A-law/mu-law have no row there and resolve
+/// through `ff_codec_wav_tags` (`riff.c:536-537`) to the RIFF tags
+/// 0x0006/0x0007 — both directions live in the demuxer's
+/// [`NUT_AUDIO_TAGS`], so round-trips hold.
+const NUT_CODEC_GET_TAG: &[(CodecId, u32)] = &[
+    // ff_nut_audio_tags family rows (nut.c:233-252), table order
+    (CodecId::PcmF32be, tag(32, b'D', b'F', b'P')),  // nut.c:233
+    (CodecId::PcmF32le, tag(b'P', b'F', b'D', 32)),  // nut.c:234
+    (CodecId::PcmF64be, tag(64, b'D', b'F', b'P')),  // nut.c:235
+    (CodecId::PcmF64le, tag(b'P', b'F', b'D', 64)),  // nut.c:236
+    (CodecId::PcmS16be, tag(16, b'D', b'S', b'P')),  // nut.c:237
+    (CodecId::PcmS16le, tag(b'P', b'S', b'D', 16)),  // nut.c:238
+    (CodecId::PcmS24be, tag(24, b'D', b'S', b'P')),  // nut.c:239
+    (CodecId::PcmS24le, tag(b'P', b'S', b'D', 24)),  // nut.c:240
+    (CodecId::PcmS32be, tag(32, b'D', b'S', b'P')),  // nut.c:241
+    (CodecId::PcmS32le, tag(b'P', b'S', b'D', 32)),  // nut.c:242
+    (CodecId::PcmU8, tag(b'P', b'U', b'D', 8)),      // nut.c:252
+    // ff_codec_wav_tags family rows (riff.c:536-537) — after the nut table
+    (CodecId::PcmAlaw, 0x0006),
+    (CodecId::PcmMulaw, 0x0007),
+    // ff_nut_audio_extra_tags (nut.c:224-225) — after wav, no new ids
+];
+
+/// The audio id→tag direction of the scan above.
+fn audio_codec_get_tag(id: CodecId) -> Option<u32> {
+    NUT_CODEC_GET_TAG.iter().find(|&&(i, _)| i == id).map(|&(_, t)| t)
+}
+
+/// `put_str` (`nutenc.c:338-344`) — vint length + raw bytes.
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    put_v(out, s.len() as u64);
+    out.extend_from_slice(s.as_bytes());
+}
+
+/// `put_tt` (`nutenc.c:329-334`) — a timestamp folded together with its
+/// time-base id: `val = ts · time_base_count + tb_id`.
+fn put_tt(out: &mut Vec<u8>, time_base_count: usize, tb_id: usize, val: i64) {
+    let val = (val as u64).wrapping_mul(time_base_count as u64) + tb_id as u64;
+    put_v(out, val);
+}
+
+/// `av_get_audio_frame_duration2(par, 0)` (`libavcodec/utils.c:823-834`)
+/// for the family: every PCM codec needs `frame_bytes > 0` for its only
+/// applicable branch (utils.c:586) and no fixed-duration case lists it
+/// (utils.c:591-614), so with frame_bytes = 0 the answer is 0 — C then
+/// lands in `if (!frame_size) frame_size = 1` (nutenc.c:209-210).
+fn audio_frame_duration2() -> i64 {
+    0
+}
+
+/// `av_log2` (mathematics.h) for nonzero x — `floor(log2(x))`, the shape
+/// `write_index`'s trailing back-pointer uses (nutenc.c:662).
+fn av_log2(x: u64) -> u64 {
+    u64::from(63 - x.leading_zeros())
+}
+
+/// The write side of C's per-stream state: the shared [`StreamContext`]
+/// (last_pts/last_flags/msb_pts_shift/max_pts_distance/time_base —
+/// `nut.h:75-85`) plus the fields only `nut_write_packet`/`write_index`
+/// reach and the caller's original time base (C's `avpriv_set_pts_info`
+/// at nutenc.c:756 swaps the stream's base before packets flow; the port's
+/// immutable `Stream` keeps it here so pts can be rescaled at the door).
+struct MuxStream {
+    ctx: StreamContext,
+    /// The caller's `Stream::time_base` — packets arrive in these units.
+    src_time_base: Rational,
+    /// `nus->keyframe_pts` (`nut.h:84`): the first KEY pts of each
+    /// syncpoint range, `NOPTS` where a range has none. Grown by the
+    /// `1 << 60 % sp_count == 0` doubling rule (nutenc.c:1055-1066).
+    keyframe_pts: Vec<i64>,
+    /// `sti->index_entries` as `av_add_index_entry` fills them
+    /// (nutenc.c:1164-1170): `(pos, pts)` of each keyframe, in write order.
+    index_entries: Vec<(u64, i64)>,
+}
+
+/// `NUTContext` (`nut.h:91-118`) — the write-side fields. `write_index`
+/// is C's AVOption default `true` (nutenc.c:1231); `flags` stays 0 (no
+/// `NUT_BROADCAST`/`NUT_PIPE`) so `version` is `NUT_STABLE_VERSION` = 3
+/// (nutenc.c:727) and the version-4 paths never fire.
+pub struct NutMuxer {
+    frame_code: [FrameCode; 256],
+    /// `nut->header[]` — `[0]` empty by definition (an elision of nothing).
+    headers: Vec<Vec<u8>>,
+    header_count: usize,
+    streams: Vec<MuxStream>,
+    /// `codec_tag` per stream, resolved once at `write_header` (C does it
+    /// in `init_muxer`, mux.c:304-325, with the rawvideo pixel-format rule
+    /// the encoder supplied, rawenc.c:42-43).
+    codec_tags: Vec<u32>,
+    time_bases: Vec<Rational>,
+    max_distance: u32,
+    last_syncpoint_pos: i64,
+    /// `nut->syncpoints` tree (nut.c:296-333) — positions arrive in
+    /// increasing `tell()` order, so the sorted tree is a `Vec`.
+    sp_positions: Vec<u64>,
+    sp_count: usize,
+    write_index: bool,
+    /// `nut->max_pts` + `nut->max_pts_tb` (as a time-base id).
+    max_pts: i64,
+    max_pts_tb: Option<usize>,
+    /// The make-non-negative shift of `avoid_negative_ts = 1`
+    /// (nutenc.c:799-800 + mux.c's `mux_ts_offset`): fixed from the first
+    /// negative dts, applied to every later packet.
+    ts_offset: i64,
+    /// Set by [`NutMuxer::write_header`]; packets before it are rejected.
+    header_written: bool,
+}
+
+impl NutMuxer {
+    pub fn new() -> Self {
+        NutMuxer {
+            frame_code: [FrameCode::default(); 256],
+            headers: Vec::new(),
+            header_count: 0,
+            streams: Vec::new(),
+            codec_tags: Vec::new(),
+            time_bases: Vec::new(),
+            max_distance: 0,
+            last_syncpoint_pos: 0,
+            sp_positions: Vec::new(),
+            sp_count: 0,
+            write_index: true,
+            max_pts: 0,
+            max_pts_tb: None,
+            ts_offset: 0,
+            header_written: false,
+        }
+    }
+
+    /// `ff_nut_reset_ts` (`nut.c:266-275`) — rescale `val` from `tb` into
+    /// every stream's own base (`AV_ROUND_DOWN`).
+    fn reset_ts(&mut self, tb: Rational, val: i64) {
+        for st in &mut self.streams {
+            if let Some(stb) = st.ctx.time_base {
+                st.ctx.last_pts = rescale_rnd_down(
+                    val,
+                    i64::from(tb.num) * i64::from(stb.den),
+                    i64::from(tb.den) * i64::from(stb.num),
+                );
+            }
+        }
+    }
+
+    /// `ff_nut_add_sp` (`nut.c:296-319`) + the `keyframe_pts` doubling of
+    /// `nut_write_packet` (nutenc.c:1051-1067): bump `sp_count`, record the
+    /// position (the tree stays sorted), and whenever `sp_count` is a power
+    /// of two (`(1<<60) % sp_count == 0`) double every stream's
+    /// `keyframe_pts` capacity, the new slots `NOPTS`.
+    fn add_sp(&mut self, pos: u64) {
+        self.sp_count += 1;
+        self.sp_positions.push(pos);
+        if (1i64 << 60) % self.sp_count as i64 == 0 {
+            let cap = 2 * self.sp_count;
+            for st in &mut self.streams {
+                st.keyframe_pts.resize(cap, NOPTS);
+            }
+        }
+    }
+
+    /// `get_needed_flags` (`nutenc.c:805-832`) — the flags a frame header
+    /// must carry for this packet under this frame code. `pts` is already
+    /// in the stream's chosen time base. The side-data `FLAG_SM_DATA` arm
+    /// (nutenc.c:818-819) needs version 4 and never fires.
+    fn get_needed_flags(
+        &self,
+        stream_id: usize,
+        fc: &FrameCode,
+        pkt: &Packet,
+        key: bool,
+        pts: i64,
+    ) -> u32 {
+        let nus = &self.streams[stream_id].ctx;
+        let mut flags = 0u32;
+        if key {
+            flags |= flag::KEY;
+        }
+        if stream_id != fc.stream_id as usize {
+            flags |= flag::STREAM_ID;
+        }
+        if pkt.size() / fc.size_mul as usize != 0 {
+            flags |= flag::SIZE_MSB;
+        }
+        if pts - nus.last_pts != i64::from(fc.pts_delta) {
+            flags |= flag::CODED_PTS;
+        }
+        if pkt.size() > 2 * self.max_distance as usize {
+            flags |= flag::CHECKSUM;
+        }
+        if (pts - nus.last_pts).abs() > nus.max_pts_distance {
+            flags |= flag::CHECKSUM;
+        }
+        if fc.header_idx != 0 {
+            let len = self.headers[fc.header_idx as usize].len();
+            if pkt.size() < len
+                || pkt.size() > 4096
+                || pkt.as_slice()[..len] != self.headers[fc.header_idx as usize][..]
+            {
+                flags |= flag::HEADER_IDX;
+            }
+        }
+        flags | (u32::from(fc.flags) & flag::CODED)
+    }
+
+    /// `find_best_header_idx` (`nutenc.c:834-851`) — the longest elision
+    /// header that prefixes the packet (0 = none). Works on the payload
+    /// bytes, not the codec id, so a rawvideo frame that happens to start
+    /// with `00 00 01 B6` matches like an MPEG4 one would.
+    fn find_best_header_idx(&self, data: &[u8]) -> usize {
+        let mut best_i = 0usize;
+        let mut best_len = 0usize;
+        if data.len() > 4096 {
+            return 0;
+        }
+        for i in 1..self.header_count {
+            let h = &self.headers[i];
+            if data.len() >= h.len() && h.len() > best_len && &data[..h.len()] == h.as_slice() {
+                best_i = i;
+                best_len = h.len();
+            }
+        }
+        best_i
+    }
+
+    /// `build_frame_code` (`nutenc.c:167-301`) — fill all 256 frame codes.
+    /// Followed exactly, including the `'N'`/0/255 reservations: one
+    /// `FLAG_CODED` escape, per-stream `SIZE_MSB|CODED_PTS` headers, the
+    /// audio `pts × pred` grid over `frame_bytes`, the video
+    /// `pts_delta = frame_size` row, and the bulk range sized
+    /// `size_mul = end3 - start3` with `size_lsb = index - start3`.
+    fn build_frame_code(&mut self, streams: &[Stream]) {
+        let mut start = 1usize;
+        let end = 254usize;
+        let keyframe_0_esc = streams.len() > 2;
+        let mut pred_table = [0i64; 10];
+
+        {
+            let ft = &mut self.frame_code[start]; // nutenc.c:177-181
+            ft.flags = flag::CODED as u16;
+            ft.size_mul = 1;
+            ft.pts_delta = 1;
+        }
+        start += 1;
+
+        if keyframe_0_esc {
+            /* keyframe = 0 escape */
+            let ft = &mut self.frame_code[start]; // nutenc.c:185-188
+            ft.flags = (flag::STREAM_ID | flag::SIZE_MSB | flag::CODED_PTS) as u16;
+            ft.size_mul = 1;
+            start += 1;
+        }
+
+        let nb_streams = streams.len();
+        for (stream_id, st) in streams.iter().enumerate() {
+            let start2 = start + (end - start) * stream_id / nb_streams;
+            let end2 = start + (end - start) * (stream_id + 1) / nb_streams;
+            let par = &st.codecpar;
+            let is_audio = par.codec_type == MediaType::Audio;
+            let intra_only = /*codec->intra_only ||*/ is_audio;
+            let mut frame_size: i64 = 0;
+
+            if is_audio {
+                frame_size = audio_frame_duration2();
+                // The VORBIS fallback (nutenc.c:202-203) needs a codec id
+                // outside the family.
+            } else {
+                // nutenc.c:205-207 — f = (1/avg_frame_rate) / time_base;
+                // a pure number of file-tb ticks per frame.
+                let tb = self.streams[stream_id].ctx.time_base.unwrap_or(Rational::ONE);
+                let f = st.avg_frame_rate.inv() / tb; // av_div_q(av_inv_q(...), tb)
+                if f.den == 1 && f.num > 0 {
+                    frame_size = i64::from(f.num);
+                }
+            }
+            if frame_size == 0 {
+                frame_size = 1; // nutenc.c:209-210
+            }
+
+            let mut start2 = start2;
+            for key_frame in 0..2u32 {
+                if !intra_only || !keyframe_0_esc || key_frame != 0 {
+                    let ft = &mut self.frame_code[start2]; // nutenc.c:214-221
+                    ft.flags = (flag::KEY * key_frame | flag::SIZE_MSB | flag::CODED_PTS) as u16;
+                    ft.stream_id = stream_id as u8;
+                    ft.size_mul = 1;
+                    if is_audio {
+                        ft.header_idx = 0; // find_header_idx — family: always 0
+                    }
+                    start2 += 1;
+                }
+            }
+
+            let key_frame = u32::from(intra_only); // nutenc.c:225
+            if is_audio {
+                // nutenc.c:231-249 — the block_align-derived byte grid.
+                let frame_bytes: i64 = if par.block_align > 0 {
+                    i64::from(par.block_align)
+                } else {
+                    frame_size * par.bit_rate / (8 * i64::from(par.sample_rate))
+                };
+                for pts in 0..2i64 {
+                    for pred in 0..2i64 {
+                        let ft = &mut self.frame_code[start2];
+                        ft.flags = (flag::KEY * key_frame) as u16;
+                        ft.stream_id = stream_id as u8;
+                        ft.size_mul = (frame_bytes + 2) as u16; // C wraps >u16 identically
+                        ft.size_lsb = (frame_bytes + pred) as u16;
+                        ft.pts_delta = (pts * frame_size) as i16;
+                        ft.header_idx = 0; // find_header_idx — family: always 0
+                        start2 += 1;
+                    }
+                }
+            } else {
+                let ft = &mut self.frame_code[start2]; // nutenc.c:251-256
+                ft.flags = (flag::KEY | flag::SIZE_MSB) as u16;
+                ft.stream_id = stream_id as u8;
+                ft.size_mul = 1;
+                ft.pts_delta = frame_size as i16;
+                start2 += 1;
+            }
+
+            // nutenc.c:260-275 — the pred table: `video_delay` (no such
+            // field; family codecs carry 0) and VORBIS pick the wider
+            // tables; everything else is the single delta 1.
+            let (pred_count, table) = (1usize, [1i64; 10]);
+            pred_table[..pred_count].copy_from_slice(&table[..pred_count]);
+
+            for pred in 0..pred_count {
+                let start3 = start2 + (end2 - start2) * pred / pred_count;
+                let end3 = start2 + (end2 - start2) * (pred + 1) / pred_count;
+                pred_table[pred] *= frame_size; // nutenc.c:281
+
+                for index in start3..end3 {
+                    let ft = &mut self.frame_code[index]; // nutenc.c:284-294
+                    ft.flags = (flag::KEY * key_frame | flag::SIZE_MSB) as u16;
+                    ft.stream_id = stream_id as u8;
+                    // FIXME use single byte size and pred from last (nutenc.c:288)
+                    ft.size_mul = (end3 - start3) as u16;
+                    ft.size_lsb = (index - start3) as u16;
+                    ft.pts_delta = pred_table[pred] as i16;
+                    if is_audio {
+                        ft.header_idx = 0; // find_header_idx — family: always 0
+                    }
+                }
+            }
+        }
+
+        // nutenc.c:297 — shift everything above 'N' up one slot (79..=255
+        // from 78..=254), then reserve 0, 'N' and 255.
+        self.frame_code.copy_within(b'N' as usize..255, b'N' as usize + 1);
+        self.frame_code[0].flags = flag::INVALID as u16;
+        self.frame_code[255].flags = flag::INVALID as u16;
+        self.frame_code[b'N' as usize].flags = flag::INVALID as u16;
+    }
+
+    /// `write_mainheader` (`nutenc.c:372-450`) — version, counts, time
+    /// bases, the run-length coded frame-code table (the `tmp_fields`
+    /// ladder of nutenc.c:395-441, including the `'N'` skip that lets a run
+    /// straddle the reserved code and the `j != tmp_mul - tmp_size →
+    /// tmp_fields = 6` override, ported bug-compatibly), then the elision
+    /// headers. Version is always 3, so `minor_version` (nutenc.c:380) and
+    /// `flags` (nutenc.c:448-449) are never written.
+    fn write_mainheader(&self, out: &mut Vec<u8>) {
+        put_v(out, 3); // nut->version = FFMAX(NUT_STABLE_VERSION, 3+!!flags) = 3
+        put_v(out, self.streams.len() as u64);
+        put_v(out, u64::from(self.max_distance));
+        put_v(out, self.time_bases.len() as u64);
+        for tb in &self.time_bases {
+            put_v(out, tb.num as u64);
+            put_v(out, tb.den as u64);
+        }
+
+        let mut tmp_pts: i64 = 0;
+        let mut tmp_mul: i64 = 1;
+        let mut tmp_stream: i64 = 0;
+        let tmp_match: u64 = (1i64.wrapping_sub(1i64 << 62)) as u64; // nutenc.c:393
+        let mut tmp_head_idx: i64 = 0;
+        let mut i = 0usize;
+        while i < 256 {
+            let mut tmp_fields: u64 = 0;
+            let mut tmp_size: i64 = 0;
+            let fc = self.frame_code[i];
+            if tmp_pts != i64::from(fc.pts_delta) {
+                tmp_fields = 1;
+            }
+            if tmp_mul != i64::from(fc.size_mul) {
+                tmp_fields = 2;
+            }
+            if tmp_stream != i64::from(fc.stream_id) {
+                tmp_fields = 3;
+            }
+            if tmp_size != i64::from(fc.size_lsb) {
+                tmp_fields = 4;
+            }
+            if tmp_head_idx != i64::from(fc.header_idx) {
+                tmp_fields = 8;
+            }
+
+            tmp_pts = i64::from(fc.pts_delta);
+            let tmp_flags = u64::from(fc.flags);
+            tmp_stream = i64::from(fc.stream_id);
+            tmp_mul = i64::from(fc.size_mul);
+            tmp_size = i64::from(fc.size_lsb);
+            tmp_head_idx = i64::from(fc.header_idx);
+
+            // nutenc.c:414-427 — run forward while consecutive codes match;
+            // `'N'` is skipped without consuming a size_lsb step (its
+            // `j--` cancels the loop increment).
+            let mut j: i64 = 0;
+            while i < 256 {
+                if i == b'N' as usize {
+                    i += 1;
+                    continue;
+                }
+                let fc = self.frame_code[i];
+                if i64::from(fc.pts_delta) != tmp_pts
+                    || u64::from(fc.flags) != tmp_flags
+                    || i64::from(fc.stream_id) != tmp_stream
+                    || i64::from(fc.size_mul) != tmp_mul
+                    || i64::from(fc.size_lsb) != tmp_size + j
+                    || i64::from(fc.header_idx) != tmp_head_idx
+                {
+                    break;
+                }
+                j += 1;
+                i += 1;
+            }
+            if j != tmp_mul - tmp_size {
+                tmp_fields = 6; // nutenc.c:428-429 — may override 8, like C
+            }
+
+            put_v(out, tmp_flags);
+            put_v(out, tmp_fields);
+            if tmp_fields > 0 {
+                put_s(out, tmp_pts);
+            }
+            if tmp_fields > 1 {
+                put_v(out, tmp_mul as u64);
+            }
+            if tmp_fields > 2 {
+                put_v(out, tmp_stream as u64);
+            }
+            if tmp_fields > 3 {
+                put_v(out, tmp_size as u64);
+            }
+            if tmp_fields > 4 {
+                put_v(out, 0); /* tmp_res */
+            }
+            if tmp_fields > 5 {
+                put_v(out, j as u64);
+            }
+            if tmp_fields > 6 {
+                put_v(out, tmp_match); // nutenc.c:439 (dead for version 3 tables)
+            }
+            if tmp_fields > 7 {
+                put_v(out, tmp_head_idx as u64);
+            }
+        }
+
+        put_v(out, (self.header_count - 1) as u64); // nutenc.c:442
+        for h in &self.headers[1..self.header_count] {
+            put_v(out, h.len() as u64);
+            out.extend_from_slice(h);
+        }
+        // version 3: no flags (nutenc.c:448-449)
+    }
+
+    /// `write_streamheader` (`nutenc.c:452-507`). Errors with C's text when
+    /// the stream's codec has no tag in the NUT tables (nutenc.c:470-471,
+    /// `AVERROR(EINVAL)`).
+    fn write_streamheader(&self, out: &mut Vec<u8>, st: &Stream, i: usize) -> Result<()> {
+        let par = &st.codecpar;
+
+        put_v(out, i as u64);
+        match par.codec_type {
+            MediaType::Video => put_v(out, 0),
+            MediaType::Audio => put_v(out, 1),
+            MediaType::Subtitle => put_v(out, 2),
+            _ => put_v(out, 3),
+        }
+        put_v(out, 4);
+
+        if self.codec_tags[i] == 0 {
+            log_error!(Some("nut"), "No codec tag defined for stream {}", i);
+            return Err(Error::InvalidArgument(format!(
+                "No codec tag defined for stream {i}"
+            )));
+        }
+        out.extend_from_slice(&self.codec_tags[i].to_le_bytes()); // avio_wl32
+
+        let ms = &self.streams[i].ctx;
+        let tb_id = ms.time_base_id;
+        put_v(out, tb_id as u64);
+        put_v(out, u64::from(ms.msb_pts_shift));
+        put_v(out, ms.max_pts_distance as u64);
+        put_v(out, 0); // par->video_delay — no field; family codecs carry 0
+        out.push(0); /* flags: 0x1 - fixed_fps, 0x2 - index_present */
+
+        put_v(out, 0); // par->extradata_size — no extradata in the port
+        // (avio_write of extradata follows in C; nothing to write)
+
+        match par.codec_type {
+            MediaType::Audio => {
+                put_v(out, par.sample_rate as u64);
+                put_v(out, 1);
+                put_v(out, par.ch_layout.nb_channels as u64);
+            }
+            MediaType::Video => {
+                put_v(out, u64::from(par.width));
+                put_v(out, u64::from(par.height));
+                if st.sample_aspect_ratio.num <= 0 || st.sample_aspect_ratio.den <= 0 {
+                    put_v(out, 0);
+                    put_v(out, 0);
+                } else {
+                    put_v(out, st.sample_aspect_ratio.num as u64);
+                    put_v(out, st.sample_aspect_ratio.den as u64);
+                }
+                put_v(out, 0); /* csp type -- unknown */
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// `add_info` (`nutenc.c:509-515`) — one `name = "value"` entry.
+    fn add_info(out: &mut Vec<u8>, type_: &str, value: &str) {
+        put_str(out, type_);
+        put_s(out, -1);
+        put_str(out, value);
+    }
+
+    /// `write_globalinfo` (`nutenc.c:517-543`) — C's empty-metadata shape:
+    /// stream/chapter/timestamp/length zeros and `count = 0` (the
+    /// dictionary walk at nutenc.c:529-530 adds nothing without metadata;
+    /// `ff_standardize_creation_time` likewise).
+    fn write_globalinfo(&self, out: &mut Vec<u8>) {
+        put_v(out, 0); // stream_id_plus1
+        put_v(out, 0); // chapter_id
+        put_v(out, 0); // timestamp_start
+        put_v(out, 0); // length
+        put_v(out, 0); // count
+    }
+
+    /// `write_streaminfo` (`nutenc.c:545-585`) — per-stream metadata,
+    /// dispositions, and the unconditional `r_frame_rate` entry of a video
+    /// stream (nutenc.c:562-569, `"%d/%d"` of `r_frame_rate` or
+    /// `avg_frame_rate`). Returns the info-packet payload, or `None` when
+    /// the entry count is 0 (C writes no packet then, nutenc.c:572).
+    fn write_streaminfo(&self, st: &Stream, stream_id: usize) -> Option<Vec<u8>> {
+        let mut info = Vec::new();
+        let mut count = 0usize;
+        // (dispositions need an AVStream flag the port does not carry)
+        if st.codecpar.codec_type == MediaType::Video {
+            let fr = if st.r_frame_rate.num > 0 && st.r_frame_rate.den > 0 {
+                st.r_frame_rate
+            } else {
+                st.avg_frame_rate
+            };
+            Self::add_info(&mut info, "r_frame_rate", &format!("{}/{}", fr.num, fr.den));
+            count += 1;
+        }
+        if count == 0 {
+            return None;
+        }
+        let mut out = Vec::new();
+        put_v(&mut out, stream_id as u64 + 1); // stream_id_plus1
+        put_v(&mut out, 0); // chapter_id
+        put_v(&mut out, 0); // timestamp_start
+        put_v(&mut out, 0); // length
+        put_v(&mut out, count as u64);
+        out.extend_from_slice(&info);
+        Some(out)
+    }
+
+    /// `write_headers` (`nutenc.c:667-717`) — main + stream headers + the
+    /// info packets (global always; per-stream only with entries), then the
+    /// syncpoint/index reset state. `header_count` increments per call
+    /// (nutenc.c:710) — the periodic re-header test at nutenc.c:1001 and
+    /// the trailer's `while (header_count < 3)` both key off it.
+    fn write_headers(&mut self, io: &mut IoContext, streams: &[Stream]) -> Result<()> {
+        let mut payload = Vec::new();
+        let mut pkt = Vec::new();
+
+        self.write_mainheader(&mut payload);
+        put_packet(&mut pkt, &payload, MAIN_STARTCODE);
+        io.write_all(&pkt)?;
+
+        for (i, st) in streams.iter().enumerate() {
+            payload.clear();
+            self.write_streamheader(&mut payload, st, i)?;
+            pkt.clear();
+            put_packet(&mut pkt, &payload, STREAM_STARTCODE);
+            io.write_all(&pkt)?;
+        }
+
+        payload.clear();
+        self.write_globalinfo(&mut payload);
+        pkt.clear();
+        put_packet(&mut pkt, &payload, INFO_STARTCODE);
+        io.write_all(&pkt)?;
+
+        for (i, st) in streams.iter().enumerate() {
+            if let Some(info) = self.write_streaminfo(st, i) {
+                pkt.clear();
+                put_packet(&mut pkt, &info, INFO_STARTCODE);
+                io.write_all(&pkt)?;
+            }
+        }
+
+        // (chapters: none in the port — nutenc.c:701-707)
+        self.last_syncpoint_pos = i64::MIN; // nutenc.c:709
+        self.header_count += 1; // nutenc.c:710
+        Ok(())
+    }
+
+    /// `write_index` (`nutenc.c:615-665`) — max_pts (put_tt), the sorted
+    /// syncpoint positions as `(pos >> 4)` deltas, the per-stream runs of
+    /// keyframe pts (`1 + 2·flag + 4·n` group codes, nutenc.c:649), and the
+    /// trailing 8-byte back-distance the demuxer's index reader would seek
+    /// by (nutenc.c:660-662).
+    fn write_index(&mut self, body: &mut Vec<u8>) {
+        // put_tt(nut, nut->max_pts_tb, bc, nut->max_pts) (nutenc.c:622)
+        let tb_id = self.max_pts_tb.unwrap_or(0);
+        put_tt(body, self.time_bases.len(), tb_id, self.max_pts);
+
+        put_v(body, self.sp_count as u64);
+
+        // nutenc.c:626-630 — tree walk in position order; positions were
+        // appended in increasing tell() order, so the Vec is the tree.
+        let mut dummy_pos: u64 = 0;
+        for _ in 0..self.sp_count {
+            let next = *self
+                .sp_positions
+                .iter()
+                .find(|&&p| p > dummy_pos)
+                .expect("sp_count matches stored positions");
+            put_v(body, (next >> 4).wrapping_sub(dummy_pos >> 4));
+            dummy_pos = next;
+        }
+
+        for st in &mut self.streams {
+            let mut last_pts: i64 = -1;
+            let mut j = 0usize;
+            while j < self.sp_count {
+                if j > 0 && st.keyframe_pts[j] == st.keyframe_pts[j - 1] {
+                    // nutenc.c:640-643
+                    log_warning!(Some("nut"), "Multiple keyframes with same PTS");
+                    st.keyframe_pts[j] = NOPTS;
+                }
+
+                let flag = (st.keyframe_pts[j] != NOPTS) ^ (j + 1 == self.sp_count);
+                let mut n = 0usize;
+                while j < self.sp_count && (st.keyframe_pts[j] != NOPTS) == flag {
+                    j += 1;
+                    n += 1;
+                }
+
+                put_v(body, 1 + 2 * flag as u64 + 4 * n as u64); // nutenc.c:649
+                let mut k = j - n;
+                while k <= j && k < self.sp_count {
+                    if st.keyframe_pts[k] != NOPTS {
+                        debug_assert!(st.keyframe_pts[k] > last_pts); // nutenc.c:653
+                        put_v(body, (st.keyframe_pts[k] - last_pts) as u64);
+                        last_pts = st.keyframe_pts[k];
+                    }
+                    k += 1;
+                }
+            }
+        }
+
+        // nutenc.c:660-662 — payload_size counts the body plus the packet
+        // overhead (8-byte startcode + 4-byte checksum), and the trailing
+        // big-endian value is the distance from the file end back to (past)
+        // the index packet start.
+        let payload_size = body.len() as u64 + 8 + 4;
+        let back = 8 + payload_size + av_log2(payload_size) / 7 + 1 + 4 * u64::from(payload_size > 4096);
+        body.extend_from_slice(&back.to_be_bytes());
+    }
+
+    /// The per-packet core of `nut_write_packet` (`nutenc.c:1001-1184`) —
+    /// everything from the periodic re-header check through the frame write
+    /// and the keyframe/max_pts bookkeeping. See [`NutMuxer::write_packet`]
+    /// for the pts/dts preparation that precedes it.
+    fn write_frame_packet(
+        &mut self,
+        io: &mut IoContext,
+        streams: &[Stream],
+        pkt: &Packet,
+        pts: i64,
+        dts: i64,
+        key: bool,
+    ) -> Result<()> {
+        let si = pkt.stream_index as usize;
+        let data_size = pkt.size(); // no side data at version 3
+
+        // nutenc.c:1001-1002 — re-write the headers past the (huge)
+        // doubling threshold; header_count is ≥ 8 after the first write.
+        if (1u64 << (20 + 3 * self.header_count as u64)) <= io.tell() {
+            self.write_headers(io, streams)?;
+        }
+
+        let mut store_sp = false;
+        if key && self.streams[si].ctx.last_flags & flag::KEY == 0 {
+            store_sp = true; // nutenc.c:1004-1005
+        }
+        if data_size as i64 + 30 /*FIXME check*/ + io.tell() as i64
+            >= self.last_syncpoint_pos + i64::from(self.max_distance)
+        {
+            store_sp = true; // nutenc.c:1007-1008
+        }
+
+        // FIXME: Ensure store_sp is 1 in the first place. (nutenc.c:1010)
+        // (the NUT_PIPE half of the guard at nutenc.c:1012-1013 is never
+        // taken with flags = 0)
+        if store_sp {
+            let mut sp_pos = i64::MAX;
+
+            let nus_tb = self.streams[si].ctx.time_base.unwrap_or(Rational::ONE);
+            self.reset_ts(nus_tb, dts); // ff_nut_reset_ts (nutenc.c:1016)
+            for i in 0..streams.len() {
+                // nutenc.c:1018-1035 — the earliest keyframe index entry at
+                // or before this dts, in each stream's own time base.
+                let stb = self.streams[i].ctx.time_base.unwrap_or(Rational::ONE);
+                let dts_tb = rescale_rnd_down(
+                    dts,
+                    i64::from(nus_tb.num) * i64::from(stb.den),
+                    i64::from(nus_tb.den) * i64::from(stb.num),
+                );
+                if let Some(index) = index_search_backward(&self.streams[i].index_entries, dts_tb) {
+                    sp_pos = sp_pos.min(self.streams[i].index_entries[index].0 as i64);
+                    // (the !write_index entry pruning at nutenc.c:1028-1033
+                    // needs write_index = 0; the default keeps everything)
+                }
+            }
+
+            self.last_syncpoint_pos = io.tell() as i64; // nutenc.c:1037
+            let mut body = Vec::new();
+            let tb_id = self.streams[si].ctx.time_base_id;
+            put_tt(&mut body, self.time_bases.len(), tb_id, dts); // nutenc.c:1041
+            put_v(
+                &mut body,
+                if sp_pos != i64::MAX {
+                    ((self.last_syncpoint_pos - sp_pos) >> 4) as u64
+                } else {
+                    0
+                },
+            ); // nutenc.c:1042
+            // (NUT_BROADCAST wallclock, nutenc.c:1044-1047 — never)
+            let mut sp = Vec::new();
+            put_packet(&mut sp, &body, SYNCPOINT_STARTCODE);
+            io.write_all(&sp)?;
+
+            if self.write_index {
+                self.add_sp(self.last_syncpoint_pos as u64); // ff_nut_add_sp
+            }
+        }
+        // C's av_assert0(nus->last_pts != AV_NOPTS_VALUE) (nutenc.c:1069):
+        // the first packet always stores a syncpoint (the distance check
+        // above starts from INT_MIN), and reset_ts set last_pts then.
+
+        let msb_pts_shift = self.streams[si].ctx.msb_pts_shift;
+        let last_pts = self.streams[si].ctx.last_pts;
+        let mut coded_pts = pts & ((1i64 << msb_pts_shift) - 1); // nutenc.c:1071
+        if ff_lsb2full(msb_pts_shift, last_pts, coded_pts) != pts {
+            coded_pts = pts + (1i64 << msb_pts_shift); // nutenc.c:1072-1073
+        }
+
+        let best_header_idx = self.find_best_header_idx(pkt.as_slice()); // nutenc.c:1075
+
+        // nutenc.c:1077-1132 — price every valid frame code, keep the
+        // cheapest (first wins ties, C's strict <).
+        let mut best_length = i64::MAX;
+        let mut frame_code: i32 = -1;
+        for i in 0..256usize {
+            let mut length = 0i64;
+            let fc = self.frame_code[i];
+            let mut flags = u32::from(fc.flags);
+
+            if flags & flag::INVALID != 0 {
+                continue;
+            }
+            let needed_flags = self.get_needed_flags(si, &fc, pkt, key, pts);
+
+            if flags & flag::CODED != 0 {
+                length += 1;
+                flags = needed_flags;
+            }
+
+            if flags & needed_flags != needed_flags {
+                continue;
+            }
+            if (flags ^ needed_flags) & flag::KEY != 0 {
+                continue;
+            }
+
+            if flags & flag::STREAM_ID != 0 {
+                length += get_v_length(si as u64) as i64;
+            }
+            if data_size % fc.size_mul as usize != fc.size_lsb as usize {
+                continue;
+            }
+            if flags & flag::SIZE_MSB != 0 {
+                length += get_v_length((data_size / fc.size_mul as usize) as u64) as i64;
+            }
+            if flags & flag::CHECKSUM != 0 {
+                length += 4;
+            }
+            if flags & flag::CODED_PTS != 0 {
+                length += get_v_length(coded_pts as u64) as i64;
+            }
+
+            if flags & flag::CODED != 0
+                && self.headers[best_header_idx].len() as i64
+                    > self.headers[fc.header_idx as usize].len() as i64 + 1
+            {
+                flags |= flag::HEADER_IDX; // nutenc.c:1113-1116
+            }
+            if flags & flag::HEADER_IDX != 0 {
+                length += 1 - self.headers[best_header_idx].len() as i64;
+            } else {
+                length -= self.headers[fc.header_idx as usize].len() as i64;
+            }
+
+            length *= 4;
+            length += i64::from(flags & flag::CODED_PTS == 0);
+            length += i64::from(flags & flag::CHECKSUM == 0);
+
+            if length < best_length {
+                best_length = length;
+                frame_code = i as i32;
+            }
+        }
+        // C's av_assert0(frame_code != -1) (nutenc.c:1133): the FLAG_CODED
+        // escape accepts any stream/size/pts combination, so the search
+        // always finds one.
+        let frame_code = usize::try_from(frame_code).map_err(|_| {
+            Error::InvalidData("no frame code fits the packet".into())
+        })?;
+
+        // nutenc.c:1135-1157 — emit the frame header (checksummed over
+        // exactly these bytes when FLAG_CHECKSUM) then the payload minus
+        // whatever the chosen header_idx elides.
+        let fc = self.frame_code[frame_code];
+        let mut flags = u32::from(fc.flags);
+        let needed_flags = self.get_needed_flags(si, &fc, pkt, key, pts);
+        let mut header_idx = fc.header_idx as usize;
+
+        let mut head = Vec::with_capacity(16);
+        head.push(frame_code as u8);
+        if flags & flag::CODED != 0 {
+            put_v(&mut head, u64::from((flags ^ needed_flags) & !flag::CODED));
+            flags = needed_flags;
+        }
+        if flags & flag::STREAM_ID != 0 {
+            put_v(&mut head, si as u64);
+        }
+        if flags & flag::CODED_PTS != 0 {
+            put_v(&mut head, coded_pts as u64);
+        }
+        if flags & flag::SIZE_MSB != 0 {
+            put_v(&mut head, (data_size / fc.size_mul as usize) as u64);
+        }
+        if flags & flag::HEADER_IDX != 0 {
+            put_v(&mut head, best_header_idx as u64);
+            header_idx = best_header_idx;
+        }
+
+        if flags & flag::CHECKSUM != 0 {
+            head.extend_from_slice(&crc04c11db7_update(0, &head).to_le_bytes());
+        }
+        // (FLAG_SM_DATA — version 4 only, nutenc.c:1154-1156)
+
+        io.write_all(&head)?;
+        let elided = self.headers[header_idx].len();
+        io.write_all(&pkt.as_slice()[elided..])?; // nutenc.c:1157
+
+        self.streams[si].ctx.last_flags = flags; // nutenc.c:1159
+        self.streams[si].ctx.last_pts = pts; // nutenc.c:1160
+
+        // nutenc.c:1162-1173 — keyframe bookkeeping for the index.
+        if flags & flag::KEY != 0 /* && !(nut->flags & NUT_PIPE) */ {
+            self.streams[si]
+                .index_entries
+                .push((self.last_syncpoint_pos as u64, pts));
+            if self.sp_count < self.streams[si].keyframe_pts.len()
+                && self.streams[si].keyframe_pts[self.sp_count] == NOPTS
+            {
+                self.streams[si].keyframe_pts[self.sp_count] = pts;
+            }
+        }
+
+        // nutenc.c:1175-1178 — max_pts in its own time base.
+        let nus_tb = self.streams[si].ctx.time_base.unwrap_or(Rational::ONE);
+        if self.max_pts_tb.is_none()
+            || compare_ts(
+                self.max_pts,
+                self.time_bases[self.max_pts_tb.unwrap_or(0)],
+                pts,
+                nus_tb,
+            ) == std::cmp::Ordering::Less
+        {
+            self.max_pts = pts;
+            self.max_pts_tb = Some(self.streams[si].ctx.time_base_id);
+        }
+        Ok(())
+    }
+}
+
+impl Default for NutMuxer {
+    fn default() -> Self {
+        NutMuxer::new()
+    }
+}
+
+impl Muxer for NutMuxer {
+    /// The generic `init_muxer` stream gate for nut: C declares
+    /// `video_codec = MPEG4` / `audio_codec = VORBIS|MP3|MP2`
+    /// (nutenc.c:1248-1250) as *defaults for stream creation*, not a type
+    /// restriction — any stream whose codec resolves a tag muxes. The port
+    /// only rejects an empty stream list.
+    fn init(&mut self, streams: &[Stream]) -> Result<()> {
+        if streams.is_empty() {
+            return Err(Error::InvalidArgument(
+                "nut muxer requires at least one stream".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// `nut_write_header` (`nutenc.c:719-803`): resolve time bases and
+    /// codec tags, build the elision headers and the frame-code table,
+    /// write the ID string, then [`NutMuxer::write_headers`]. The version
+    /// is the stable 3 (no syncpoint flags — see the module map) so the
+    /// experimental-compliance gate at nutenc.c:728-735 cannot fire.
+    fn write_header(&mut self, io: &mut IoContext, streams: &[Stream]) -> Result<()> {
+        if streams.is_empty() {
+            return Err(Error::InvalidArgument(
+                "nut muxer requires at least one stream".into(),
+            ));
+        }
+
+        // nutenc.c:737-773 — per-stream time base + pts bookkeeping.
+        self.streams.clear();
+        self.time_bases.clear();
+        self.codec_tags.clear();
+        for (i, st) in streams.iter().enumerate() {
+            let par = &st.codecpar;
+            let time_base = if par.codec_type == MediaType::Audio && par.sample_rate > 0 {
+                Rational::new(1, par.sample_rate)
+            } else if st.time_base.num > 0 && st.time_base.den > 0 {
+                choose_timebase(st.time_base, 48000)
+            } else {
+                // C's caller contract (avpriv_set_pts_info before muxing);
+                // UB there, an explicit error here.
+                return Err(Error::InvalidArgument(format!(
+                    "stream {i} has no time base (set Stream::set_pts_info)"
+                )));
+            };
+
+            // nutenc.c:758-765 — dedup into nut->time_base[].
+            let tb_id = match self.time_bases.iter().position(|&tb| tb == time_base) {
+                Some(id) => id,
+                None => {
+                    self.time_bases.push(time_base);
+                    self.time_bases.len() - 1
+                }
+            };
+
+            let msb_pts_shift = if 1000 * i64::from(time_base.num) >= i64::from(time_base.den)
+            {
+                7 // nutenc.c:767-768
+            } else {
+                14 // nutenc.c:769-770
+            };
+            let max_pts_distance = i64::from(time_base.den.max(time_base.num))
+                / i64::from(time_base.num); // nutenc.c:771-772
+
+            self.streams.push(MuxStream {
+                ctx: StreamContext {
+                    last_pts: 0,
+                    msb_pts_shift,
+                    max_pts_distance,
+                    time_base: Some(time_base),
+                    time_base_id: tb_id,
+                    ..StreamContext::default()
+                },
+                src_time_base: st.time_base,
+                keyframe_pts: Vec::new(),
+                index_entries: Vec::new(),
+            });
+
+            // init_muxer's tag resolution (mux.c:304-325): the rawvideo
+            // pixel-format tag the encoder sets (rawenc.c:42-43), else the
+            // first NUT table row for the codec id. No row → C's
+            // write_streamheader error fires later, on the same value.
+            let codec_tag = match par.codec_type {
+                MediaType::Video if par.codec_id == CodecId::Rawvideo => {
+                    pixfmt_codec_tag(par.format).unwrap_or(0)
+                }
+                MediaType::Audio => audio_codec_get_tag(par.codec_id).unwrap_or(0),
+                _ => 0,
+            };
+            self.codec_tags.push(codec_tag);
+        }
+
+        // (chapters — nutenc.c:775-786: none in the port)
+
+        self.max_distance = MAX_DISTANCE; // nutenc.c:788
+        // build_elision_headers (nutenc.c:145-165): header_count = 7, the
+        // six fixed prefixes.
+        // C's fixed `nut->headers[128]`: slots beyond the six elision
+        // prefixes are zero-length (absent) and header_count grows past 7
+        // on every header REwrite (nutenc.c:710) — find_best_header_idx
+        // and get_needed_flags safely index into those empty slots.
+        self.headers = vec![Vec::new(); 128];
+        self.headers[0] = Vec::new(); // [0]: empty by definition
+        for (i, h) in ELISION_HEADERS.iter().enumerate() {
+            self.headers[i + 1] = h.to_vec();
+        }
+        self.header_count = 7;
+
+        self.build_frame_code(streams);
+        debug_assert_eq!(
+            self.frame_code[b'N' as usize].flags,
+            flag::INVALID as u16
+        ); // nutenc.c:791
+
+        io.write_all(b"nut/multimedia container")?; // ID_STRING (nut.h:35)
+        io.write_all(&[0])?; // avio_w8(bc, 0) (nutenc.c:794)
+
+        self.write_headers(io, streams)?;
+
+        // avoid_negative_ts default 1 (nutenc.c:799-800) — the shift is
+        // fixed from the first packet in write_packet (mux_ts_offset).
+        self.header_written = true;
+        Ok(())
+    }
+
+    /// `nut_write_packet` (`nutenc.c:963-1184`). Timestamp contract: C
+    /// resets the stream time base in `nut_write_header`
+    /// (`avpriv_set_pts_info`, nutenc.c:756) and its callers hand over
+    /// packets already in that base; the port keeps the caller's base and
+    /// rescales pts/dts here (see the module doc's time-base note). The
+    /// `!reorder` dts fill (`prepare_input_packet`, mux.c:784-789 — every
+    /// family codec is intra-only, so never reordered) and the intra-only
+    /// KEY fill (mux.c:805-806) are applied first, exactly as C's generic
+    /// layer would.
+    fn write_packet(
+        &mut self,
+        io: &mut IoContext,
+        streams: &[Stream],
+        pkt: &Packet,
+    ) -> Result<()> {
+        if !self.header_written {
+            return Err(Error::InvalidArgument(
+                "write_packet before write_header".into(),
+            ));
+        }
+        let si = pkt.stream_index as usize;
+        if si >= self.streams.len() {
+            return Err(Error::StreamNotFound);
+        }
+
+        if pkt.pts < 0 {
+            // nutenc.c:979-986
+            log_error!(
+                Some("nut"),
+                "Negative pts not supported stream {}, pts {}",
+                pkt.stream_index,
+                pkt.pts
+            );
+            if pkt.pts == NOPTS {
+                log_error!(Some("nut"), "Try to enable the genpts flag");
+            }
+            return Err(Error::InvalidArgument(format!(
+                "Negative pts not supported stream {}, pts {}",
+                pkt.stream_index, pkt.pts
+            )));
+        }
+
+        // The two generic-layer fills that reach the bytes (mux.c:784-806):
+        // dts defaults to pts (no reordering for intra-only codecs), and
+        // intra-only packets are KEY.
+        let dts = if pkt.dts != NOPTS { pkt.dts } else { pkt.pts };
+        let key = pkt.flags.contains(PacketFlags::KEY) || is_intra_only(streams[si].codecpar.codec_id);
+
+        // avoid_negative_ts = 1 (nutenc.c:799-800): one shift for the whole
+        // file, fixed by the first negative dts (mux.c's mux_ts_offset).
+        if self.ts_offset == 0 && dts < 0 {
+            self.ts_offset = -dts;
+        }
+        let shift = self.ts_offset;
+
+        let src_tb = self.streams[si].src_time_base;
+        let dst_tb = self.streams[si].ctx.time_base.unwrap_or(Rational::ONE);
+        let pts = rescale_q_near(pkt.pts + shift, src_tb, dst_tb);
+        let dts = rescale_q_near(dts + shift, src_tb, dst_tb);
+
+        self.write_frame_packet(io, streams, pkt, pts, dts, key)
+    }
+
+    /// `nut_write_trailer` (`nutenc.c:1186-1207`): the `header_count < 3`
+    /// re-write loop can never fire (build_elision_headers set 7), and with
+    /// the default `write_index = 1` any stored syncpoint — the first
+    /// packet always stores one — gets an index packet at the end.
+    /// A zero-packet file writes nothing extra.
+    fn write_trailer(&mut self, io: &mut IoContext, streams: &[Stream]) -> Result<()> {
+        if !self.header_written {
+            return Err(Error::InvalidArgument(
+                "write_trailer before write_header".into(),
+            ));
+        }
+        while self.header_count < 3 {
+            self.write_headers(io, streams)?; // nutenc.c:1192-1193
+        }
+
+        if self.sp_count == 0 {
+            return Ok(()); // nutenc.c:1195-1196
+        }
+
+        debug_assert!(self.write_index); // nutenc.c:1200
+        let mut body = Vec::new();
+        self.write_index(&mut body);
+        let mut pkt = Vec::new();
+        put_packet(&mut pkt, &body, INDEX_STARTCODE);
+        io.write_all(&pkt)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3128,5 +4463,159 @@ mod tests {
         .unwrap();
         assert_eq!(ictx.iformat.name, "nut");
         std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(test)]
+mod mux_tests {
+    use super::*;
+    use crate::codec::packet::{Packet, PacketFlags};
+    use crate::codec::params::CodecId;
+    use crate::format::mux::Muxer;
+    use crate::format::testutil::MemHandler;
+    use crate::format::{DemuxOptions, Demuxer, Stream};
+    use crate::util::rational::Rational;
+
+    /// Mux `pkts` for `stream` through NutMuxer, return the produced bytes.
+    fn mux_bytes(stream: &Stream, pkts: &[Packet]) -> Vec<u8> {
+        let (mut io, buf) = MemHandler::shared(&[]);
+        let mut m = NutMuxer::new();
+        m.write_header(&mut io, std::slice::from_ref(stream)).unwrap();
+        for p in pkts {
+            m.write_packet(&mut io, std::slice::from_ref(stream), p).unwrap();
+        }
+        m.write_trailer(&mut io, std::slice::from_ref(stream)).unwrap();
+        io.flush().unwrap();
+        buf.lock().unwrap().clone()
+    }
+
+    /// Demux bytes through the landed NutDemuxer: (stream, packets).
+    fn demux_bytes(bytes: &[u8]) -> (Stream, Vec<Packet>) {
+        let mut io = MemHandler::io(bytes);
+        let mut d = NutDemuxer::new();
+        let st = d.read_header(&mut io).unwrap();
+        let mut pkts = Vec::new();
+        while let Ok(p) = d.read_packet(&mut io) {
+            pkts.push(p);
+        }
+        (st, pkts)
+    }
+
+    fn video_stream(w: u32, h: u32) -> Stream {
+        let mut st = Stream::new_video(0);
+        st.codecpar.codec_id = CodecId::Rawvideo;
+        st.codecpar.format = crate::util::pixfmt::PixelFormat::Yuv420p;
+        st.codecpar.width = w;
+        st.codecpar.height = h;
+        st.set_pts_info(1, 25);
+        st
+    }
+
+    fn pkt(data: Vec<u8>, pts: i64, key: bool) -> Packet {
+        let mut p = Packet::from_vec(data);
+        p.pts = pts;
+        p.duration = 1;
+        p.stream_index = 0;
+        if key {
+            p.flags = PacketFlags::KEY;
+        }
+        p
+    }
+
+    /// THE acceptance bar: video frames with varying sizes and pts ride
+    /// mux → demux with identical payload, pts, duration, flags.
+    #[test]
+    fn mux_demux_round_trip_video() {
+        let st = video_stream(64, 48);
+        let sizes = [(64 * 48 * 3 / 2), (64 * 48 * 3 / 2), (64 * 48 * 3 / 2), 100];
+        let pkts: Vec<Packet> = sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| pkt(vec![(i * 7 % 251) as u8; n], i as i64, i % 3 == 0))
+            .collect();
+        let bytes = mux_bytes(&st, &pkts);
+        assert_eq!(probe(&bytes), PROBE_SCORE_MAX, "written file probes as NUT");
+
+        let (out_st, out) = demux_bytes(&bytes);
+        assert_eq!(out_st.codecpar.width, 64);
+        assert_eq!(out_st.codecpar.height, 48);
+        assert_eq!(out_st.codecpar.format, st.codecpar.format);
+        assert_eq!(out.len(), pkts.len());
+        for (a, b) in pkts.iter().zip(&out) {
+            assert_eq!(a.as_slice(), b.as_slice(), "payload round trips");
+            assert_eq!(a.pts, b.pts);
+            assert_eq!(a.flags, b.flags);
+        }
+    }
+
+    /// Audio round trip: PCM s16le stereo frames.
+    #[test]
+    fn mux_demux_round_trip_audio() {
+        let mut st = Stream::new_audio(0);
+        st.codecpar.codec_id = CodecId::PcmS16le;
+        st.codecpar.sample_rate = 48000;
+        st.codecpar.sample_fmt = crate::util::samplefmt::SampleFormat::S16;
+        st.codecpar.ch_layout = crate::util::channel_layout::ChannelLayout::from_string("stereo").unwrap();
+        st.set_pts_info(1, 48000);
+
+        let pkts: Vec<Packet> = (0..5)
+            .map(|i| {
+                let n = 1024 + i * 64; // varying frame sizes
+                pkt(vec![(i * 31 % 256) as u8; n], (i * 1024) as i64, true)
+            })
+            .collect();
+        let bytes = mux_bytes(&st, &pkts);
+        let (out_st, out) = demux_bytes(&bytes);
+        assert_eq!(out_st.codecpar.sample_rate, 48000);
+        assert_eq!(out_st.codecpar.ch_layout.nb_channels, 2);
+        assert_eq!(out.len(), pkts.len());
+        for (a, b) in pkts.iter().zip(&out) {
+            assert_eq!(a.as_slice(), b.as_slice());
+            assert_eq!(a.pts, b.pts);
+        }
+    }
+
+    /// Large pts deltas trigger the coded-pts path (msb_pts_shift).
+    #[test]
+    fn mux_demux_round_trip_coded_pts() {
+        let st = video_stream(32, 32);
+        let pts = [0i64, 1, 1 << 20, (1 << 20) + 5, 1, 0];
+        let pkts: Vec<Packet> = pts
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| pkt(vec![(i * 13 % 251) as u8; 32 * 32 * 3 / 2], p, i % 2 == 0))
+            .collect();
+        let bytes = mux_bytes(&st, &pkts);
+        let (_, out) = demux_bytes(&bytes);
+        assert_eq!(out.len(), pkts.len());
+        for (a, b) in pkts.iter().zip(&out) {
+            assert_eq!(a.pts, b.pts, "coded pts round trips");
+            assert_eq!(a.as_slice(), b.as_slice());
+        }
+    }
+
+    /// Byte-shape pin: the main header of a fixed config opens with the
+    /// NUT magic and the main startcode layout (nut.h spec bytes).
+    #[test]
+    fn main_header_byte_shape() {
+        let bytes = mux_bytes(&video_stream(64, 48), &[pkt(vec![0u8; 64 * 48 * 3 / 2], 0, true)]);
+        // 'nut/multimedia ' follows the 8-byte main startcode (0x4A 'M').
+        let magic = b"nut/multimedia\0";
+        let body = &magic[..magic.len() - 2]; // strip the escaped \0
+        assert!(
+            bytes.windows(body.len()).take(64).any(|w| w == body),
+            "NUT magic near the start: {:?}",
+            &bytes[..bytes.len().min(48)]
+        );
+    }
+
+    /// Overwrite protection: writing before write_header is C's EINVAL.
+    #[test]
+    fn write_packet_before_header_rejected() {
+        let (mut io, _) = MemHandler::shared(&[]);
+        let mut m = NutMuxer::new();
+        let st = video_stream(32, 32);
+        let p = pkt(vec![0u8; 32 * 32 * 3 / 2], 0, true);
+        assert!(m.write_packet(&mut io, std::slice::from_ref(&st), &p).is_err());
     }
 }

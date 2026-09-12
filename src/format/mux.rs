@@ -35,6 +35,19 @@ pub static OUTPUT_FORMATS: &[OutputFormat] = &[
         video_codec: CodecId::None,
         make: || Box::new(super::wav::WavMuxer::new()),
     },
+    OutputFormat {
+        name: "nut",
+        long_name: "NUT",
+        extensions: &["nut"],
+        // C's ff_nut_muxer declares video_codec MPEG4 + audio_codec
+        // VORBIS/MP3/MP2 (nutenc.c:1248-1250) as stream-creation *defaults*
+        // for avformat_alloc_output_context2, not a gate; the port's
+        // create() takes an explicit Stream, so the row stays None and the
+        // codec gate lives where C's does — write_streamheader's
+        // "No codec tag defined" (nutenc.c:470-471).
+        video_codec: CodecId::None,
+        make: || Box::new(super::nut::NutMuxer::new()),
+    },
 ];
 
 /// `FFOutputFormat` — one row of the muxer registry.
