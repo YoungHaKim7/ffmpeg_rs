@@ -1,4 +1,5 @@
 pub mod aac;
+pub mod ac3;
 pub mod flac;
 pub mod mp3;
 pub mod opus;
