@@ -17,7 +17,12 @@ cargo nextest run --test format
 
 # 내가 원하는 모듈만 test
 cargo t --lib codec::packet
+
+# thread = 1
+cargo test -- --test-threads=1
 ```
+
+
 
 # private 너무 많아서 test코드 안에 넣음
 
