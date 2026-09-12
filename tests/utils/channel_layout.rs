@@ -1,9 +1,7 @@
-use ffmpeg_rs::Error;
-use ffmpeg_rs::util::channel_layout::Channel;
-use ffmpeg_rs::util::channel_layout::ChannelLayout;
-use ffmpeg_rs::util::channel_layout::Order;
-use ffmpeg_rs::util::channel_layout::STANDARD;
-use ffmpeg_rs::util::channel_layout::standard;
+use ffmpeg_rs::{
+    Error,
+    util::channel_layout::{Channel, ChannelLayout, Order, STANDARD, standard},
+};
 
 // ---- from_mask / check (c:253-264, c:785-809) ----
 #[test]
