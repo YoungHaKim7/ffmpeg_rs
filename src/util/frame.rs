@@ -81,17 +81,6 @@ impl FrameFlags {
     }
 }
 
-/// Row count of plane `i`: planes 1 and 2 (chroma) are subsampled by
-/// `2^chroma_h` with ceiling, everything else is full height.
-#[inline]
-fn plane_rows(i: usize, height: u32, chroma_h: u32) -> usize {
-    if i == 1 || i == 2 {
-        ((height + (1 << chroma_h) - 1) >> chroma_h) as usize
-    } else {
-        height as usize
-    }
-}
-
 /// One plane: a window into a refcounted buffer.
 ///
 /// The visible slice is `buf[offset .. offset + linesize * rows]`. Planes of
@@ -361,5 +350,16 @@ impl Clone for Frame {
             crop_left: self.crop_left,
             crop_right: self.crop_right,
         }
+    }
+}
+
+/// Row count of plane `i`: planes 1 and 2 (chroma) are subsampled by
+/// `2^chroma_h` with ceiling, everything else is full height.
+#[inline]
+fn plane_rows(i: usize, height: u32, chroma_h: u32) -> usize {
+    if i == 1 || i == 2 {
+        ((height + (1 << chroma_h) - 1) >> chroma_h) as usize
+    } else {
+        height as usize
     }
 }

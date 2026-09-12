@@ -1007,6 +1007,44 @@ impl std::fmt::Display for Channel {
     }
 }
 
+/// `enum AVChannelOrder` (`channel_layout.h:114-160`) — the two orders
+/// representable without an explicit channel map.
+///
+/// `AV_CHANNEL_ORDER_CUSTOM` and `AV_CHANNEL_ORDER_AMBISONIC` (`h:126-155`)
+/// are **not ported**: every C site that can produce them returns
+/// [`Error::Unsupported`] instead (module doc lists them).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Order {
+    /// `AV_CHANNEL_ORDER_UNSPEC` — only `nb_channels` is meaningful; the
+    /// `mask` field is undefined and must not be used (`h:341-343`) —
+    /// conventionally 0 here.
+    #[default]
+    Unspecified,
+    /// `AV_CHANNEL_ORDER_NATIVE` — channels in [`Channel`] enum order;
+    /// the mask is the source of truth.
+    Native,
+}
+
+/// Outcome of the channel-list parse (`parse_channel_list`, c:266-311).
+enum ListParse {
+    /// A valid strictly-increasing positional list → native layout.
+    Ok(ChannelLayout),
+    /// C would build an `AV_CHANNEL_ORDER_CUSTOM`/ambisonic layout here;
+    /// not ported.
+    Unsupported(String),
+    /// The branch failed the way C's `EINVAL` does (c:290-292, 300-301) —
+    /// caller falls through to the mask/number branches (c:401-402).
+    NoMatch,
+    /// Terminal EINVAL (c:406): the wrapped count mismatches the list —
+    /// C returns AVERROR(EINVAL) without falling through.
+    Invalid(String),
+}
+
+/// `AV_CH_FOO` (`channel_layout.h:175-210`) for the positional channels.
+const fn bit(c: Channel) -> u64 {
+    1u64 << (c as i32)
+}
+
 /// The positional channel at mask bit `pos` — inverse of
 /// [`Channel::mask_bit`] for the 36 values C allows in masks.
 const fn channel_at(pos: u32) -> Option<Channel> {
@@ -1049,44 +1087,6 @@ const fn channel_at(pos: u32) -> Option<Channel> {
         62 => Channel::BinauralRight,
         _ => return None,
     })
-}
-
-/// `enum AVChannelOrder` (`channel_layout.h:114-160`) — the two orders
-/// representable without an explicit channel map.
-///
-/// `AV_CHANNEL_ORDER_CUSTOM` and `AV_CHANNEL_ORDER_AMBISONIC` (`h:126-155`)
-/// are **not ported**: every C site that can produce them returns
-/// [`Error::Unsupported`] instead (module doc lists them).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Order {
-    /// `AV_CHANNEL_ORDER_UNSPEC` — only `nb_channels` is meaningful; the
-    /// `mask` field is undefined and must not be used (`h:341-343`) —
-    /// conventionally 0 here.
-    #[default]
-    Unspecified,
-    /// `AV_CHANNEL_ORDER_NATIVE` — channels in [`Channel`] enum order;
-    /// the mask is the source of truth.
-    Native,
-}
-
-/// Outcome of the channel-list parse (`parse_channel_list`, c:266-311).
-enum ListParse {
-    /// A valid strictly-increasing positional list → native layout.
-    Ok(ChannelLayout),
-    /// C would build an `AV_CHANNEL_ORDER_CUSTOM`/ambisonic layout here;
-    /// not ported.
-    Unsupported(String),
-    /// The branch failed the way C's `EINVAL` does (c:290-292, 300-301) —
-    /// caller falls through to the mask/number branches (c:401-402).
-    NoMatch,
-    /// Terminal EINVAL (c:406): the wrapped count mismatches the list —
-    /// C returns AVERROR(EINVAL) without falling through.
-    Invalid(String),
-}
-
-/// `AV_CH_FOO` (`channel_layout.h:175-210`) for the positional channels.
-const fn bit(c: Channel) -> u64 {
-    1u64 << (c as i32)
 }
 
 /// `AV_CHANNEL_LAYOUT_MASK(nb, m)` (`h:393-397`).
