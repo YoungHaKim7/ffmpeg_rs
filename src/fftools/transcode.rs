@@ -605,8 +605,8 @@ fn cli_sample_fmt(
 fn transcode_audio(cli: &Cli) -> Result<Stats> {
     use crate::{
         codec::{
+            audio::pcm::{PcmDecoder, PcmEncoder, codec_id_for_packed_le},
             params::MediaType,
-            pcm::{PcmDecoder, PcmEncoder, codec_id_for_packed_le},
             traits::{AudioDecoder, AudioEncoder},
         },
         util::{audio_frame::AudioFrame, channel_layout::ChannelLayout},

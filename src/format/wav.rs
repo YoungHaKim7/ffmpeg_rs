@@ -103,9 +103,9 @@
 use crate::{
     NOPTS,
     codec::{
+        audio::pcm,
         packet::Packet,
         params::{CodecId, CodecParameters, MediaType},
-        pcm,
     },
     log_error, log_warning,
     util::{
@@ -1100,7 +1100,7 @@ pub fn probe(buf: &[u8]) -> u32 {
 mod tests {
     use super::*;
     use crate::{
-        codec::{pcm::PcmDecoder, traits::AudioDecoder},
+        codec::{audio::pcm::PcmDecoder, traits::AudioDecoder},
         format::{demux::DemuxOptions, testutil::MemHandler},
         util::{channel_layout::Order, samplefmt::SampleFormat},
     };

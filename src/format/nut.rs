@@ -148,9 +148,9 @@
 use crate::{
     NOPTS,
     codec::{
+        audio::pcm,
         packet::{Packet, PacketFlags},
         params::{CodecId, MediaType},
-        pcm,
     },
     log_error, log_verbose, log_warning,
     util::{
@@ -3091,7 +3091,7 @@ impl Muxer for NutMuxer {
 mod tests {
     use super::*;
     use crate::{
-        codec::pcm::PcmDecoder,
+        codec::audio::pcm::PcmDecoder,
         codec::traits::AudioDecoder,
         format::{DemuxOptions, InputFormatContext, testutil::MemHandler},
         util::samplefmt::SampleFormat,

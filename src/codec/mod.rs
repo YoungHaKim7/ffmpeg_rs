@@ -12,9 +12,9 @@
 //! Not ported in Phase 1: parsers, bitstream filters, threading, hardware
 //! paths, every real (lossy) codec.
 
+pub mod audio;
 pub mod packet;
 pub mod params;
-pub mod pcm;
 pub mod rawvideo;
 pub mod traits;
 
