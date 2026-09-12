@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.98.0"
 
 [dependencies]
-raw-window-handle = "0.6"
+# raw-window-handle = "0.6"
 vulkano = { git = "https://github.com/vulkano-rs/vulkano", rev="fb4cfdb" }
 vulkano-shaders = { git = "https://github.com/vulkano-rs/vulkano", rev="fb4cfdb"}
-winit = "0.30.13"
+# winit = "0.30.13"
