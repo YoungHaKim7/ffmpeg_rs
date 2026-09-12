@@ -89,6 +89,17 @@ deliberately skipped C paths with the guard that makes them unreachable.
 5. ✅ Phase 4 — `swresample` + audio paths
    ✅ ◼ Phase 4a: audio foundations + swresample core (spec→implement→integrate)
    ✅ ◼ Phase 4b: WAV container + PCM codec + CLI + goldens
+    PCM → AAC/MP3 → H.264 → MP4 is a particularly good progression because it takes you from a very simple codec to a sophisticated video codec and then to a container combining audio + video.
+      1. PCM
+      2. WAV container
+      3. MP3
+      4. AAC
+      5. H.264
+      6. MP4
+      7. H.265
+      8. VP9
+      9. AV1
+      10. MKV
 6. Phase 5 — NUT container, more filters
 
 7. Add SIMD
@@ -98,6 +109,60 @@ deliberately skipped C paths with the guard that makes them unreachable.
 # I’m totally going to do Winit later, so for now, put it on hold
 put it on hold Stretch — winit player window on the Vulkan pipeline
 ```
+
+```bash
+src/
+└── codec/
+    ├── mod.rs
+    │
+    ├── audio/
+    │   ├── mod.rs
+    │   ├── pcm.rs
+    │   ├── aac.rs
+    │   ├── mp3.rs
+    │   ├── opus.rs
+    │   ├── vorbis.rs
+    │   ├── flac.rs
+    │   └── ac3.rs
+    │
+    └── video/
+        ├── mod.rs
+        ├── h264.rs
+        ├── h265.rs
+        ├── vp8.rs
+        ├── vp9.rs
+        ├── av1.rs
+        └── mpeg2.rs
+```
+
+### Common codecs to implement
+
+| Rust file   | Codec                | Type               |
+| ----------- | -------------------- | ------------------ |
+| `pcm.rs`    | PCM                  | Uncompressed audio |
+| `aac.rs`    | AAC                  | Lossy audio        |
+| `mp3.rs`    | MP3                  | Lossy audio        |
+| `opus.rs`   | Opus                 | Lossy audio        |
+| `vorbis.rs` | Vorbis               | Lossy audio        |
+| `flac.rs`   | FLAC                 | Lossless audio     |
+| `ac3.rs`    | AC-3 / Dolby Digital | Lossy audio        |
+| `eac3.rs`   | E-AC-3               | Lossy audio        |
+| `alac.rs`   | ALAC                 | Lossless audio     |
+
+### Video
+
+| Rust file   | Codec         | Type        |
+| ----------- | ------------- | ----------- |
+| `h264.rs`   | H.264 / AVC   | Lossy video |
+| `h265.rs`   | H.265 / HEVC  | Lossy video |
+| `mpeg1.rs`  | MPEG-1 Video  | Lossy video |
+| `mpeg2.rs`  | MPEG-2 Video  | Lossy video |
+| `mpeg4.rs`  | MPEG-4 Part 2 | Lossy video |
+| `vp8.rs`    | VP8           | Lossy video |
+| `vp9.rs`    | VP9           | Lossy video |
+| `av1.rs`    | AV1           | Lossy video |
+| `theora.rs` | Theora        | Lossy video |
+
 
 ## Tests
 
