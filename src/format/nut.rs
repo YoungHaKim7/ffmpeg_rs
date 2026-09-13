@@ -755,6 +755,9 @@ pub struct NutDemuxer {
     streams: Vec<StreamContext>,
     /// Port addition: per-stream codec parameters from the stream headers.
     stream_params: Vec<StreamParams>,
+    /// `r_frame_rate` info tags (nutdec.c:603-609), one per stream —
+    /// applied to the exposed Stream in read_header.
+    info_r_frame_rate: Vec<Rational>,
     max_distance: u32,
     time_bases: Vec<Rational>,
     last_syncpoint_pos: i64,
@@ -774,6 +777,7 @@ impl NutDemuxer {
             next_startcode: 0,
             streams: Vec::new(),
             stream_params: Vec::new(),
+            info_r_frame_rate: Vec::new(),
             max_distance: 0,
             time_bases: Vec::new(),
             last_syncpoint_pos: 0,
@@ -1007,6 +1011,7 @@ impl NutDemuxer {
         // stream objects are built in read_header from stream_params).
         self.streams = vec![StreamContext::default(); stream_count as usize];
         self.stream_params = vec![StreamParams::default(); stream_count as usize];
+        self.info_r_frame_rate = vec![Rational::UNKNOWN; stream_count as usize];
         Ok(())
     }
 
@@ -1188,9 +1193,29 @@ impl NutDemuxer {
                 continue;
             }
 
-            // Metadata dictionary, Disposition bits and r_frame_rate
-            // (nutdec.c:597-617) — not ported; the (name, value) pairs are
-            // dropped here.
+            // Metadata dictionary and disposition bits (nutdec.c:597-617)
+            // are not ported; the pairs are dropped. The one tag C acts on
+            // is r_frame_rate (nutdec.c:603-609), with its sanity gate.
+            if stream_id_plus1 != 0 && name == "r_frame_rate" {
+                let mut fr = Rational::UNKNOWN;
+                let mut parts = str_value.split('/');
+                if let (Some(n), Some(d)) = (parts.next(), parts.next()) {
+                    if let (Ok(n), Ok(d)) = (n.trim().parse::<i32>(), d.trim().parse::<i32>()) {
+                        fr = Rational::new(n, d);
+                    }
+                }
+                // nutdec.c:605-607 — clear insane rates (num >= 1000·den
+                // or negative parts).
+                if fr.num < 0
+                    || fr.den < 0
+                    || i64::from(fr.num) >= 1000 * i64::from(fr.den)
+                {
+                    fr = Rational::UNKNOWN;
+                }
+                if let Some(slot) = self.info_r_frame_rate.get_mut(stream_id_plus1 as usize - 1) {
+                    *slot = fr;
+                }
+            }
             let _ = (name, str_value, type_str, value);
         }
 
@@ -1535,8 +1560,16 @@ impl NutDemuxer {
         // avpriv_set_pts_info(st, 63, tb.num, tb.den) (nutdec.c:479-480) —
         // the NUT time base is already reduced (gcd checked in the main
         // header), and avg_frame_rate stays unknown (C leaves it for the
-        // generic estimation layer).
+        // generic estimation layer). The r_frame_rate info tag is the one
+        // estimate C's demuxer itself sets (nutdec.c:603-609); the port
+        // ALSO mirrors it into avg_frame_rate — C's callers reach it through
+        // av_guess_frame_rate's r_frame_rate fallback, which the port's
+        // Stream has no equivalent of.
         st.time_base = self.streams[0].time_base.unwrap_or(Rational::UNKNOWN);
+        st.r_frame_rate = self.info_r_frame_rate[0];
+        if st.r_frame_rate.num > 0 && st.r_frame_rate.den > 0 {
+            st.avg_frame_rate = st.r_frame_rate;
+        }
         Ok(st)
     }
 
@@ -4579,3 +4612,4 @@ mod mux_tests {
         );
     }
 }
+

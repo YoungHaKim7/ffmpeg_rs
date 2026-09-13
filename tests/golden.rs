@@ -1063,3 +1063,107 @@ fn golden_wav_fmt_and_channel_conversion() {
         "f32 stereo conversion max diff {max_diff} > 1 LSB"
     );
 }
+
+// ===========================================================================
+// NUT container (Phase 5): cross-tool round trips. Two independent NUT
+// writers never agree byte-for-byte (frame-code choice, index, elision are
+// all free), so fidelity is proven THROUGH the other tool: our NUT demuxed
+// by system ffmpeg and vice versa must reproduce the source bit-exactly.
+// ===========================================================================
+
+fn make_nut_source_y4m(fx: &Fixture) {
+    fx.run_ffmpeg(&[
+        "-f", "lavfi", "-i", "testsrc2=size=64x48:rate=10",
+        "-frames:v", "10", "-pix_fmt", "yuv420p",
+        "-f", "yuv4mpegpipe", fx.path("in.y4m").to_str().unwrap(), "-y",
+    ]);
+}
+
+/// We mux NUT → system ffmpeg demuxes → y4m byte-equal to the source.
+#[test]
+fn golden_nut_ours_mux_ffmpeg_demux() {
+    let Some(fx) = Fixture::new("nut_out") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    make_nut_source_y4m(&fx);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-f", "nut", fx.path("out.nut").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    fx.run_ffmpeg(&[
+        "-i", fx.path("out.nut").to_str().unwrap(),
+        "-f", "yuv4mpegpipe", fx.path("rt.y4m").to_str().unwrap(), "-y",
+    ]);
+    assert_eq!(
+        std::fs::read(fx.path("in.y4m")).unwrap(),
+        std::fs::read(fx.path("rt.y4m")).unwrap(),
+        "ours→NUT→ffmpeg differs from the source"
+    );
+}
+
+/// System ffmpeg muxes NUT → we demux → y4m byte-equal to the source
+/// (exercises our reader against a foreign writer: different frame codes,
+/// index bytes, info packets).
+#[test]
+fn golden_nut_ffmpeg_mux_ours_demux() {
+    let Some(fx) = Fixture::new("nut_in") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    make_nut_source_y4m(&fx);
+    fx.run_ffmpeg(&[
+        "-i", fx.path("in.y4m").to_str().unwrap(),
+        "-c:v", "rawvideo", "-f", "nut",
+        fx.path("ref.nut").to_str().unwrap(), "-y",
+    ]);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("ref.nut").to_str().unwrap(),
+        "-f", "yuv4mpegpipe", fx.path("rt.y4m").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    assert_eq!(
+        std::fs::read(fx.path("in.y4m")).unwrap(),
+        std::fs::read(fx.path("rt.y4m")).unwrap(),
+        "ffmpeg→NUT→ours differs from the source"
+    );
+}
+
+/// Audio both ways through NUT: PCM payload survives byte-exact.
+#[test]
+fn golden_nut_audio_round_trip_both_ways() {
+    let Some(fx) = Fixture::new("nut_audio") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.run_ffmpeg(&[
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+        "-c:a", "pcm_s16le", "-f", "wav",
+        fx.path("in.wav").to_str().unwrap(), "-y",
+    ]);
+    // ours mux → ffmpeg demux
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("in.wav").to_str().unwrap(),
+        "-f", "nut", fx.path("out.nut").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    fx.run_ffmpeg(&[
+        "-i", fx.path("out.nut").to_str().unwrap(),
+        "-f", "wav", fx.path("rt1.wav").to_str().unwrap(), "-y",
+    ]);
+    // ffmpeg mux → ours demux
+    fx.run_ffmpeg(&[
+        "-i", fx.path("in.wav").to_str().unwrap(),
+        "-c:a", "pcm_s16le", "-f", "nut",
+        fx.path("ref.nut").to_str().unwrap(), "-y",
+    ]);
+    let (ok, _, stderr) = fx.run_ours(&[
+        "-i", fx.path("ref.nut").to_str().unwrap(),
+        "-f", "wav", fx.path("rt2.wav").to_str().unwrap(), "-y",
+    ]);
+    assert!(ok, "ffmpeg_rs failed:\n{stderr}");
+    let src = wav_payload(&fx.path("in.wav"));
+    assert_eq!(wav_payload(&fx.path("rt1.wav")), src, "ours→NUT→ffmpeg audio");
+    assert_eq!(wav_payload(&fx.path("rt2.wav")), src, "ffmpeg→NUT→ours audio");
+}
