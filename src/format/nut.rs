@@ -4484,11 +4484,15 @@ mod mux_tests {
         // stream (avpriv_set_pts_info, nutenc.c:756 — 1/25 becomes 1/51200
         // via choose_timebase), so the demuxed stream reports pts in that
         // base, exactly like C's caller after nut_write_header.
+        //
+        // flags: rawvideo carries AV_CODEC_PROP_INTRA_ONLY (codec_desc.c),
+        // so the generic layer KEY-fills EVERY packet before the muxer
+        // (mux.c:820-821) — the round-tripped flags are always KEY.
         for (a, b) in pkts.iter().zip(&out) {
             assert_eq!(a.as_slice(), b.as_slice(), "payload round trips");
             let exp = rescale_q_near(a.pts, st.time_base, out_st.time_base);
             assert_eq!(exp, b.pts);
-            assert_eq!(a.flags, b.flags);
+            assert_eq!(b.flags, PacketFlags::KEY);
         }
     }
 
