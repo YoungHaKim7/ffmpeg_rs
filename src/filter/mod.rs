@@ -49,8 +49,11 @@ pub mod graph;
 pub mod link;
 pub mod parser;
 pub mod vf_format;
+pub mod vf_crop;
+pub mod vf_flip;
 pub mod vf_null;
 pub mod vf_scale;
+pub mod vf_transpose;
 
 // Crate-root re-exports mirror how C code includes libavfilter headers:
 // `use crate::filter::{FilterGraph, NodeId, LinkId};`
@@ -84,11 +87,15 @@ pub struct Options {
 pub fn filter_def(name: &str) -> Option<&'static FilterDef> {
     match name {
         "buffer" => Some(&buffersrc::BUFFER_SRC_DEF),
+        "crop" => Some(&vf_crop::CROP_DEF),
+        "hflip" => Some(&vf_flip::HFLIP_DEF),
         "buffersink" => Some(&buffersink::BUFFERSINK_DEF),
         "format" => Some(&vf_format::FORMAT_DEF),
         "noformat" => Some(&vf_format::NOFORMAT_DEF),
         "null" => Some(&vf_null::NULL_DEF),
         "scale" => Some(&vf_scale::SCALE_DEF),
+        "transpose" => Some(&vf_transpose::TRANSPOSE_DEF),
+        "vflip" => Some(&vf_flip::VFLIP_DEF),
         _ => None,
     }
 }
@@ -105,15 +112,20 @@ mod tests {
         assert_eq!(def.outputs.len(), 1);
         assert_eq!(def.inputs[0].name, "default");
         assert!(def.shorthand.is_empty());
+        // (hflip/vflip have EMPTY shorthand — .first() is None for them)
         for (name, shorthand) in [
-            ("buffer", "width"),
-            ("buffersink", "pixel_formats"),
-            ("format", "pix_fmts"),
-            ("noformat", "pix_fmts"),
+            ("buffer", Some("width")),
+            ("buffersink", Some("pixel_formats")),
+            ("crop", Some("out_w")),
+            ("format", Some("pix_fmts")),
+            ("hflip", None),
+            ("noformat", Some("pix_fmts")),
+            ("transpose", Some("dir")),
+            ("vflip", None),
         ] {
             let def = filter_def(name).unwrap_or_else(|| panic!("{name} is registered"));
             assert_eq!(def.name, name);
-            assert_eq!(def.shorthand.first(), Some(&shorthand), "{name}");
+            assert_eq!(def.shorthand.first().copied(), shorthand, "{name}");
         }
         let s = filter_def("scale").expect("scale is registered");
         assert_eq!(s.name, "scale");

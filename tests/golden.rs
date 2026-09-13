@@ -1167,3 +1167,46 @@ fn golden_nut_audio_round_trip_both_ways() {
     assert_eq!(wav_payload(&fx.path("rt1.wav")), src, "ours→NUT→ffmpeg audio");
     assert_eq!(wav_payload(&fx.path("rt2.wav")), src, "ffmpeg→NUT→ours audio");
 }
+
+// ===========================================================================
+// Geometry filters (Phase 5D): crop / transpose / hflip / vflip — pure
+// pixel moves, so every combination must be BYTE-EXACT vs system ffmpeg.
+// ===========================================================================
+
+#[test]
+fn golden_vf_crop_transpose_flip_chains() {
+    let Some(fx) = Fixture::new("vf_geom") else {
+        eprintln!("skipping: system ffmpeg not found");
+        return;
+    };
+    fx.make_input_y4m();
+    // Every chain is a pure pixel rearrangement: byte-exact, no tolerance.
+    for desc in [
+        "crop=iw/2:ih/2",
+        "crop=8:6:4:3",
+        "transpose=1",
+        "transpose=cclock_flip",
+        "hflip",
+        "vflip",
+        "hflip,vflip",
+        "transpose=1,hflip",
+        "crop=iw/2:ih/2,transpose=1,hflip",
+    ] {
+        fx.run_ffmpeg(&[
+            "-i", fx.path("in.y4m").to_str().unwrap(),
+            "-vf", desc,
+            "-f", "yuv4mpegpipe", fx.path("ref.y4m").to_str().unwrap(), "-y",
+        ]);
+        let (ok, _, stderr) = fx.run_ours(&[
+            "-i", fx.path("in.y4m").to_str().unwrap(),
+            "-vf", desc,
+            "-f", "yuv4mpegpipe", fx.path("out.y4m").to_str().unwrap(), "-y",
+        ]);
+        assert!(ok, "ffmpeg_rs failed for '{desc}':\n{stderr}");
+        assert_eq!(
+            std::fs::read(fx.path("out.y4m")).unwrap(),
+            std::fs::read(fx.path("ref.y4m")).unwrap(),
+            "'{desc}' differs from system ffmpeg"
+        );
+    }
+}
