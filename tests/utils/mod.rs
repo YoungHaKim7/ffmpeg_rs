@@ -7,3 +7,4 @@ mod mathematics;
 mod pixdesc;
 mod pixfmt;
 mod rational;
+mod samplefmt_test;
