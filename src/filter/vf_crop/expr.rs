@@ -2,6 +2,9 @@
 // The expression evaluator (libavutil/eval.c subset — vf_crop's instance)
 // ---------------------------------------------------------------------------
 
+/// eval.c's recursion guard (`p.stack_index = 100`, 762-764).
+const MAX_DEPTH: usize = 100;
+
 /// vf_crop's `av_expr` instance. The grammar is eval.c:560-690, identical to
 /// `vf_scale/expr.rs` (same precedence ladder, same `-2^2 == -4` leading-sign
 /// rule, same division-by-zero `d*INFINITY`, same floored `mod`); only the
@@ -63,31 +66,6 @@ impl Default for Vars {
         }
     }
 }
-
-/// Canonical variable slot of a name, if it is one of vf_crop.c:40-55's
-/// names (`var_names`). A known variable binds even when followed by `(`
-/// (eval.c:388-397 checks const_names first) — `iw(2)` is a parse error.
-fn var_slot(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "in_w" | "iw" => "in_w",
-        "in_h" | "ih" => "in_h",
-        "out_w" | "ow" => "out_w",
-        "out_h" | "oh" => "out_h",
-        "a" => "a",
-        "sar" => "sar",
-        "dar" => "dar",
-        "hsub" => "hsub",
-        "vsub" => "vsub",
-        "x" => "x",
-        "y" => "y",
-        "n" => "n",
-        "t" => "t",
-        _ => return None,
-    })
-}
-
-/// eval.c's recursion guard (`p.stack_index = 100`, 762-764).
-const MAX_DEPTH: usize = 100;
 
 struct Parser<'a> {
     s: &'a [u8],
@@ -395,4 +373,26 @@ pub(crate) fn eval(e: &Expr, v: &Vars) -> f64 {
             }
         }
     }
+}
+
+/// Canonical variable slot of a name, if it is one of vf_crop.c:40-55's
+/// names (`var_names`). A known variable binds even when followed by `(`
+/// (eval.c:388-397 checks const_names first) — `iw(2)` is a parse error.
+fn var_slot(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "in_w" | "iw" => "in_w",
+        "in_h" | "ih" => "in_h",
+        "out_w" | "ow" => "out_w",
+        "out_h" | "oh" => "out_h",
+        "a" => "a",
+        "sar" => "sar",
+        "dar" => "dar",
+        "hsub" => "hsub",
+        "vsub" => "vsub",
+        "x" => "x",
+        "y" => "y",
+        "n" => "n",
+        "t" => "t",
+        _ => return None,
+    })
 }
