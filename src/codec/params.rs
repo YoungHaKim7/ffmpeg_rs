@@ -51,6 +51,14 @@ pub enum CodecId {
     PcmF64be,
     PcmAlaw,
     PcmMulaw,
+    /// `AV_CODEC_ID_MP1` — MPEG audio layer 1 (header-parse only; the
+    /// layer-1 decoder is not ported).
+    Mp1,
+    /// `AV_CODEC_ID_MP2` — MPEG audio layer 2 (header-parse only; the
+    /// layer-2 decoder is not ported).
+    Mp2,
+    /// `AV_CODEC_ID_MP3` — MPEG audio layer 3.
+    Mp3,
 }
 
 impl CodecId {
@@ -73,6 +81,9 @@ impl CodecId {
             CodecId::PcmF64be => "pcm_f64be",
             CodecId::PcmAlaw => "pcm_alaw",
             CodecId::PcmMulaw => "pcm_mulaw",
+            CodecId::Mp1 => "mp1",
+            CodecId::Mp2 => "mp2",
+            CodecId::Mp3 => "mp3",
         }
     }
 }
