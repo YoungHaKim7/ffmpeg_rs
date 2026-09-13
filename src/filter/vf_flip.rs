@@ -22,11 +22,52 @@
 
 use crate::util::{error::Result, frame::Frame, pixdesc, pixfmt::PixelFormat};
 
-use super::vf_crop::{ceil_rshift, fill_max_pixsteps};
 use super::{
     filter::{FilterDef, FilterFlags, FilterImpl, PadDef, PadRef, filter_frame},
     graph::FilterGraph,
     link::NodeId,
+    vf_crop::{ceil_rshift, fill_max_pixsteps},
+};
+
+// ---------------------------------------------------------------------------
+// Filter descriptors (vf_hflip.c:140-157, vf_vflip.c:120-138)
+// ---------------------------------------------------------------------------
+
+/// The shared single video pad.
+static DEFAULT_PAD: PadDef = PadDef {
+    name: "default",
+    needs_writable: false,
+};
+
+/// `ff_vf_hflip` (vf_hflip.c:149-157): "Horizontally flip the input video."
+///
+/// * flags: hflip is NOT in C's `ff_filter_frame` validation skip list
+///   (avfilter.c:1075-1082) → `FilterFlags(0)`. C's
+///   `AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC | AVFILTER_FLAG_SLICE_THREADS`
+///   (152) are not modeled (no timeline / threading in the port).
+/// * shorthand: EMPTY — vf_hflip has no AVOption table, so every option
+///   needs an explicit key (and then fails as unknown, like C).
+pub static HFLIP_DEF: FilterDef = FilterDef {
+    name: "hflip",
+    inputs: &[DEFAULT_PAD],
+    outputs: &[DEFAULT_PAD],
+    flags: FilterFlags(0),
+    shorthand: &[],
+    make: || Box::new(HFlipContext::default()),
+};
+
+/// `ff_vf_vflip` (vf_vflip.c:130-138): "Flip the input video vertically."
+/// Same shape as [`HFLIP_DEF`]: no options, no validation-skip flag (C's
+/// `AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC` not modeled). vflip defines NO
+/// `query_formats` in C — the default all-lists query applies (the trait
+/// default + the engine's `default_query_formats`).
+pub static VFLIP_DEF: FilterDef = FilterDef {
+    name: "vflip",
+    inputs: &[DEFAULT_PAD],
+    outputs: &[DEFAULT_PAD],
+    flags: FilterFlags(0),
+    shorthand: &[],
+    make: || Box::new(VFlipContext::default()),
 };
 
 // ---------------------------------------------------------------------------
@@ -252,57 +293,16 @@ impl FilterImpl for VFlipContext {
 }
 
 // ---------------------------------------------------------------------------
-// Filter descriptors (vf_hflip.c:140-157, vf_vflip.c:120-138)
-// ---------------------------------------------------------------------------
-
-/// The shared single video pad.
-static DEFAULT_PAD: PadDef = PadDef {
-    name: "default",
-    needs_writable: false,
-};
-
-/// `ff_vf_hflip` (vf_hflip.c:149-157): "Horizontally flip the input video."
-///
-/// * flags: hflip is NOT in C's `ff_filter_frame` validation skip list
-///   (avfilter.c:1075-1082) → `FilterFlags(0)`. C's
-///   `AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC | AVFILTER_FLAG_SLICE_THREADS`
-///   (152) are not modeled (no timeline / threading in the port).
-/// * shorthand: EMPTY — vf_hflip has no AVOption table, so every option
-///   needs an explicit key (and then fails as unknown, like C).
-pub static HFLIP_DEF: FilterDef = FilterDef {
-    name: "hflip",
-    inputs: &[DEFAULT_PAD],
-    outputs: &[DEFAULT_PAD],
-    flags: FilterFlags(0),
-    shorthand: &[],
-    make: || Box::new(HFlipContext::default()),
-};
-
-/// `ff_vf_vflip` (vf_vflip.c:130-138): "Flip the input video vertically."
-/// Same shape as [`HFLIP_DEF`]: no options, no validation-skip flag (C's
-/// `AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC` not modeled). vflip defines NO
-/// `query_formats` in C — the default all-lists query applies (the trait
-/// default + the engine's `default_query_formats`).
-pub static VFLIP_DEF: FilterDef = FilterDef {
-    name: "vflip",
-    inputs: &[DEFAULT_PAD],
-    outputs: &[DEFAULT_PAD],
-    flags: FilterFlags(0),
-    shorthand: &[],
-    make: || Box::new(VFlipContext::default()),
-};
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::filter_def;
-    use crate::filter::link::LinkId;
-    use crate::util::error::Error;
-    use crate::util::rational::Rational;
+    use crate::{
+        filter::{filter_def, link::LinkId},
+        util::{error::Error, rational::Rational},
+    };
 
     /// buffer(pix_fmt WxH, tb 1/25) → filter(args) → buffersink.
     fn chain(
