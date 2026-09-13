@@ -172,6 +172,86 @@ mod flag;
 
 pub const CRC_TABLE: [u32; 256] = build_crc_table();
 
+/// The RAWVIDEO codec-tag rows the port can resolve to a family pixel
+/// format: `ff_nut_video_tags` (`nut.c:44-220`) first, then the rawvideo
+/// rows of `ff_codec_bmp_tags` (`riff.c`), tag → the pixel format
+/// `find_pix_fmt(raw_pix_fmt_tags)` gives (`rawdec.c:33-44` over
+/// `raw_pix_fmt_tags.h`). A hit means `CodecId::Rawvideo` + this format;
+/// tags C maps to RAWVIDEO *outside* the family (RGB15/12, PAL8, the
+/// p9/p12/p14 Y/G variants, …) resolve to `CodecId::None` here — both
+/// sides fail identically at decode time (see the module map).
+const RAWVIDEO_TAGS: &[(u32, PixelFormat)] = &[
+    // ff_nut_video_tags order (nut.c:62-219)
+    (tag(b'R', b'G', b'B', b'A'), PixelFormat::Rgba), // nut.c:62
+    (tag(b'B', b'G', b'R', b'A'), PixelFormat::Bgra), // nut.c:64
+    (tag(b'A', b'B', b'G', b'R'), PixelFormat::Abgr), // nut.c:66
+    (tag(b'A', b'R', b'G', b'B'), PixelFormat::Argb), // nut.c:68
+    (tag(b'R', b'G', b'B', 24), PixelFormat::Rgb24),  // nut.c:70
+    (tag(b'B', b'G', b'R', 24), PixelFormat::Bgr24),  // nut.c:71
+    (tag(b'4', b'2', b'2', b'P'), PixelFormat::Yuv422p), // nut.c:73
+    (tag(b'4', b'4', b'4', b'P'), PixelFormat::Yuv444p), // nut.c:77
+    (tag(b'Y', b'3', 11, 10), PixelFormat::Yuv420p10le), // nut.c:103
+    (tag(b'Y', b'3', 10, 10), PixelFormat::Yuv422p10le), // nut.c:105
+    (tag(b'Y', b'3', 0, 10), PixelFormat::Yuv444p10le), // nut.c:99
+    (tag(b'Y', b'3', 11, 16), PixelFormat::Yuv420p16le), // nut.c:121
+    (tag(b'Y', b'3', 0, 16), PixelFormat::Yuv444p16le), // nut.c:125
+    (tag(b'Y', b'1', 0, 16), PixelFormat::Gray16le),  // nut.c:119
+    (tag(b'G', b'3', 0, 8), PixelFormat::Gbrp),       // nut.c:169
+    (tag(b'G', b'4', 0, 8), PixelFormat::Gbrap),      // nut.c:186
+    // ff_codec_bmp_tags rawvideo rows (riff.c), first-match order as in
+    // the port's wav.rs WAV_CODEC_TAGS
+    (tag(b'I', b'4', b'2', b'0'), PixelFormat::Yuv420p), // raw:29
+    (tag(b'I', b'Y', b'U', b'V'), PixelFormat::Yuv420p), // raw:30
+    (tag(b'y', b'v', b'1', b'2'), PixelFormat::Yuv420p), // raw:31
+    (tag(b'Y', b'V', b'1', b'2'), PixelFormat::Yuv420p), // raw:31
+    (tag(b'Y', b'4', b'2', b'B'), PixelFormat::Yuv422p), // raw:36
+    (tag(b'P', b'4', b'2', b'2'), PixelFormat::Yuv422p), // raw:37
+    (tag(b'Y', b'V', b'1', b'6'), PixelFormat::Yuv422p), // raw:38
+    (tag(b'I', b'4', b'2', b'2'), PixelFormat::Yuv422p), // raw:270
+    (tag(b'I', b'4', b'4', b'4'), PixelFormat::Yuv444p), // raw:272
+    (tag(b'Y', b'8', b'0', b'0'), PixelFormat::Gray8),   // raw:46
+    (tag(b'Y', b'8', b' ', b' '), PixelFormat::Gray8),   // raw:47
+    (tag(b'G', b'R', b'E', b'Y'), PixelFormat::Gray8),   // raw:69
+    (tag(b'Y', b'U', b'Y', b'2'), PixelFormat::Yuyv422), // raw:49
+    (tag(b'Y', b'4', b'2', b'2'), PixelFormat::Yuyv422), // raw:50
+    (tag(b'Y', b'U', b'Y', b'V'), PixelFormat::Yuyv422), // raw:54
+    (tag(b'U', b'Y', b'V', b'Y'), PixelFormat::Uyvy422), // raw:56
+    (tag(b'N', b'V', b'1', b'2'), PixelFormat::Nv12),    // raw:70
+    (tag(b'N', b'V', b'2', b'1'), PixelFormat::Nv21),    // raw:71
+    (tag(b'R', b'G', b'B', 16), PixelFormat::Rgb565le),  // raw:81
+];
+
+/// `av_codec_get_id` over `[ff_nut_audio_tags, ff_codec_wav_tags,
+/// ff_nut_audio_extra_tags]` (`nutdec.c:415-420`) — family rows in C's
+/// table order (first match wins). `PCM_S8` (`'P','S','D',8`, nut.c:245),
+/// the `U16/U24/U32/S64/PLANAR` flavors and the compressed codecs
+/// (MP3/Opus/WavPack/comfort-noise) are not in the `CodecId` family and
+/// resolve to `None` — C's `AV_CODEC_ID_NONE` path.
+const NUT_AUDIO_TAGS: &[(CodecId, u32)] = &[
+    // ff_nut_audio_tags (nut.c:232-258)
+    (CodecId::PcmF32be, tag(32, b'D', b'F', b'P')), // nut.c:233
+    (CodecId::PcmF32le, tag(b'P', b'F', b'D', 32)), // nut.c:234
+    (CodecId::PcmF64be, tag(64, b'D', b'F', b'P')), // nut.c:235
+    (CodecId::PcmF64le, tag(b'P', b'F', b'D', 64)), // nut.c:236
+    (CodecId::PcmS16be, tag(16, b'D', b'S', b'P')), // nut.c:237
+    (CodecId::PcmS16le, tag(b'P', b'S', b'D', 16)), // nut.c:238
+    (CodecId::PcmS24be, tag(24, b'D', b'S', b'P')), // nut.c:239
+    (CodecId::PcmS24le, tag(b'P', b'S', b'D', 24)), // nut.c:240
+    (CodecId::PcmS32be, tag(32, b'D', b'S', b'P')), // nut.c:241
+    (CodecId::PcmS32le, tag(b'P', b'S', b'D', 32)), // nut.c:242
+    (CodecId::PcmU8, tag(b'P', b'U', b'D', 8)),     // nut.c:252
+    // ff_codec_wav_tags family rows (riff.c:526-537, 602) — same rows as
+    // the port's wav.rs WAV_CODEC_TAGS
+    (CodecId::PcmS16le, 0x0001),
+    (CodecId::PcmF32le, 0x0003),
+    (CodecId::PcmAlaw, 0x0006),
+    (CodecId::PcmMulaw, 0x0007),
+    (CodecId::PcmMulaw, 0x6c75), // ('u'<<8)|'l'
+    // ff_nut_audio_extra_tags (nut.c:222-230)
+    (CodecId::PcmAlaw, tag(b'A', b'L', b'A', b'W')), // nut.c:224
+    (CodecId::PcmMulaw, tag(b'U', b'L', b'A', b'W')), // nut.c:225
+];
+
 // ---------------------------------------------------------------------
 // nut.h:29-56 — startcodes, limits, frame flags
 // ---------------------------------------------------------------------
@@ -620,86 +700,6 @@ pub fn rescale_rnd_down(a: i64, b: i64, c: i64) -> i64 {
 const fn tag(a: u8, b: u8, c: u8, d: u8) -> u32 {
     u32::from_le_bytes([a, b, c, d])
 }
-
-/// The RAWVIDEO codec-tag rows the port can resolve to a family pixel
-/// format: `ff_nut_video_tags` (`nut.c:44-220`) first, then the rawvideo
-/// rows of `ff_codec_bmp_tags` (`riff.c`), tag → the pixel format
-/// `find_pix_fmt(raw_pix_fmt_tags)` gives (`rawdec.c:33-44` over
-/// `raw_pix_fmt_tags.h`). A hit means `CodecId::Rawvideo` + this format;
-/// tags C maps to RAWVIDEO *outside* the family (RGB15/12, PAL8, the
-/// p9/p12/p14 Y/G variants, …) resolve to `CodecId::None` here — both
-/// sides fail identically at decode time (see the module map).
-const RAWVIDEO_TAGS: &[(u32, PixelFormat)] = &[
-    // ff_nut_video_tags order (nut.c:62-219)
-    (tag(b'R', b'G', b'B', b'A'), PixelFormat::Rgba), // nut.c:62
-    (tag(b'B', b'G', b'R', b'A'), PixelFormat::Bgra), // nut.c:64
-    (tag(b'A', b'B', b'G', b'R'), PixelFormat::Abgr), // nut.c:66
-    (tag(b'A', b'R', b'G', b'B'), PixelFormat::Argb), // nut.c:68
-    (tag(b'R', b'G', b'B', 24), PixelFormat::Rgb24),  // nut.c:70
-    (tag(b'B', b'G', b'R', 24), PixelFormat::Bgr24),  // nut.c:71
-    (tag(b'4', b'2', b'2', b'P'), PixelFormat::Yuv422p), // nut.c:73
-    (tag(b'4', b'4', b'4', b'P'), PixelFormat::Yuv444p), // nut.c:77
-    (tag(b'Y', b'3', 11, 10), PixelFormat::Yuv420p10le), // nut.c:103
-    (tag(b'Y', b'3', 10, 10), PixelFormat::Yuv422p10le), // nut.c:105
-    (tag(b'Y', b'3', 0, 10), PixelFormat::Yuv444p10le), // nut.c:99
-    (tag(b'Y', b'3', 11, 16), PixelFormat::Yuv420p16le), // nut.c:121
-    (tag(b'Y', b'3', 0, 16), PixelFormat::Yuv444p16le), // nut.c:125
-    (tag(b'Y', b'1', 0, 16), PixelFormat::Gray16le),  // nut.c:119
-    (tag(b'G', b'3', 0, 8), PixelFormat::Gbrp),       // nut.c:169
-    (tag(b'G', b'4', 0, 8), PixelFormat::Gbrap),      // nut.c:186
-    // ff_codec_bmp_tags rawvideo rows (riff.c), first-match order as in
-    // the port's wav.rs WAV_CODEC_TAGS
-    (tag(b'I', b'4', b'2', b'0'), PixelFormat::Yuv420p), // raw:29
-    (tag(b'I', b'Y', b'U', b'V'), PixelFormat::Yuv420p), // raw:30
-    (tag(b'y', b'v', b'1', b'2'), PixelFormat::Yuv420p), // raw:31
-    (tag(b'Y', b'V', b'1', b'2'), PixelFormat::Yuv420p), // raw:31
-    (tag(b'Y', b'4', b'2', b'B'), PixelFormat::Yuv422p), // raw:36
-    (tag(b'P', b'4', b'2', b'2'), PixelFormat::Yuv422p), // raw:37
-    (tag(b'Y', b'V', b'1', b'6'), PixelFormat::Yuv422p), // raw:38
-    (tag(b'I', b'4', b'2', b'2'), PixelFormat::Yuv422p), // raw:270
-    (tag(b'I', b'4', b'4', b'4'), PixelFormat::Yuv444p), // raw:272
-    (tag(b'Y', b'8', b'0', b'0'), PixelFormat::Gray8),   // raw:46
-    (tag(b'Y', b'8', b' ', b' '), PixelFormat::Gray8),   // raw:47
-    (tag(b'G', b'R', b'E', b'Y'), PixelFormat::Gray8),   // raw:69
-    (tag(b'Y', b'U', b'Y', b'2'), PixelFormat::Yuyv422), // raw:49
-    (tag(b'Y', b'4', b'2', b'2'), PixelFormat::Yuyv422), // raw:50
-    (tag(b'Y', b'U', b'Y', b'V'), PixelFormat::Yuyv422), // raw:54
-    (tag(b'U', b'Y', b'V', b'Y'), PixelFormat::Uyvy422), // raw:56
-    (tag(b'N', b'V', b'1', b'2'), PixelFormat::Nv12),    // raw:70
-    (tag(b'N', b'V', b'2', b'1'), PixelFormat::Nv21),    // raw:71
-    (tag(b'R', b'G', b'B', 16), PixelFormat::Rgb565le),  // raw:81
-];
-
-/// `av_codec_get_id` over `[ff_nut_audio_tags, ff_codec_wav_tags,
-/// ff_nut_audio_extra_tags]` (`nutdec.c:415-420`) — family rows in C's
-/// table order (first match wins). `PCM_S8` (`'P','S','D',8`, nut.c:245),
-/// the `U16/U24/U32/S64/PLANAR` flavors and the compressed codecs
-/// (MP3/Opus/WavPack/comfort-noise) are not in the `CodecId` family and
-/// resolve to `None` — C's `AV_CODEC_ID_NONE` path.
-const NUT_AUDIO_TAGS: &[(CodecId, u32)] = &[
-    // ff_nut_audio_tags (nut.c:232-258)
-    (CodecId::PcmF32be, tag(32, b'D', b'F', b'P')), // nut.c:233
-    (CodecId::PcmF32le, tag(b'P', b'F', b'D', 32)), // nut.c:234
-    (CodecId::PcmF64be, tag(64, b'D', b'F', b'P')), // nut.c:235
-    (CodecId::PcmF64le, tag(b'P', b'F', b'D', 64)), // nut.c:236
-    (CodecId::PcmS16be, tag(16, b'D', b'S', b'P')), // nut.c:237
-    (CodecId::PcmS16le, tag(b'P', b'S', b'D', 16)), // nut.c:238
-    (CodecId::PcmS24be, tag(24, b'D', b'S', b'P')), // nut.c:239
-    (CodecId::PcmS24le, tag(b'P', b'S', b'D', 24)), // nut.c:240
-    (CodecId::PcmS32be, tag(32, b'D', b'S', b'P')), // nut.c:241
-    (CodecId::PcmS32le, tag(b'P', b'S', b'D', 32)), // nut.c:242
-    (CodecId::PcmU8, tag(b'P', b'U', b'D', 8)),     // nut.c:252
-    // ff_codec_wav_tags family rows (riff.c:526-537, 602) — same rows as
-    // the port's wav.rs WAV_CODEC_TAGS
-    (CodecId::PcmS16le, 0x0001),
-    (CodecId::PcmF32le, 0x0003),
-    (CodecId::PcmAlaw, 0x0006),
-    (CodecId::PcmMulaw, 0x0007),
-    (CodecId::PcmMulaw, 0x6c75), // ('u'<<8)|'l'
-    // ff_nut_audio_extra_tags (nut.c:222-230)
-    (CodecId::PcmAlaw, tag(b'A', b'L', b'A', b'W')), // nut.c:224
-    (CodecId::PcmMulaw, tag(b'U', b'L', b'A', b'W')), // nut.c:225
-];
 
 /// `av_codec_get_id` for a video-class fourcc (`nutdec.c:404-412`):
 /// the RAWVIDEO rows of `ff_nut_video_tags` / `ff_codec_bmp_tags` /
