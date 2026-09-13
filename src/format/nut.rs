@@ -170,6 +170,8 @@ use super::{
 
 mod flag;
 
+pub const CRC_TABLE: [u32; 256] = build_crc_table();
+
 // ---------------------------------------------------------------------
 // nut.h:29-56 — startcodes, limits, frame flags
 // ---------------------------------------------------------------------
@@ -226,80 +228,6 @@ pub struct StreamContext {
     pub max_pts_distance: i64,
     pub decode_delay: u32,
     pub time_base: Option<Rational>,
-}
-
-// ---------------------------------------------------------------------
-// libavutil/crc.c — the AV_CRC_32_IEEE table (poly 0x04C11DB7, MSB-first)
-// ---------------------------------------------------------------------
-
-/// `av_crc_init(ctx, le=0, bits=32, poly=0x04C11DB7)` (`crc.c:341` declared,
-/// built at `crc.c:366-376`): the MSB-first table entry *stored
-/// byteswapped*, which is the representation `av_crc`'s update loop
-/// (`crc.c:449-452`, `crc = ctx[(uint8_t)crc ^ byte] ^ crc >> 8`) computes
-/// with. FFmpeg's checksum values are `bswap32` of the textbook MSB-first
-/// CRC — and `avio_wl32` of that value re-emits the textbook BE byte order,
-/// which is why appending a stored checksum drives the running CRC to zero.
-pub const CRC_TABLE: [u32; 256] = build_crc_table();
-
-const fn build_crc_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut i = 0usize;
-    while i < 256 {
-        // crc.c:372-374: c = i << 24; 8× (c << 1) ^ (poly & (c >> 31 sign));
-        let mut c = (i as u32) << 24;
-        let mut j = 0;
-        while j < 8 {
-            let mask = if (c as i32) < 0 { 0x04C1_1DB7 } else { 0 };
-            c = (c << 1) ^ mask;
-            j += 1;
-        }
-        table[i] = c.swap_bytes(); // crc.c:375: ctx[i] = av_bswap32(c);
-        i += 1;
-    }
-    table
-}
-
-/// `ff_crc04C11DB7_update` (`aviobuf.c:568-572`) = `av_crc(AV_CRC_32_IEEE)`
-/// (`crc.c:421-452`) over one slice. Init value passed by the caller (0 for
-/// fresh checksums, the startcode CRC for packet headers).
-pub fn crc04c11db7_update(crc: u32, buf: &[u8]) -> u32 {
-    let mut crc = crc;
-    for &b in buf {
-        crc = CRC_TABLE[((crc as u8) ^ b) as usize] ^ (crc >> 8); // crc.c:450
-    }
-    crc
-}
-
-// ---------------------------------------------------------------------
-// vint / svint — nutenc.c:306-348 (put) + aviobuf.c:919-928 (get)
-// ---------------------------------------------------------------------
-
-/// `get_v_length` + `put_v` (`nutenc.c:306-327`): 7 bits per byte, most
-/// significant group first; bit 7 set on every byte but the last.
-pub fn put_v(out: &mut Vec<u8>, val: u64) {
-    let mut i = 1usize; // get_v_length (nutenc.c:306-313)
-    {
-        let mut v = val;
-        while {
-            v >>= 7;
-            v != 0
-        } {
-            i += 1;
-        }
-    }
-    while {
-        i -= 1;
-        i > 0
-    } {
-        out.push(128 | (val >> (7 * i)) as u8); // nutenc.c:324
-    }
-    out.push((val & 127) as u8); // nutenc.c:326
-}
-
-/// `put_s` (`nutenc.c:345-348`): `put_v(2·|val| − (val > 0))`.
-pub fn put_s(out: &mut Vec<u8>, val: i64) {
-    let v = 2 * (val as i128).abs() - i128::from(val > 0);
-    put_v(out, v as u64);
 }
 
 /// A checksum-aware reader — `AVIOContext` plus the `ffio_init_checksum`
@@ -440,6 +368,79 @@ impl<'a> NutReader<'a> {
         self.checksumming = false;
         self.crc
     }
+}
+
+// ---------------------------------------------------------------------
+// libavutil/crc.c — the AV_CRC_32_IEEE table (poly 0x04C11DB7, MSB-first)
+// ---------------------------------------------------------------------
+
+/// `av_crc_init(ctx, le=0, bits=32, poly=0x04C11DB7)` (`crc.c:341` declared,
+/// built at `crc.c:366-376`): the MSB-first table entry *stored
+/// byteswapped*, which is the representation `av_crc`'s update loop
+/// (`crc.c:449-452`, `crc = ctx[(uint8_t)crc ^ byte] ^ crc >> 8`) computes
+/// with. FFmpeg's checksum values are `bswap32` of the textbook MSB-first
+/// CRC — and `avio_wl32` of that value re-emits the textbook BE byte order,
+/// which is why appending a stored checksum drives the running CRC to zero.
+
+const fn build_crc_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        // crc.c:372-374: c = i << 24; 8× (c << 1) ^ (poly & (c >> 31 sign));
+        let mut c = (i as u32) << 24;
+        let mut j = 0;
+        while j < 8 {
+            let mask = if (c as i32) < 0 { 0x04C1_1DB7 } else { 0 };
+            c = (c << 1) ^ mask;
+            j += 1;
+        }
+        table[i] = c.swap_bytes(); // crc.c:375: ctx[i] = av_bswap32(c);
+        i += 1;
+    }
+    table
+}
+
+/// `ff_crc04C11DB7_update` (`aviobuf.c:568-572`) = `av_crc(AV_CRC_32_IEEE)`
+/// (`crc.c:421-452`) over one slice. Init value passed by the caller (0 for
+/// fresh checksums, the startcode CRC for packet headers).
+pub fn crc04c11db7_update(crc: u32, buf: &[u8]) -> u32 {
+    let mut crc = crc;
+    for &b in buf {
+        crc = CRC_TABLE[((crc as u8) ^ b) as usize] ^ (crc >> 8); // crc.c:450
+    }
+    crc
+}
+
+// ---------------------------------------------------------------------
+// vint / svint — nutenc.c:306-348 (put) + aviobuf.c:919-928 (get)
+// ---------------------------------------------------------------------
+
+/// `get_v_length` + `put_v` (`nutenc.c:306-327`): 7 bits per byte, most
+/// significant group first; bit 7 set on every byte but the last.
+pub fn put_v(out: &mut Vec<u8>, val: u64) {
+    let mut i = 1usize; // get_v_length (nutenc.c:306-313)
+    {
+        let mut v = val;
+        while {
+            v >>= 7;
+            v != 0
+        } {
+            i += 1;
+        }
+    }
+    while {
+        i -= 1;
+        i > 0
+    } {
+        out.push(128 | (val >> (7 * i)) as u8); // nutenc.c:324
+    }
+    out.push((val & 127) as u8); // nutenc.c:326
+}
+
+/// `put_s` (`nutenc.c:345-348`): `put_v(2·|val| − (val > 0))`.
+pub fn put_s(out: &mut Vec<u8>, val: i64) {
+    let v = 2 * (val as i128).abs() - i128::from(val > 0);
+    put_v(out, v as u64);
 }
 
 // ---------------------------------------------------------------------
@@ -1206,10 +1207,7 @@ impl NutDemuxer {
                 }
                 // nutdec.c:605-607 — clear insane rates (num >= 1000·den
                 // or negative parts).
-                if fr.num < 0
-                    || fr.den < 0
-                    || i64::from(fr.num) >= 1000 * i64::from(fr.den)
-                {
+                if fr.num < 0 || fr.den < 0 || i64::from(fr.num) >= 1000 * i64::from(fr.den) {
                     fr = Rational::UNKNOWN;
                 }
                 if let Some(slot) = self.info_r_frame_rate.get_mut(stream_id_plus1 as usize - 1) {
@@ -4612,4 +4610,3 @@ mod mux_tests {
         );
     }
 }
-
