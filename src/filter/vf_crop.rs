@@ -1019,9 +1019,10 @@ pub static CROP_DEF: FilterDef = FilterDef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::filter_def;
-    use crate::filter::link::LinkId;
-    use crate::util::pixfmt::PixelFormat;
+    use crate::{
+        filter::{filter_def, link::LinkId},
+        util::pixfmt::PixelFormat,
+    };
 
     /// buffer(pix_fmt WxH, tb 1/25, sar) → filter(args) → buffersink,
     /// configured. Returns the graph, source, sink and the filter's two
