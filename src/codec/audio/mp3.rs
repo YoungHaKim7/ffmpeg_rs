@@ -111,6 +111,61 @@ use crate::{
     },
 };
 
+static TABLES: std::sync::OnceLock<Tables> = std::sync::OnceLock::new();
+
+/// `exp2_lut` shared by both tablegen headers
+/// (`mpegaudio_tablegen.h:51-56`, `mpegaudiodec_common_tablegen.h:46-51`).
+const EXP2_LUT: [f64; 4] = [
+    1.00000000000000000000,   // 2 ^ (0 * 0.25)
+    1.18920711500272106672,   // 2 ^ (1 * 0.25)
+    std::f64::consts::SQRT_2, // 2 ^ (2 * 0.25)
+    1.68179283050742908606,   // 2 ^ (3 * 0.25)
+];
+
+// `#define C3 FIXHR(0.86602540378443864676/2)` etc.
+// (mpegaudiodec_template.c:322-325 — imdct12's constants)
+const I12_C3: f32 = fx(0.86602540378443864676 / 2.0);
+const I12_C4: f32 = fx(0.70710678118654752439 / 2.0); // 0.5 / cos(pi*(9)/36)
+const I12_C5: f32 = fx(0.51763809020504152469 / 2.0); // 0.5 / cos(pi*(5)/36)
+const I12_C6: f32 = fx(1.93185165257813657349 / 4.0); // 0.5 / cos(pi*(15)/36)
+
+// `cos(pi*i/18)` set — `#define C1..C8` (mpegaudiodsp_template.c:238-245)
+const C1: f32 = fx(0.98480775301220805936 / 2.0);
+const C2: f32 = fx(0.93969262078590838405 / 2.0);
+const C3: f32 = fx(0.86602540378443864676 / 2.0);
+const C4: f32 = fx(0.76604444311897803520 / 2.0);
+const C5: f32 = fx(0.64278760968653932632 / 2.0);
+#[allow(dead_code)] // defined by C's cos(pi*i/18) set; unused there too
+const C6: f32 = fx(0.5 / 2.0);
+const C7: f32 = fx(0.34202014332566873304 / 2.0);
+const C8: f32 = fx(0.17364817766693034885 / 2.0);
+
+/// `icos36[9]` — `0.5 / cos(pi*(2*i+1)/36)` (mpegaudiodsp_template.c:248-258).
+const ICOS36: [f32; 9] = [
+    fx(0.50190991877167369479),
+    fx(0.51763809020504152469), //0
+    fx(0.55168895948124587824),
+    fx(0.61038729438072803416),
+    fx(0.70710678118654752439), //1
+    fx(0.87172339781054900991),
+    fx(1.18310079157624925896),
+    fx(1.93185165257813657349), //2
+    fx(5.73685662283492756461),
+];
+
+/// `icos36h[9]` — same values halved (the /4 entries 6-7 stay /4)
+/// (mpegaudiodsp_template.c:261-271).
+const ICOS36H: [f32; 8] = [
+    fx(0.50190991877167369479 / 2.0),
+    fx(0.51763809020504152469 / 2.0), //0
+    fx(0.55168895948124587824 / 2.0),
+    fx(0.61038729438072803416 / 2.0),
+    fx(0.70710678118654752439 / 2.0), //1
+    fx(0.87172339781054900991 / 2.0),
+    fx(1.18310079157624925896 / 4.0),
+    fx(1.93185165257813657349 / 4.0), //2
+];
+
 // ---------------------------------------------------------------------
 // Constants (mpegaudio.h)
 // ---------------------------------------------------------------------
@@ -585,851 +640,6 @@ const MPA_QUAD_CODES: [[u8; 16]; 2] = [
 /// `mpa_quad_bits[2][16]` (`mpegaudiodec_common.c:357-360`).
 const MPA_QUAD_BITS: [[u8; 16]; 2] = [[1, 4, 4, 5, 4, 6, 5, 6, 4, 5, 5, 6, 5, 6, 6, 6], [4; 16]];
 
-// ---------------------------------------------------------------------
-// Header decode — mpegaudiodecheader.c + mpegaudiodecheader.h
-// ---------------------------------------------------------------------
-
-/// `MPA_DECODE_HEADER` (`mpegaudiodecheader.h:35-49`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MpaDecodeHeader {
-    pub frame_size: i32,
-    pub error_protection: i32,
-    pub layer: i32,
-    pub sample_rate: i32,
-    /// between 0 and 8.
-    pub sample_rate_index: i32,
-    pub bit_rate: i32,
-    pub nb_channels: i32,
-    pub mode: i32,
-    pub mode_ext: i32,
-    pub lsf: i32,
-}
-
-/// `ff_mpa_check_header` (`mpegaudiodecheader.h:62-79`) — the fast
-/// resync check. C returns a bare -1; here each rejection is named.
-pub fn ff_mpa_check_header(header: u32) -> Result<()> {
-    // header
-    if (header & 0xffe0_0000) != 0xffe0_0000 {
-        return Err(Error::InvalidData("invalid frame sync".into()));
-    }
-    // version check
-    if (header & (3 << 19)) == 1 << 19 {
-        return Err(Error::InvalidData("reserved MPEG audio version".into()));
-    }
-    // layer check
-    if (header & (3 << 17)) == 0 {
-        return Err(Error::InvalidData("invalid MPEG audio layer".into()));
-    }
-    // bit rate
-    if (header & (0xf << 12)) == 0xf << 12 {
-        return Err(Error::InvalidData("invalid bitrate index".into()));
-    }
-    // frequency
-    if (header & (3 << 10)) == 3 << 10 {
-        return Err(Error::InvalidData("invalid sample rate index".into()));
-    }
-    Ok(())
-}
-
-/// `avpriv_mpegaudio_decode_header` (`mpegaudiodecheader.c:34-118`).
-///
-/// Returns `Ok(true)` for a free-format frame (bitrate index 0; C's
-/// return value 1 — "frame size must be computed externally", rejected
-/// by `decode_frame`), `Ok(false)` when the header filled in fully.
-pub fn avpriv_mpegaudio_decode_header(s: &mut MpaDecodeHeader, header: u32) -> Result<bool> {
-    ff_mpa_check_header(header)?;
-
-    let (lsf, mpeg25) = if header & (1 << 20) != 0 {
-        (((header & (1 << 19)) == 0) as i32, 0)
-    } else {
-        (1, 1)
-    };
-    s.lsf = lsf;
-
-    s.layer = 4 - ((header >> 17) & 3) as i32;
-    // extract frequency
-    let mut sample_rate_index = ((header >> 10) & 3) as i32;
-    if sample_rate_index as usize >= FF_MPA_FREQ_TAB.len() {
-        sample_rate_index = 0;
-    }
-    let sample_rate = (FF_MPA_FREQ_TAB[sample_rate_index as usize] >> (lsf + mpeg25)) as i32;
-    sample_rate_index += 3 * (lsf + mpeg25);
-    s.sample_rate_index = sample_rate_index;
-    s.error_protection = (((header >> 16) & 1) ^ 1) as i32;
-    s.sample_rate = sample_rate;
-
-    let bitrate_index = ((header >> 12) & 0xf) as usize;
-    let padding = ((header >> 9) & 1) as i32;
-    s.mode = ((header >> 6) & 3) as i32;
-    s.mode_ext = ((header >> 4) & 3) as i32;
-
-    s.nb_channels = if s.mode == MPA_MONO { 1 } else { 2 };
-
-    if bitrate_index != 0 {
-        let mut frame_size =
-            FF_MPA_BITRATE_TAB[s.lsf as usize][(s.layer - 1) as usize][bitrate_index] as i32;
-        s.bit_rate = frame_size * 1000;
-        match s.layer {
-            1 => {
-                frame_size = (frame_size * 12000) / sample_rate;
-                frame_size = (frame_size + padding) * 4;
-            }
-            2 => {
-                frame_size = (frame_size * 144000) / sample_rate;
-                frame_size += padding;
-            }
-            _ => {
-                frame_size = (frame_size * 144000) / (sample_rate << s.lsf);
-                frame_size += padding;
-            }
-        }
-        s.frame_size = frame_size;
-    } else {
-        // if no frame size computed, signal it
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-/// `ff_mpa_decode_header` (`mpegaudiodecheader.c:120-152`) — the
-/// stream-probe helper: full header parse plus the layer → codec /
-/// samples-per-frame mapping. Returns the coded frame size in bytes.
-pub fn ff_mpa_decode_header(
-    head: u32,
-    sample_rate: &mut i32,
-    channels: &mut i32,
-    frame_size: &mut i32,
-    bit_rate: &mut i32,
-    codec_id: &mut CodecId,
-) -> Result<i32> {
-    let mut s = MpaDecodeHeader::default();
-    if avpriv_mpegaudio_decode_header(&mut s, head)? {
-        return Err(Error::InvalidData(
-            "free-format frame: frame size must be computed externally".into(),
-        ));
-    }
-
-    *frame_size = match s.layer {
-        1 => {
-            *codec_id = CodecId::Mp1;
-            384
-        }
-        2 => {
-            *codec_id = CodecId::Mp2;
-            1152
-        }
-        _ => {
-            // C keeps AV_CODEC_ID_MP3ADU when the caller passed it; the
-            // port has no ADU codec, so the mapping is unconditional.
-            *codec_id = CodecId::Mp3;
-            if s.lsf != 0 { 576 } else { 1152 }
-        }
-    };
-
-    *sample_rate = s.sample_rate;
-    *channels = s.nb_channels;
-    *bit_rate = s.bit_rate;
-    Ok(s.frame_size)
-}
-
-// ---------------------------------------------------------------------
-// Runtime-generated tables (C's tablegen headers, computed at startup)
-// ---------------------------------------------------------------------
-
-/// `frexp(3)` — C uses it in `mpegaudiodec_common_tablegen.h:59`; std
-/// has no frexp. Returns `(m, e)` with `f == m * 2^e`, `m ∈ [0.5, 1)`.
-fn frexp(f: f64) -> (f64, i32) {
-    if f == 0.0 || !f.is_finite() {
-        return (f, 0);
-    }
-    let bits = f.to_bits();
-    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
-    if raw_exp == 0 {
-        // subnormal: scale up then recurse (never hit by these tables,
-        // kept for exactness of the helper).
-        let (m, e) = frexp(f * 2f64.powi(64));
-        return (m, e - 64);
-    }
-    let m = f64::from_bits((bits & !(0x7ffu64 << 52)) | (0x3feu64 << 52));
-    (m, raw_exp - 1022)
-}
-
-/// `llrint` with the C default rounding mode (round-to-nearest-even);
-/// `f64::round` is half-away-from-zero and differs on exact `.5`.
-fn llrint_even(v: f64) -> i64 {
-    let mut r = v.round();
-    if (v - v.trunc()).abs() == 0.5 && r % 2.0 != 0.0 {
-        r -= r.signum();
-    }
-    r as i64
-}
-
-/// One of the 15 big-value Huffman tables, built from code lengths the
-/// way `ff_vlc_init_from_lengths` (`vlc.c:306-351`) does: a running
-/// 32-bit top-aligned counter advances by `1 << (32 - len)` per symbol
-/// **in array order** (`vlc.c:319-345`) — not sorted by length, so the
-/// codes must be matched explicitly rather than by canonical ranges.
-/// Decoding walks bit by bit and matches the accumulated prefix.
-struct BigVlc {
-    /// Per code length: sorted `(code, symbol)` pairs.
-    by_len: Vec<Vec<(u32, i32)>>,
-    max_len: u32,
-}
-
-impl BigVlc {
-    /// `ff_vlc_init_from_lengths` + the mpa symbol packing
-    /// (`mpegaudiodec_common.c:423-427`):
-    /// `tmp_symbols[j] = high << 1 | ((high && low) << 4) | low`.
-    fn build(lens: &[u8], syms: &[u8]) -> BigVlc {
-        if lens.is_empty() {
-            // index 0 is the unused dummy slot (ff_huff_vlc[0]).
-            return BigVlc {
-                by_len: vec![Vec::new(); 1],
-                max_len: 0,
-            };
-        }
-        let mut code: u64 = 0;
-        let max_len = *lens.iter().max().unwrap() as u32;
-        let mut by_len: Vec<Vec<(u32, i32)>> = vec![Vec::new(); (max_len + 1) as usize];
-        for j in 0..lens.len() {
-            let len = lens[j] as u32;
-            let c = (code >> (32 - len)) as u32;
-            let high = (syms[j] & 0xf0) as i32;
-            let low = (syms[j] & 0x0f) as i32;
-            let sym = (high << 1) | (((high != 0 && low != 0) as i32) << 4) | low;
-            by_len[len as usize].push((c, sym));
-            code += 1u64 << (32 - len);
-        }
-        debug_assert_eq!(code, 1 << 32, "over/under-determined VLC tree");
-        for v in by_len.iter_mut() {
-            v.sort_unstable();
-        }
-        BigVlc { by_len, max_len }
-    }
-
-    /// `get_vlc2(gb, table, 7, 3)` for a lengths-built table. Complete
-    /// trees always terminate; returns -1 only if the tree is somehow
-    /// incomplete (C returns -1 for invalid codes).
-    fn decode(&self, gb: &mut GetBits) -> i32 {
-        let mut code: u32 = 0;
-        for len in 1..=self.max_len as usize {
-            let b = gb.get_bits1();
-            code = (code << 1) | b;
-            #[cfg(test)]
-            eprintln!(
-                "DBG decode len={len} bit={b} code={code} looking in {:?}",
-                self.by_len[len]
-            );
-            if let Ok(idx) = self.by_len[len].binary_search_by_key(&code, |&(c, _)| c) {
-                return self.by_len[len][idx].1;
-            }
-        }
-        -1
-    }
-}
-
-/// One of the 2 quad (count1) tables — built from explicit
-/// (code, length) pairs like `vlc_init` (`mpegaudiodec_common.c:438-447`),
-/// with a flat `1 << bits` LUT exactly like C's one-level table.
-struct QuadVlc {
-    lut: Vec<(i32, u8)>, // (sym, len); len 0 = invalid (C: sym -1)
-}
-
-impl QuadVlc {
-    fn build(bits: u32, lengths: &[u8], codes: &[u8]) -> QuadVlc {
-        let size = 1usize << bits;
-        let mut lut = vec![(-1i32, 0u8); size];
-        for i in 0..16 {
-            let len = lengths[i] as u32;
-            let code = codes[i] as u32;
-            let lo = (code << (bits - len)) as usize;
-            for slot in lut.iter_mut().take(lo + (1usize << (bits - len))).skip(lo) {
-                *slot = (i as i32, len as u8);
-            }
-        }
-        QuadVlc { lut }
-    }
-
-    /// `get_vlc2(gb, vlc->table, vlc->bits, 1)` — invalid code consumes
-    /// no bits and returns -1 (bitstream_template.h:499-529).
-    fn decode(&self, gb: &mut GetBits, bits: u32) -> i32 {
-        let idx = gb.peek(bits) as usize;
-        let (sym, len) = self.lut[idx];
-        gb.skip_bits(len as u32);
-        sym
-    }
-}
-
-/// Everything C builds in the `decode_init_static` /
-/// `ff_mpegaudiodec_common_init_static` / `ff_mpadsp_init` once-blocks.
-struct Tables {
-    /// `ff_band_index_long[9][23]` (`mpegaudiodec_common.c:450-457`).
-    band_index_long: [[u16; 23]; 9],
-    /// `exp_table_float[512]` (`mpegaudio_tablegen.h`).
-    exp_table: Vec<f32>,
-    /// `expval_table_float[512][16]`.
-    expval_table: Vec<[f32; 16]>,
-    /// `ff_table_4_3_exp[TABLE_4_3_SIZE]`.
-    table_4_3_exp: Vec<i8>,
-    /// `ff_table_4_3_value[TABLE_4_3_SIZE]`.
-    table_4_3_value: Vec<u32>,
-    /// `ff_mdct_win_float[8][MDCT_BUF_SIZE]` (`mpegaudiodsp.c:30-79`).
-    mdct_win: [[f32; MDCT_BUF_SIZE]; 8],
-    /// `ff_mpa_synth_window_float[512+256]` (`mpegaudiodsp_template.c:197-224`).
-    synth_window: Vec<f32>,
-    /// `is_table_lsf[2][2][16]` (`mpegaudiodec_template.c:107,264-278`).
-    is_table_lsf: [[[f32; 16]; 2]; 2],
-    /// `ff_huff_vlc[1..=15]` (index 0 unused, dummy present).
-    huff_vlc: Vec<BigVlc>,
-    /// `ff_huff_quad_vlc[2]`.
-    huff_quad: [QuadVlc; 2],
-}
-
-static TABLES: std::sync::OnceLock<Tables> = std::sync::OnceLock::new();
-
-fn tables() -> &'static Tables {
-    TABLES.get_or_init(build_tables)
-}
-
-/// `exp2_lut` shared by both tablegen headers
-/// (`mpegaudio_tablegen.h:51-56`, `mpegaudiodec_common_tablegen.h:46-51`).
-const EXP2_LUT: [f64; 4] = [
-    1.00000000000000000000,   // 2 ^ (0 * 0.25)
-    1.18920711500272106672,   // 2 ^ (1 * 0.25)
-    std::f64::consts::SQRT_2, // 2 ^ (2 * 0.25)
-    1.68179283050742908606,   // 2 ^ (3 * 0.25)
-];
-
-fn build_tables() -> Tables {
-    // ---- ff_band_index_long (mpegaudiodec_common.c:450-457) ----
-    let mut band_index_long = [[0u16; 23]; 9];
-    for i in 0..9 {
-        let mut k = 0u16;
-        for j in 0..22 {
-            band_index_long[i][j] = k;
-            k += (FF_BAND_SIZE_LONG[i][j] >> 1) as u16;
-        }
-        band_index_long[i][22] = k;
-    }
-
-    // ---- exp/expval float tables (mpegaudio_tablegen.h:48-84) ----
-    let mut pow43_lut = [0f64; 16];
-    for (i, v) in pow43_lut.iter_mut().enumerate() {
-        *v = i as f64 * (i as f64).cbrt();
-    }
-    // 2^(-72), written as the exact C decimal literal.
-    let exp2_base_0 = 2.11758236813575084767080625169910490512847900390625e-22f64;
-    let mut exp_table = vec![0f32; 512];
-    let mut expval_table = vec![[0f32; 16]; 512];
-    let mut exp2_base = exp2_base_0;
-    for exponent in 0..512usize {
-        if exponent > 0 && exponent & 3 == 0 {
-            exp2_base *= 2.0;
-        }
-        let exp2_val = exp2_base * EXP2_LUT[exponent & 3] / IMDCT_SCALAR;
-        for value in 0..16 {
-            expval_table[exponent][value] = (pow43_lut[value] * exp2_val) as f32;
-        }
-        exp_table[exponent] = expval_table[exponent][1];
-    }
-
-    // ---- ff_table_4_3 (mpegaudiodec_common_tablegen.h:44-69) ----
-    // FRAC_BITS = 23 there.
-    let mut table_4_3_exp = vec![0i8; TABLE_4_3_SIZE];
-    let mut table_4_3_value = vec![0u32; TABLE_4_3_SIZE];
-    let mut pow43_val = 0f64;
-    for i in 1..TABLE_4_3_SIZE {
-        let value = i as f64 / 4.0;
-        if (i & 3) == 0 {
-            pow43_val = value / IMDCT_SCALAR * value.cbrt();
-        }
-        let f = pow43_val * EXP2_LUT[i & 3];
-        let (fm, e) = frexp(f);
-        let m = llrint_even(fm * (1u64 << 31) as f64);
-        let e = e + 23 - 31 + 5 - 100; // FRAC_BITS - 31 + 5 - 100
-        table_4_3_value[i] = m as u32;
-        table_4_3_exp[i] = (-e) as i8;
-    }
-
-    // ---- ff_mdct_win (mpegaudiodsp.c:30-79) ----
-    let mut mdct_win = [[0f32; MDCT_BUF_SIZE]; 8];
-    for i in 0..36usize {
-        for j in 0..4usize {
-            if j == 2 && i % 3 != 1 {
-                continue;
-            }
-            let mut d = (std::f64::consts::PI * (i as f64 + 0.5) / 36.0).sin();
-            if j == 1 {
-                if i >= 30 {
-                    d = 0.0;
-                } else if i >= 24 {
-                    d = (std::f64::consts::PI * (i as f64 - 18.0 + 0.5) / 12.0).sin();
-                } else if i >= 18 {
-                    d = 1.0;
-                }
-            } else if j == 3 {
-                if i < 6 {
-                    d = 0.0;
-                } else if i < 12 {
-                    d = (std::f64::consts::PI * (i as f64 - 6.0 + 0.5) / 12.0).sin();
-                } else if i < 18 {
-                    d = 1.0;
-                }
-            }
-            // merge last stage of imdct into the window coefficients
-            d *= 0.5 * IMDCT_SCALAR / (std::f64::consts::PI * (2.0 * i as f64 + 19.0) / 72.0).cos();
-            if j == 2 {
-                mdct_win[j][i / 3] = (d / 32.0) as f32;
-            } else {
-                let idx = if i < 18 {
-                    i
-                } else {
-                    i + (MDCT_BUF_SIZE / 2 - 18)
-                };
-                mdct_win[j][idx] = (d / 32.0) as f32;
-            }
-        }
-    }
-    // NOTE: we do frequency inversion after the MDCT by changing
-    // the sign of the right window coefs (mpegaudiodsp.c:65-74).
-    for j in 0..4 {
-        let mut i = 0;
-        while i < MDCT_BUF_SIZE {
-            mdct_win[j + 4][i] = mdct_win[j][i];
-            mdct_win[j + 4][i + 1] = -mdct_win[j][i + 1];
-            i += 2;
-        }
-    }
-
-    // ---- ff_mpa_synth_window (mpegaudiodsp_template.c:197-224) ----
-    // max = 18760, max sum over all 16 coefs : 44736
-    let mut synth_window = vec![0f32; 512 + 256];
-    for i in 0..257usize {
-        let mut v = (FF_MPA_ENWINDOW[i] as f64 * (1.0 / (1u64 << (16 + 23)) as f64)) as f32;
-        synth_window[i] = v;
-        if (i & 63) != 0 {
-            v = -v;
-        }
-        if i != 0 {
-            synth_window[512 - i] = v;
-        }
-    }
-    // Needed for avoiding shuffles in ASM implementations
-    for i in 0..8usize {
-        for j in 0..16usize {
-            synth_window[512 + 16 * i + j] = synth_window[64 * i + 32 - j];
-        }
-    }
-    for i in 0..8usize {
-        for j in 0..16usize {
-            synth_window[512 + 128 + 16 * i + j] = synth_window[64 * i + 48 - j];
-        }
-    }
-
-    // ---- is_table_lsf (mpegaudiodec_template.c:264-278) ----
-    let mut is_table_lsf = [[[0f32; 16]; 2]; 2];
-    for i in 0..16usize {
-        for j in 0..2usize {
-            let e = -((j + 1) as f64) * (((i + 1) >> 1) as f64);
-            let f = (e / 4.0).exp2();
-            let k = i & 1;
-            is_table_lsf[j][k ^ 1][i] = f as f32;
-            is_table_lsf[j][k][i] = 1.0f32;
-        }
-    }
-
-    // ---- ff_huff_vlc[1..=15] (mpegaudiodec_common.c:404-436) ----
-    let mut huff_vlc = Vec::with_capacity(16);
-    huff_vlc.push(BigVlc::build(&[], &[])); // index 0 unused
-    let mut lens_off = 0usize;
-    let mut sym_off = 0usize;
-    for &nb_codes_minus_one in MPA_HUFF_SIZES_MINUS_ONE {
-        let n = nb_codes_minus_one + 1;
-        huff_vlc.push(BigVlc::build(
-            &MPA_HUFFLENS[lens_off..lens_off + n],
-            &MPA_HUFFSYMBOLS[sym_off..sym_off + n],
-        ));
-        lens_off += n;
-        sym_off += n;
-    }
-    debug_assert_eq!(lens_off, MPA_HUFFLENS.len());
-    debug_assert_eq!(sym_off, MPA_HUFFSYMBOLS.len());
-
-    // ---- ff_huff_quad_vlc[2] (mpegaudiodec_common.c:438-447) ----
-    let huff_quad = [
-        QuadVlc::build(6, &MPA_QUAD_BITS[0], &MPA_QUAD_CODES[0]),
-        QuadVlc::build(4, &MPA_QUAD_BITS[1], &MPA_QUAD_CODES[1]),
-    ];
-
-    Tables {
-        band_index_long,
-        exp_table,
-        expval_table,
-        table_4_3_exp,
-        table_4_3_value,
-        mdct_win,
-        synth_window,
-        is_table_lsf,
-        huff_vlc,
-        huff_quad,
-    }
-}
-
-// ---------------------------------------------------------------------
-// Bit reader — get_bits.h / bitstream_template.h (safe BE reader)
-// ---------------------------------------------------------------------
-
-/// `GetBitContext` — big-endian MSB-first reader with the *safe*
-/// semantics: reads at or past the end return 0 bits, and the position
-/// saturates at `ceil(size_in_bits / 8) * 8` (C's `buffer_end * 8`).
-/// Unlike C the buffer is owned (a copy of the window), so the decoder
-/// can stash/restore readers freely (`gb` / `in_gb`).
-#[derive(Clone, Debug)]
-struct GetBits {
-    buf: Vec<u8>,
-    index: i64,
-    size_in_bits: i64,
-}
-
-impl GetBits {
-    /// `init_get_bits(gb, buf, size_in_bits)`.
-    fn init(buf: Vec<u8>, size_in_bits: i64) -> GetBits {
-        debug_assert_eq!(buf.len(), ((size_in_bits + 7) >> 3) as usize);
-        GetBits {
-            buf,
-            index: 0,
-            size_in_bits,
-        }
-    }
-
-    /// C's saturation point: `buffer_end * 8`.
-    fn cap(&self) -> i64 {
-        (self.size_in_bits + 7) & !7
-    }
-
-    /// One bit at absolute position `i` (0 past the buffer, like the
-    /// safe reader's zero-refill).
-    fn bit(&self, i: i64) -> u32 {
-        if i >= 0 && (i >> 3) < self.buf.len() as i64 {
-            ((self.buf[(i >> 3) as usize] >> (7 - (i & 7))) & 1) as u32
-        } else {
-            0
-        }
-    }
-
-    /// `get_bits_count`.
-    fn get_bits_count(&self) -> i64 {
-        self.index
-    }
-
-    /// `get_bits_left`.
-    fn get_bits_left(&self) -> i64 {
-        self.size_in_bits - self.index
-    }
-
-    /// `get_bits1` / one bit of `get_bits`.
-    fn get_bits1(&mut self) -> u32 {
-        let v = self.bit(self.index);
-        self.index = (self.index + 1).min(self.cap());
-        v
-    }
-
-    /// `get_bits` (`bits_read_nz`) for n in 1..=32; `get_bitsz` for
-    /// n == 0 (returns 0, consumes nothing).
-    fn get_bits(&mut self, n: u32) -> u32 {
-        if n == 0 {
-            return 0;
-        }
-        let mut v = 0u32;
-        for k in 0..n {
-            v = (v << 1) | self.bit(self.index + k as i64);
-        }
-        self.index = (self.index + n as i64).min(self.cap());
-        v
-    }
-
-    /// `show_bits` (peek without consuming) for n in 0..=32.
-    fn peek(&self, n: u32) -> u32 {
-        let mut v = 0u32;
-        for k in 0..n {
-            v = (v << 1) | self.bit(self.index + k as i64);
-        }
-        v
-    }
-
-    /// `skip_bits` (unsigned in C's new reader; clamped at the cap).
-    fn skip_bits(&mut self, n: u32) {
-        self.index = (self.index + n as i64).min(self.cap());
-    }
-
-    /// `skip_bits_long` — the legacy signed reader semantics the
-    /// decoder was written for (`mpegaudiodec_template.c:1466`): a
-    /// negative count moves the index back (possibly below 0, where
-    /// reads return 0).
-    fn skip_bits_long(&mut self, n: i64) {
-        self.index = (self.index + n).clamp(0, self.cap());
-    }
-
-    /// `align_get_bits` — skip to the next byte boundary; returns the
-    /// byte offset of the new position (C returns the pointer).
-    fn align_get_bits(&mut self) -> usize {
-        let n = (-self.index) & 7;
-        if n != 0 {
-            self.skip_bits(n as u32);
-        }
-        (self.index >> 3) as usize
-    }
-}
-
-// ---------------------------------------------------------------------
-// Float DSP helpers — the USE_FLOATS macro set
-// (mpegaudiodsp_template.c:35-49, dct32_template.c:34-46)
-// ---------------------------------------------------------------------
-
-/// `MULH3(x, y, s)` with `s = 1 << shift` (float build: `(s)*(y)*(x)`).
-#[inline(always)]
-fn mulh3(x: f32, y: f32, s: f32) -> f32 {
-    s * y * x
-}
-
-/// `MULLx(x, y, FRAC_BITS)` (float build: `(y)*(x)`).
-#[inline(always)]
-fn mullx(x: f32, y: f32) -> f32 {
-    y * x
-}
-
-/// `SHR(a, b)` (float build: `a * (1.0 / (1 << b))`).
-#[inline(always)]
-fn shr(a: f32, b: u32) -> f32 {
-    a * (1.0f32 / (1u32 << b) as f32)
-}
-
-/// `FIXR`/`FIXHR` for the float build: `((x) as f64) as f32` mirrors
-/// C's double constant folding followed by the float cast.
-#[inline(always)]
-const fn fx(x: f64) -> f32 {
-    x as f32
-}
-
-// `#define C3 FIXHR(0.86602540378443864676/2)` etc.
-// (mpegaudiodec_template.c:322-325 — imdct12's constants)
-const I12_C3: f32 = fx(0.86602540378443864676 / 2.0);
-const I12_C4: f32 = fx(0.70710678118654752439 / 2.0); // 0.5 / cos(pi*(9)/36)
-const I12_C5: f32 = fx(0.51763809020504152469 / 2.0); // 0.5 / cos(pi*(5)/36)
-const I12_C6: f32 = fx(1.93185165257813657349 / 4.0); // 0.5 / cos(pi*(15)/36)
-
-/// 12 points IMDCT — `imdct12` (`mpegaudiodec_template.c:329-368`),
-/// computed "by hand" by factorizing obvious cases. `in` is the
-/// stride-3 triple starting at `base` (the three short-window
-/// subblocks of one subband).
-fn imdct12(out: &mut [f32; 12], sb: &[f32], base: usize) {
-    let at = |k: usize| sb[base + k];
-    let in0 = at(0 * 3);
-    let in1 = at(1 * 3) + at(0 * 3);
-    let mut in2 = at(2 * 3) + at(1 * 3);
-    let mut in3 = at(3 * 3) + at(2 * 3);
-    let in4 = at(4 * 3) + at(3 * 3);
-    let mut in5 = at(5 * 3) + at(4 * 3);
-    in5 += in3;
-    in3 += in1;
-
-    in2 = mulh3(in2, I12_C3, 2.0);
-    in3 = mulh3(in3, I12_C3, 4.0);
-
-    let t1 = in0 - in4;
-    let t2 = mulh3(in1 - in5, I12_C4, 2.0);
-
-    out[7] = t1 + t2;
-    out[10] = t1 + t2;
-    out[1] = t1 - t2;
-    out[4] = t1 - t2;
-
-    let mut in0 = in0 + shr(in4, 1);
-    let in4b = in0 + in2;
-    in5 += 2.0 * in1;
-    let in1b = mulh3(in5 + in3, I12_C5, 1.0);
-    out[8] = in4b + in1b;
-    out[9] = in4b + in1b;
-    out[2] = in4b - in1b;
-    out[3] = in4b - in1b;
-
-    in0 -= in2;
-    let in5b = mulh3(in5 - in3, I12_C6, 2.0);
-    out[0] = in0 - in5b;
-    out[5] = in0 - in5b;
-    out[6] = in0 + in5b;
-    out[11] = in0 + in5b;
-}
-
-// `cos(pi*i/18)` set — `#define C1..C8` (mpegaudiodsp_template.c:238-245)
-const C1: f32 = fx(0.98480775301220805936 / 2.0);
-const C2: f32 = fx(0.93969262078590838405 / 2.0);
-const C3: f32 = fx(0.86602540378443864676 / 2.0);
-const C4: f32 = fx(0.76604444311897803520 / 2.0);
-const C5: f32 = fx(0.64278760968653932632 / 2.0);
-#[allow(dead_code)] // defined by C's cos(pi*i/18) set; unused there too
-const C6: f32 = fx(0.5 / 2.0);
-const C7: f32 = fx(0.34202014332566873304 / 2.0);
-const C8: f32 = fx(0.17364817766693034885 / 2.0);
-
-/// `icos36[9]` — `0.5 / cos(pi*(2*i+1)/36)` (mpegaudiodsp_template.c:248-258).
-const ICOS36: [f32; 9] = [
-    fx(0.50190991877167369479),
-    fx(0.51763809020504152469), //0
-    fx(0.55168895948124587824),
-    fx(0.61038729438072803416),
-    fx(0.70710678118654752439), //1
-    fx(0.87172339781054900991),
-    fx(1.18310079157624925896),
-    fx(1.93185165257813657349), //2
-    fx(5.73685662283492756461),
-];
-
-/// `icos36h[9]` — same values halved (the /4 entries 6-7 stay /4)
-/// (mpegaudiodsp_template.c:261-271).
-const ICOS36H: [f32; 8] = [
-    fx(0.50190991877167369479 / 2.0),
-    fx(0.51763809020504152469 / 2.0), //0
-    fx(0.55168895948124587824 / 2.0),
-    fx(0.61038729438072803416 / 2.0),
-    fx(0.70710678118654752439 / 2.0), //1
-    fx(0.87172339781054900991 / 2.0),
-    fx(1.18310079157624925896 / 4.0),
-    fx(1.93185165257813657349 / 4.0), //2
-];
-
-/// `imdct36` — `mpegaudiodsp_template.c:274-352`, Lee-like
-/// decomposition followed by a hand coded 9-point DCT. `out`/`buf` are
-/// flat arrays with the block's base offsets applied; `in` is this
-/// block's 18 spectral lines (modified in place: prefix sums).
-fn imdct36(
-    out: &mut [f32],
-    out_off: usize,
-    buf: &mut [f32],
-    buf_off: usize,
-    input: &mut [f32],
-    win: &[f32],
-) {
-    let mut tmp = [0f32; 18];
-
-    let mut i = 17i32;
-    while i >= 1 {
-        input[i as usize] += input[(i - 1) as usize];
-        i -= 1;
-    }
-    let mut i = 17i32;
-    while i >= 3 {
-        input[i as usize] += input[(i - 2) as usize];
-        i -= 2;
-    }
-
-    for j in 0..2usize {
-        let in1 = &input[j..];
-        let t2 = in1[2 * 4] + in1[2 * 8] - in1[2 * 2];
-
-        let t3 = in1[2 * 0] + shr(in1[2 * 6], 1);
-        let t1 = in1[2 * 0] - in1[2 * 6];
-        tmp[j + 6] = t1 - shr(t2, 1);
-        tmp[j + 16] = t1 + t2;
-
-        let t0 = mulh3(in1[2 * 2] + in1[2 * 4], C2, 2.0);
-        let t1 = mulh3(in1[2 * 4] - in1[2 * 8], -2.0 * C8, 1.0);
-        let t2 = mulh3(in1[2 * 2] + in1[2 * 8], -C4, 2.0);
-
-        tmp[j + 10] = t3 - t0 - t2;
-        tmp[j + 2] = t3 + t0 + t1;
-        tmp[j + 14] = t3 + t2 - t1;
-
-        tmp[j + 4] = mulh3(in1[2 * 5] + in1[2 * 7] - in1[2 * 1], -C3, 2.0);
-        let t2 = mulh3(in1[2 * 1] + in1[2 * 5], C1, 2.0);
-        let t3 = mulh3(in1[2 * 5] - in1[2 * 7], -2.0 * C7, 1.0);
-        let t0 = mulh3(in1[2 * 3], C3, 2.0);
-
-        let t1 = mulh3(in1[2 * 1] + in1[2 * 7], -C5, 2.0);
-
-        tmp[j] = t2 + t3 + t0;
-        tmp[j + 12] = t2 + t1 - t0;
-        tmp[j + 8] = t3 - t1 - t0;
-    }
-
-    let mut i = 0usize;
-    for j in 0..4usize {
-        let t0 = tmp[i];
-        let t1 = tmp[i + 2];
-        let s0 = t1 + t0;
-        let s2 = t1 - t0;
-
-        let t2 = tmp[i + 1];
-        let t3 = tmp[i + 3];
-        let s1 = mulh3(t3 + t2, ICOS36H[j], 2.0);
-        let s3 = mullx(t3 - t2, ICOS36[8 - j]);
-
-        let t0 = s0 + s1;
-        let t1 = s0 - s1;
-        out[out_off + (9 + j) * SBLIMIT] = mulh3(t1, win[9 + j], 1.0) + buf[buf_off + 4 * (9 + j)];
-        out[out_off + (8 - j) * SBLIMIT] = mulh3(t1, win[8 - j], 1.0) + buf[buf_off + 4 * (8 - j)];
-        buf[buf_off + 4 * (9 + j)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 9 + j], 1.0);
-        buf[buf_off + 4 * (8 - j)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 8 - j], 1.0);
-
-        let t0 = s2 + s3;
-        let t1 = s2 - s3;
-        out[out_off + (9 + 8 - j) * SBLIMIT] =
-            mulh3(t1, win[9 + 8 - j], 1.0) + buf[buf_off + 4 * (9 + 8 - j)];
-        out[out_off + j * SBLIMIT] = mulh3(t1, win[j], 1.0) + buf[buf_off + 4 * j];
-        buf[buf_off + 4 * (9 + 8 - j)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 9 + 8 - j], 1.0);
-        buf[buf_off + 4 * j] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + j], 1.0);
-        i += 4;
-    }
-
-    let s0 = tmp[16];
-    let s1 = mulh3(tmp[17], ICOS36H[4], 2.0);
-    let t0 = s0 + s1;
-    let t1 = s0 - s1;
-    out[out_off + (9 + 4) * SBLIMIT] = mulh3(t1, win[9 + 4], 1.0) + buf[buf_off + 4 * (9 + 4)];
-    out[out_off + (8 - 4) * SBLIMIT] = mulh3(t1, win[8 - 4], 1.0) + buf[buf_off + 4 * (8 - 4)];
-    buf[buf_off + 4 * (9 + 4)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 9 + 4], 1.0);
-    buf[buf_off + 4 * (8 - 4)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 8 - 4], 1.0);
-}
-
-/// `ff_imdct36_blocks_float` (`mpegaudiodsp_template.c:354-371`).
-/// `out` is the granule's `sb_samples` base, `buf` the channel's
-/// `mdct_buf`, `input` the granule's `sb_hybrid`.
-fn imdct36_blocks(
-    out: &mut [f32],
-    out_base: usize,
-    buf: &mut [f32],
-    buf_base: usize,
-    input: &mut [f32],
-    count: usize,
-    switch_point: bool,
-    block_type: u8,
-) {
-    let t = tables();
-    let mut in_off = 0usize;
-    let mut buf_off = buf_base;
-    let mut out_off = out_base;
-    for j in 0..count {
-        // select window
-        let win_idx = if switch_point && j < 2 {
-            0
-        } else {
-            block_type as usize
-        };
-        let win = &t.mdct_win[win_idx + (4 & (0usize.wrapping_sub(j & 1)))];
-        imdct36(
-            out,
-            out_off,
-            buf,
-            buf_off,
-            &mut input[in_off..in_off + 18],
-            win,
-        );
-        in_off += 18;
-        buf_off += if (j & 3) != 3 { 1 } else { 72 - 3 };
-        out_off += 1;
-    }
-}
-
 // dct32 coefficients — `#define COS0_0` etc. (dct32_template.c:53-87),
 // each still carrying its C divisor so `mulh3`'s `1 << s` cancels it.
 const COS0_0: f32 = fx(0.50060299823519630134 / 2.0);
@@ -1468,300 +678,24 @@ const COS3_1: f32 = fx(1.30656296487637652785 / 4.0);
 
 const COS4_0: f32 = fx(std::f64::consts::FRAC_1_SQRT_2 / 2.0);
 
-/// `ff_dct32_float` (`dct32_template.c:126-288`) — DCT32 without
-/// 1/sqrt(2) coefficient scaling, butterfly form. `tab` holds the 32
-/// subband samples; `out` receives 32 values.
-pub fn dct32(out: &mut [f32], tab: &[f32]) {
-    let mut val = [0f32; 32];
+/// `ISQRT2` — `FIXR(0.70710678118654752440)` (template.c:941).
+const ISQRT2: f32 = fx(0.70710678118654752440);
 
-    // BF(a, b, c, s): butterfly on the register array
-    macro_rules! bf {
-        ($a:literal, $b:literal, $c:expr, $s:literal) => {{
-            let tmp0 = val[$a] + val[$b];
-            let tmp1 = val[$a] - val[$b];
-            val[$a] = tmp0;
-            val[$b] = mulh3(tmp1, $c, (1u32 << $s) as f32);
-        }};
-    }
-    // BF0: butterfly straight from the input table
-    macro_rules! bf0 {
-        ($a:literal, $b:literal, $c:expr, $s:literal) => {{
-            let tmp0 = tab[$a] + tab[$b];
-            let tmp1 = tab[$a] - tab[$b];
-            val[$a] = tmp0;
-            val[$b] = mulh3(tmp1, $c, (1u32 << $s) as f32);
-        }};
-    }
-    macro_rules! bf1 {
-        ($a:literal, $b:literal, $c:literal, $d:literal) => {{
-            bf!($a, $b, COS4_0, 1);
-            bf!($c, $d, -COS4_0, 1);
-            val[$c] += val[$d];
-        }};
-    }
-    macro_rules! bf2 {
-        ($a:literal, $b:literal, $c:literal, $d:literal) => {{
-            bf!($a, $b, COS4_0, 1);
-            bf!($c, $d, -COS4_0, 1);
-            val[$c] += val[$d];
-            val[$a] += val[$c];
-            val[$c] += val[$b];
-            val[$b] += val[$d];
-        }};
-    }
-    macro_rules! add {
-        ($a:literal, $b:literal) => {
-            val[$a] += val[$b]
-        };
-    }
+// ---------------------------------------------------------------------
+// Bit reservoir state — the gb / in_gb pair + switch_buffer
+// (mpegaudiodec_template.c:725-738)
+// ---------------------------------------------------------------------
 
-    /* pass 1 */
-    bf0!(0, 31, COS0_0, 1);
-    bf0!(15, 16, COS0_15, 5);
-    /* pass 2 */
-    bf!(0, 15, COS1_0, 1);
-    bf!(16, 31, -COS1_0, 1);
-    /* pass 1 */
-    bf0!(7, 24, COS0_7, 1);
-    bf0!(8, 23, COS0_8, 1);
-    /* pass 2 */
-    bf!(7, 8, COS1_7, 4);
-    bf!(23, 24, -COS1_7, 4);
-    /* pass 3 */
-    bf!(0, 7, COS2_0, 1);
-    bf!(8, 15, -COS2_0, 1);
-    bf!(16, 23, COS2_0, 1);
-    bf!(24, 31, -COS2_0, 1);
-    /* pass 1 */
-    bf0!(3, 28, COS0_3, 1);
-    bf0!(12, 19, COS0_12, 2);
-    /* pass 2 */
-    bf!(3, 12, COS1_3, 1);
-    bf!(19, 28, -COS1_3, 1);
-    /* pass 1 */
-    bf0!(4, 27, COS0_4, 1);
-    bf0!(11, 20, COS0_11, 2);
-    /* pass 2 */
-    bf!(4, 11, COS1_4, 1);
-    bf!(20, 27, -COS1_4, 1);
-    /* pass 3 */
-    bf!(3, 4, COS2_3, 3);
-    bf!(11, 12, -COS2_3, 3);
-    bf!(19, 20, COS2_3, 3);
-    bf!(27, 28, -COS2_3, 3);
-    /* pass 4 */
-    bf!(0, 3, COS3_0, 1);
-    bf!(4, 7, -COS3_0, 1);
-    bf!(8, 11, COS3_0, 1);
-    bf!(12, 15, -COS3_0, 1);
-    bf!(16, 19, COS3_0, 1);
-    bf!(20, 23, -COS3_0, 1);
-    bf!(24, 27, COS3_0, 1);
-    bf!(28, 31, -COS3_0, 1);
-
-    /* pass 1 */
-    bf0!(1, 30, COS0_1, 1);
-    bf0!(14, 17, COS0_14, 3);
-    /* pass 2 */
-    bf!(1, 14, COS1_1, 1);
-    bf!(17, 30, -COS1_1, 1);
-    /* pass 1 */
-    bf0!(6, 25, COS0_6, 1);
-    bf0!(9, 22, COS0_9, 1);
-    /* pass 2 */
-    bf!(6, 9, COS1_6, 2);
-    bf!(22, 25, -COS1_6, 2);
-    /* pass 3 */
-    bf!(1, 6, COS2_1, 1);
-    bf!(9, 14, -COS2_1, 1);
-    bf!(17, 22, COS2_1, 1);
-    bf!(25, 30, -COS2_1, 1);
-
-    /* pass 1 */
-    bf0!(2, 29, COS0_2, 1);
-    bf0!(13, 18, COS0_13, 3);
-    /* pass 2 */
-    bf!(2, 13, COS1_2, 1);
-    bf!(18, 29, -COS1_2, 1);
-    /* pass 1 */
-    bf0!(5, 26, COS0_5, 1);
-    bf0!(10, 21, COS0_10, 1);
-    /* pass 2 */
-    bf!(5, 10, COS1_5, 2);
-    bf!(21, 26, -COS1_5, 2);
-    /* pass 3 */
-    bf!(2, 5, COS2_2, 1);
-    bf!(10, 13, -COS2_2, 1);
-    bf!(18, 21, COS2_2, 1);
-    bf!(26, 29, -COS2_2, 1);
-    /* pass 4 */
-    bf!(1, 2, COS3_1, 2);
-    bf!(5, 6, -COS3_1, 2);
-    bf!(9, 10, COS3_1, 2);
-    bf!(13, 14, -COS3_1, 2);
-    bf!(17, 18, COS3_1, 2);
-    bf!(21, 22, -COS3_1, 2);
-    bf!(25, 26, COS3_1, 2);
-    bf!(29, 30, -COS3_1, 2);
-
-    /* pass 5 */
-    bf1!(0, 1, 2, 3);
-    bf2!(4, 5, 6, 7);
-    bf1!(8, 9, 10, 11);
-    bf2!(12, 13, 14, 15);
-    bf1!(16, 17, 18, 19);
-    bf2!(20, 21, 22, 23);
-    bf1!(24, 25, 26, 27);
-    bf2!(28, 29, 30, 31);
-
-    /* pass 6 */
-
-    add!(8, 12);
-    add!(12, 10);
-    add!(10, 14);
-    add!(14, 9);
-    add!(9, 13);
-    add!(13, 11);
-    add!(11, 15);
-
-    out[0] = val[0];
-    out[16] = val[1];
-    out[8] = val[2];
-    out[24] = val[3];
-    out[4] = val[4];
-    out[20] = val[5];
-    out[12] = val[6];
-    out[28] = val[7];
-    out[2] = val[8];
-    out[18] = val[9];
-    out[10] = val[10];
-    out[26] = val[11];
-    out[6] = val[12];
-    out[22] = val[13];
-    out[14] = val[14];
-    out[30] = val[15];
-
-    add!(24, 28);
-    add!(28, 26);
-    add!(26, 30);
-    add!(30, 25);
-    add!(25, 29);
-    add!(29, 27);
-    add!(27, 31);
-
-    out[1] = val[16] + val[24];
-    out[17] = val[17] + val[25];
-    out[9] = val[18] + val[26];
-    out[25] = val[19] + val[27];
-    out[5] = val[20] + val[28];
-    out[21] = val[21] + val[29];
-    out[13] = val[22] + val[30];
-    out[29] = val[23] + val[31];
-    out[3] = val[24] + val[20];
-    out[19] = val[25] + val[21];
-    out[11] = val[26] + val[22];
-    out[27] = val[27] + val[23];
-    out[7] = val[28] + val[18];
-    out[23] = val[29] + val[19];
-    out[15] = val[30] + val[17];
-    out[31] = val[31];
-}
-
-/// `round_sample` float build (`mpegaudiodsp_template.c:35-40`):
-/// return the accumulator and zero it.
-#[inline(always)]
-fn round_sample(sum: &mut f32) -> f32 {
-    let sum1 = *sum;
-    *sum = 0.0;
-    sum1
-}
-
-/// `ff_mpadsp_apply_window_float` (`mpegaudiodsp_template.c:123-174`).
-/// `synth_buf` is the 1024-float channel window at the current offset
-/// base; `samples`/`incr` form the output pointer/stride.
-fn apply_window(
-    synth_buf: &mut [f32],
-    window: &[f32],
-    dither_state: &mut i32,
-    samples: &mut [f32],
-    incr: usize,
-) {
-    // copy to avoid wrap
-    synth_buf.copy_within(0..32, 512);
-
-    let mut s_idx = 0usize;
-    let mut s2_idx = 31 * incr;
-    let mut w = 0usize;
-    let mut w2 = 31usize;
-
-    let mut sum = *dither_state as f32;
-    // SUM8(MACS, sum, w, p) with p = synth_buf + 16
-    for k in 0..8 {
-        sum += window[w + k * 64] * synth_buf[16 + k * 64];
-    }
-    // SUM8(MLSS, sum, w + 32, p) with p = synth_buf + 48
-    for k in 0..8 {
-        sum -= window[w + 32 + k * 64] * synth_buf[48 + k * 64];
-    }
-    samples[s_idx] = round_sample(&mut sum);
-    s_idx += incr;
-    w += 1;
-
-    // we calculate two samples at the same time to avoid one memory
-    // access per two sample
-    for j in 1..16usize {
-        let mut sum2 = 0f32;
-        // SUM8P2(sum, MACS, sum2, MLSS, w, w2, p), p = synth_buf + 16 + j
-        for k in 0..8 {
-            let t = synth_buf[16 + j + k * 64];
-            sum += window[w + k * 64] * t;
-            sum2 -= window[w2 + k * 64] * t;
-        }
-        // SUM8P2(sum, MLSS, sum2, MLSS, w + 32, w2 + 32, p), p = synth_buf + 48 - j
-        for k in 0..8 {
-            let t = synth_buf[48 - j + k * 64];
-            sum -= window[w + 32 + k * 64] * t;
-            sum2 -= window[w2 + 32 + k * 64] * t;
-        }
-
-        samples[s_idx] = round_sample(&mut sum);
-        s_idx += incr;
-        sum += sum2;
-        samples[s2_idx] = round_sample(&mut sum);
-        s2_idx -= incr;
-        w += 1;
-        w2 -= 1;
-    }
-
-    // SUM8(MLSS, sum, w + 32, p), p = synth_buf + 32
-    for k in 0..8 {
-        sum -= window[w + 32 + k * 64] * synth_buf[32 + k * 64];
-    }
-    samples[s_idx] = round_sample(&mut sum);
-    *dither_state = sum as i32;
-}
-
-/// `ff_mpa_synth_filter_float` (`mpegaudiodsp_template.c:178-195`) —
-/// 32 sub band synthesis: input 32 subband samples, output 32 samples.
-fn mpa_synth_filter(
-    synth_buf: &mut [f32],
-    synth_buf_offset: &mut usize,
-    window: &[f32],
-    dither_state: &mut i32,
-    samples: &mut [f32],
-    incr: usize,
-    sb_samples: &[f32],
-) {
-    let offset = *synth_buf_offset;
-    dct32(&mut synth_buf[offset..offset + 32], sb_samples);
-    apply_window(
-        &mut synth_buf[offset..],
-        window,
-        dither_state,
-        samples,
-        incr,
-    );
-    *synth_buf_offset = (offset + 512 - 32) & 511;
+/// The reader pair C keeps in `MPADecodeContext`: `gb` is the current
+/// window (bit reservoir `last_buf`, later the frame remainder after
+/// `switch_buffer`), `in_gb` stashes the frame's post-side-info reader
+/// while `gb` covers the reservoir, `extrasize` counts the bytes of
+/// the *current* frame that were appended to the reservoir view.
+#[derive(Debug)]
+struct Bitstream {
+    gb: GetBits,
+    in_gb: Option<GetBits>,
+    extrasize: usize,
 }
 
 // ---------------------------------------------------------------------
@@ -1877,594 +811,6 @@ impl GranuleDef {
     }
 }
 
-/// `l3_unscale` (`mpegaudiodec_template.c:222-239`) — compute
-/// `value^(4/3) * 2^(exponent/4)` normalized to FRAC_BITS, via the
-/// shared fixed-point 4/3 table (used by the float decoder's linbits
-/// escape path exactly as in C).
-fn l3_unscale(value: i64, exponent: i32) -> i32 {
-    let t = tables();
-    let idx = (4 * value + (exponent & 3) as i64) as usize;
-    let idx = idx.min(TABLE_4_3_SIZE - 1);
-    let mut e = t.table_4_3_exp[idx] as i32;
-    let m = t.table_4_3_value[idx];
-    e -= exponent >> 2;
-    if !(0..=31).contains(&e) {
-        // C: `if (e > (SUINT)31) return 0;` — negative e reads as
-        // unsigned, so both out-of-range directions return 0.
-        return 0;
-    }
-    let m = (m + ((1u32 << e) >> 1)) >> e;
-    m as i32
-}
-
-// ---------------------------------------------------------------------
-// Layer 3 scale-factor helpers — mpegaudiodec_template.c:659-723
-// ---------------------------------------------------------------------
-
-/// The `SPLIT` macro (`mpegaudiodec_template.c:659-677`).
-fn split(dst: &mut i32, sf: &mut i32, n: i32) {
-    match n {
-        3 => {
-            let m = (*sf * 171) >> 9;
-            *dst = *sf - 3 * m;
-            *sf = m;
-        }
-        4 => {
-            *dst = *sf & 3;
-            *sf >>= 2;
-        }
-        5 => {
-            let m = (*sf * 205) >> 10;
-            *dst = *sf - 5 * m;
-            *sf = m;
-        }
-        6 => {
-            let m = (*sf * 171) >> 10;
-            *dst = *sf - 6 * m;
-            *sf = m;
-        }
-        _ => *dst = 0,
-    }
-}
-
-/// `lsf_sf_expand` (`mpegaudiodec_template.c:679-686`).
-pub fn lsf_sf_expand(slen: &mut [i32; 4], mut sf: i32, n1: i32, n2: i32, n3: i32) {
-    split(&mut slen[3], &mut sf, n3);
-    split(&mut slen[2], &mut sf, n2);
-    split(&mut slen[1], &mut sf, n1);
-    slen[0] = sf;
-}
-
-/// `exponents_from_scale_factors` (`mpegaudiodec_template.c:688-723`).
-fn exponents_from_scale_factors(sri: i32, g: &GranuleDef, exponents: &mut [i16; 576]) {
-    let mut ptr = 0usize;
-    let gain = g.global_gain - 210;
-    let shift = g.scalefac_scale as i32 + 1;
-
-    let sri = sri as usize;
-    let bstab = &FF_BAND_SIZE_LONG[sri];
-    let pretab = &FF_MPA_PRETAB[(g.preflag != 0) as usize];
-    for i in 0..g.long_end as usize {
-        let v0 = gain - ((g.scale_factors[i] as i32 + pretab[i] as i32) << shift) + 400;
-        for _ in 0..bstab[i] {
-            exponents[ptr] = v0 as i16;
-            ptr += 1;
-        }
-    }
-
-    if g.short_start < 13 {
-        let bstab = &FF_BAND_SIZE_SHORT[sri];
-        let gains = [
-            gain - (g.subblock_gain[0] << 3),
-            gain - (g.subblock_gain[1] << 3),
-            gain - (g.subblock_gain[2] << 3),
-        ];
-        let mut k = g.long_end as usize;
-        for i in g.short_start as usize..13 {
-            let len = bstab[i];
-            for l in 0..3usize {
-                let v0 = gains[l] - ((g.scale_factors[k] as i32) << shift) + 400;
-                k += 1;
-                for _ in 0..len {
-                    exponents[ptr] = v0 as i16;
-                    ptr += 1;
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------
-// Bit reservoir state — the gb / in_gb pair + switch_buffer
-// (mpegaudiodec_template.c:725-738)
-// ---------------------------------------------------------------------
-
-/// The reader pair C keeps in `MPADecodeContext`: `gb` is the current
-/// window (bit reservoir `last_buf`, later the frame remainder after
-/// `switch_buffer`), `in_gb` stashes the frame's post-side-info reader
-/// while `gb` covers the reservoir, `extrasize` counts the bytes of
-/// the *current* frame that were appended to the reservoir view.
-#[derive(Debug)]
-struct Bitstream {
-    gb: GetBits,
-    in_gb: Option<GetBits>,
-    extrasize: usize,
-}
-
-/// `switch_buffer` (`mpegaudiodec_template.c:725-738`) — hop from the
-/// reservoir view back to the frame reader when the position runs past
-/// the reservoir-only bytes, fixing up the caller's position and
-/// end-position bookkeeping.
-fn switch_buffer(bs: &mut Bitstream, pos: &mut i64, end_pos: &mut i64, end_pos2: &mut i64) {
-    if bs.in_gb.is_some() && *pos >= bs.gb.size_in_bits - bs.extrasize as i64 * 8 {
-        let mut gb = bs.in_gb.take().unwrap();
-        bs.extrasize = 0;
-        gb.skip_bits_long(*pos - *end_pos);
-        *end_pos2 = *end_pos2 + gb.get_bits_count() - *pos;
-        *end_pos = *end_pos2;
-        *pos = gb.get_bits_count();
-        bs.gb = gb;
-    }
-}
-
-/// `huffman_decode` (`mpegaudiodec_template.c:756-903`) — read the
-/// Huffman-coded residue into `g->sb_hybrid`.
-fn huffman_decode(
-    bs: &mut Bitstream,
-    g: &mut GranuleDef,
-    exponents: &[i16; 576],
-    end_pos2_in: i64,
-) {
-    let mut end_pos2 = end_pos2_in;
-    let mut end_pos = end_pos2.min(bs.gb.size_in_bits - bs.extrasize as i64 * 8);
-    let t = tables();
-    let mut s_index = 0usize;
-
-    /* low frequencies (called big values) */
-    for i in 0..3usize {
-        let mut j = g.region_size[i];
-        if j == 0 {
-            continue;
-        }
-        // select vlc table
-        let k = g.table_select[i] as usize;
-        let l = FF_MPA_HUFF_DATA[k][0] as usize;
-        let linbits = FF_MPA_HUFF_DATA[k][1] as u32;
-
-        if l == 0 {
-            let n = 2 * j as usize;
-            g.sb_hybrid[s_index..s_index + n].fill(0.0);
-            s_index += n;
-            continue;
-        }
-        let vlc = &t.huff_vlc[l];
-
-        // read huffcode and compute each couple
-        while j > 0 {
-            let mut pos = bs.gb.get_bits_count();
-            if pos >= end_pos {
-                switch_buffer(bs, &mut pos, &mut end_pos, &mut end_pos2);
-                if pos >= end_pos {
-                    break;
-                }
-            }
-            let y = vlc.decode(&mut bs.gb);
-
-            if y == 0 {
-                g.sb_hybrid[s_index] = 0.0;
-                g.sb_hybrid[s_index + 1] = 0.0;
-                s_index += 2;
-                continue;
-            }
-
-            // C indexes the float tables with the raw exponent; values
-            // outside [0, 512) are undefined behavior there and clamp
-            // to the table here (see module notes).
-            let exponent = exponents[s_index].clamp(0, 511) as usize;
-            let raw_exponent = exponents[s_index] as i32;
-            if y & 16 != 0 {
-                let x = y >> 5;
-                let yy = y & 0x0f;
-                g.sb_hybrid[s_index] = if x < 15 {
-                    let mut v = t.expval_table[exponent][x as usize];
-                    if bs.gb.get_bits1() != 0 {
-                        v = -v;
-                    }
-                    v
-                } else {
-                    let xv = x as i64 + bs.gb.get_bits(linbits) as i64;
-                    let mut v = l3_unscale(xv, raw_exponent) as f32;
-                    if bs.gb.get_bits1() != 0 {
-                        v = -v;
-                    }
-                    v
-                };
-                g.sb_hybrid[s_index + 1] = if yy < 15 {
-                    let mut v = t.expval_table[exponent][yy as usize];
-                    if bs.gb.get_bits1() != 0 {
-                        v = -v;
-                    }
-                    v
-                } else {
-                    let yv = yy as i64 + bs.gb.get_bits(linbits) as i64;
-                    let mut v = l3_unscale(yv, raw_exponent) as f32;
-                    if bs.gb.get_bits1() != 0 {
-                        v = -v;
-                    }
-                    v
-                };
-            } else {
-                let x0 = y >> 5;
-                let yy = y & 0x0f;
-                let x = x0 + yy;
-                let dst = s_index + (yy != 0) as usize;
-                g.sb_hybrid[dst] = if x < 15 {
-                    let mut v = t.expval_table[exponent][x as usize];
-                    if bs.gb.get_bits1() != 0 {
-                        v = -v;
-                    }
-                    v
-                } else {
-                    let xv = x as i64 + bs.gb.get_bits(linbits) as i64;
-                    let mut v = l3_unscale(xv, raw_exponent) as f32;
-                    if bs.gb.get_bits1() != 0 {
-                        v = -v;
-                    }
-                    v
-                };
-                g.sb_hybrid[s_index + (yy == 0) as usize] = 0.0;
-            }
-            s_index += 2;
-            j -= 1;
-        }
-    }
-
-    /* high frequencies */
-    let quad_bits = [6u32, 4u32];
-    let vlc = &t.huff_quad[g.count1table_select as usize];
-    let mut last_pos = 0i64;
-    while s_index <= 572 {
-        let mut pos = bs.gb.get_bits_count();
-        if pos >= end_pos {
-            if pos > end_pos2 && last_pos != 0 {
-                // some encoders generate an incorrect size for this
-                // part. We must go back into the data
-                s_index -= 4;
-                bs.gb.skip_bits_long(last_pos - pos);
-                break;
-            }
-            switch_buffer(bs, &mut pos, &mut end_pos, &mut end_pos2);
-            if pos >= end_pos {
-                break;
-            }
-        }
-        last_pos = pos;
-
-        let mut code = vlc.decode(&mut bs.gb, quad_bits[g.count1table_select as usize]);
-        if code < 0 {
-            code = 0; // unreachable for these complete tables (C: -1)
-        }
-        g.sb_hybrid[s_index..s_index + 4].fill(0.0);
-        while code != 0 {
-            const IDXTAB: [usize; 16] = [3, 3, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0];
-            let idx = IDXTAB[code as usize];
-            let pos_i = s_index + idx;
-            let exp = exponents[pos_i].clamp(0, 511) as usize;
-            let mut v = t.exp_table[exp];
-            if bs.gb.get_bits1() != 0 {
-                v = -v;
-            }
-            g.sb_hybrid[pos_i] = v;
-            code ^= (8 >> idx) as i32;
-        }
-        s_index += 4;
-    }
-    // skip extension bits (the err_recognition checks around this are
-    // off by default in C and not ported)
-    let bits_left = end_pos2 - bs.gb.get_bits_count();
-    g.sb_hybrid[s_index.min(576)..].fill(0.0);
-    bs.gb.skip_bits_long(bits_left);
-
-    let mut i = bs.gb.get_bits_count();
-    switch_buffer(bs, &mut i, &mut end_pos, &mut end_pos2);
-}
-
-/// `reorder_block` (`mpegaudiodec_template.c:908-939`) — reorder short
-/// blocks from bitstream order to interleaved order.
-fn reorder_block(sri: i32, g: &mut GranuleDef) {
-    if g.block_type != 2 {
-        return;
-    }
-    let sri = sri as usize;
-    let mut tmp = [0f32; 576];
-
-    let mut ptr = if g.switch_point != 0 {
-        if sri != 8 { 36 } else { 72 }
-    } else {
-        0
-    };
-
-    for i in g.short_start as usize..13 {
-        let len = FF_BAND_SIZE_SHORT[sri][i] as usize;
-        let ptr1 = ptr;
-        let mut dst = 0usize;
-        for _ in 0..len {
-            tmp[dst] = g.sb_hybrid[ptr];
-            dst += 1;
-            tmp[dst] = g.sb_hybrid[ptr + len];
-            dst += 1;
-            tmp[dst] = g.sb_hybrid[ptr + 2 * len];
-            dst += 1;
-            ptr += 1;
-        }
-        ptr += 2 * len;
-        for k in 0..len * 3 {
-            g.sb_hybrid[ptr1 + k] = tmp[k];
-        }
-    }
-}
-
-/// `ISQRT2` — `FIXR(0.70710678118654752440)` (template.c:941).
-const ISQRT2: f32 = fx(0.70710678118654752440);
-
-/// `compute_stereo` (`mpegaudiodec_template.c:943-1071`) — intensity
-/// stereo + mid/side stereo over the granule pair.
-fn compute_stereo(
-    mode_ext: i32,
-    lsf: bool,
-    sri: i32,
-    granules: &mut [[GranuleDef; 2]; 2],
-    gr: usize,
-) {
-    let (left, right) = granules.split_at_mut(1);
-    let g0 = &mut left[0][gr];
-    let g1 = &mut right[0][gr];
-    let sb0 = &mut *g0.sb_hybrid;
-    let sb1 = &mut *g1.sb_hybrid;
-    let sri = sri as usize;
-
-    if mode_ext & MODE_EXT_I_STEREO != 0 {
-        let (is_tab, sf_max): (&[[f32; 16]; 2], i32) = if !lsf {
-            (&IS_TABLE, 7)
-        } else {
-            (
-                &tables().is_table_lsf[(g1.scalefac_compress & 1) as usize],
-                16,
-            )
-        };
-
-        let mut t0o = 576usize;
-        let mut t1o = 576usize;
-        let mut non_zero_found_short = [false; 3];
-        let mut k = (13 - g1.short_start) * 3 + g1.long_end - 3;
-        for i in (g1.short_start..=12).rev() {
-            // for last band, use previous scale factor
-            if i != 11 {
-                k -= 3;
-            }
-            let len = FF_BAND_SIZE_SHORT[sri][i as usize] as usize;
-            for l in (0..3usize).rev() {
-                t0o -= len;
-                t1o -= len;
-                let mut did_istereo = false;
-                if !non_zero_found_short[l] {
-                    // test if non zero band. if so, stop doing i-stereo
-                    let mut found = false;
-                    for j in 0..len {
-                        if sb1[t1o + j] != 0.0 {
-                            non_zero_found_short[l] = true;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
-                        let sf = g1.scale_factors[(k + l as i32) as usize] as i32;
-                        if sf < sf_max {
-                            let v1 = is_tab[0][sf as usize];
-                            let v2 = is_tab[1][sf as usize];
-                            for j in 0..len {
-                                let tmp0 = sb0[t0o + j];
-                                sb0[t0o + j] = mullx(tmp0, v1);
-                                sb1[t1o + j] = mullx(tmp0, v2);
-                            }
-                            did_istereo = true;
-                        }
-                    }
-                }
-                if !did_istereo {
-                    // found1: lower part of the spectrum : do ms stereo
-                    // if enabled
-                    if mode_ext & MODE_EXT_MS_STEREO != 0 {
-                        for j in 0..len {
-                            let tmp0 = sb0[t0o + j];
-                            let tmp1 = sb1[t1o + j];
-                            sb0[t0o + j] = mullx(tmp0 + tmp1, ISQRT2);
-                            sb1[t1o + j] = mullx(tmp0 - tmp1, ISQRT2);
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut non_zero_found =
-            non_zero_found_short[0] | non_zero_found_short[1] | non_zero_found_short[2];
-
-        for i in (0..g1.long_end).rev() {
-            let len = FF_BAND_SIZE_LONG[sri][i as usize] as usize;
-            t0o -= len;
-            t1o -= len;
-            let mut did_istereo = false;
-            // test if non zero band. if so, stop doing i-stereo
-            if !non_zero_found {
-                let mut found = false;
-                for j in 0..len {
-                    if sb1[t1o + j] != 0.0 {
-                        non_zero_found = true;
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    // for last band, use previous scale factor
-                    let k = if i == 21 { 20 } else { i };
-                    let sf = g1.scale_factors[k as usize] as i32;
-                    if sf < sf_max {
-                        let v1 = is_tab[0][sf as usize];
-                        let v2 = is_tab[1][sf as usize];
-                        for j in 0..len {
-                            let tmp0 = sb0[t0o + j];
-                            sb0[t0o + j] = mullx(tmp0, v1);
-                            sb1[t1o + j] = mullx(tmp0, v2);
-                        }
-                        did_istereo = true;
-                    }
-                }
-            }
-            if !did_istereo {
-                // found2
-                if mode_ext & MODE_EXT_MS_STEREO != 0 {
-                    for j in 0..len {
-                        let tmp0 = sb0[t0o + j];
-                        let tmp1 = sb1[t1o + j];
-                        sb0[t0o + j] = mullx(tmp0 + tmp1, ISQRT2);
-                        sb1[t1o + j] = mullx(tmp0 - tmp1, ISQRT2);
-                    }
-                }
-            }
-        }
-    } else if mode_ext & MODE_EXT_MS_STEREO != 0 {
-        // ms stereo ONLY. NOTE: the 1/sqrt(2) normalization factor is
-        // included in the global gain (butterflies_float_c semantics).
-        for i in 0..576 {
-            let tmp0 = sb0[i];
-            let tmp1 = sb1[i];
-            sb0[i] = tmp0 + tmp1;
-            sb1[i] = tmp0 - tmp1;
-        }
-    }
-}
-
-/// `compute_antialias` (`mpegaudiodec_template.c:1101-1129`) — the
-/// float `AA` butterflies against `csa_table`.
-fn compute_antialias(g: &mut GranuleDef) {
-    // we antialias only "long" bands
-    let n = if g.block_type == 2 {
-        if g.switch_point == 0 {
-            return;
-        }
-        // XXX: check this for 8000Hz case
-        1
-    } else {
-        SBLIMIT - 1
-    };
-
-    let sb = &mut g.sb_hybrid;
-    let mut ptr = 18usize;
-    for _ in 0..n {
-        for j in 0..8usize {
-            let tmp0 = sb[ptr - 1 - j];
-            let tmp1 = sb[ptr + j];
-            sb[ptr - 1 - j] = tmp0 * CSA_TABLE[j][0] - tmp1 * CSA_TABLE[j][1];
-            sb[ptr + j] = tmp0 * CSA_TABLE[j][1] + tmp1 * CSA_TABLE[j][0];
-        }
-        ptr += 18;
-    }
-}
-
-/// `compute_imdct` (`mpegaudiodec_template.c:1132-1209`) — find the
-/// last non-zero block, run the long IMDCTs, then the 12-point ones
-/// for short bands and pure overlap for zero bands.
-fn compute_imdct(
-    ch: usize,
-    gr: usize,
-    granules: &mut [[GranuleDef; 2]; 2],
-    sb_samples: &mut [[f32; 36 * SBLIMIT]; MPA_MAX_CHANNELS],
-    mdct_buf: &mut [[f32; SBLIMIT * 18]; MPA_MAX_CHANNELS],
-) {
-    let g = &mut granules[ch][gr];
-
-    // find last non zero block (C ORs the float bits as int32)
-    let mut ptr: i64 = 576;
-    let ptr1: i64 = 2 * 18;
-    while ptr >= ptr1 {
-        ptr -= 6;
-        if (0..6).any(|i| g.sb_hybrid[(ptr + i) as usize].to_bits() != 0) {
-            break;
-        }
-    }
-    let sblimit = ((ptr / 18) + 1) as usize;
-
-    let mdct_long_end = if g.block_type == 2 {
-        // XXX: check for 8000 Hz
-        if g.switch_point != 0 { 2 } else { 0 }
-    } else {
-        sblimit
-    };
-
-    imdct36_blocks(
-        &mut sb_samples[ch],
-        32 * 18 * gr,
-        &mut mdct_buf[ch],
-        0,
-        &mut g.sb_hybrid[..],
-        mdct_long_end,
-        g.switch_point != 0,
-        g.block_type,
-    );
-
-    let mut buf = 4 * 18 * (mdct_long_end >> 2) + (mdct_long_end & 3);
-    let mut ptr = 18 * mdct_long_end;
-    let t = tables();
-
-    for j in mdct_long_end..sblimit {
-        // select frequency inversion
-        let win = &t.mdct_win[2 + (4 & (0usize.wrapping_sub(j & 1)))];
-        let sb_h = &g.sb_hybrid[..];
-        let sb_out = &mut sb_samples[ch];
-        let mdct = &mut mdct_buf[ch];
-        let mut out_ptr = j;
-        let mut out2 = [0f32; 12];
-
-        for i in 0..6usize {
-            sb_out[out_ptr] = mdct[buf + 4 * i];
-            out_ptr += SBLIMIT;
-        }
-        imdct12(&mut out2, sb_h, ptr);
-        for i in 0..6usize {
-            sb_out[out_ptr] = mulh3(out2[i], win[i], 1.0) + mdct[buf + 4 * (i + 6)];
-            mdct[buf + 4 * (i + 6 * 2)] = mulh3(out2[i + 6], win[i + 6], 1.0);
-            out_ptr += SBLIMIT;
-        }
-        imdct12(&mut out2, sb_h, ptr + 1);
-        for i in 0..6usize {
-            sb_out[out_ptr] = mulh3(out2[i], win[i], 1.0) + mdct[buf + 4 * (i + 6 * 2)];
-            mdct[buf + 4 * (i + 6 * 0)] = mulh3(out2[i + 6], win[i + 6], 1.0);
-            out_ptr += SBLIMIT;
-        }
-        imdct12(&mut out2, sb_h, ptr + 2);
-        for i in 0..6usize {
-            mdct[buf + 4 * (i + 6 * 0)] = mulh3(out2[i], win[i], 1.0) + mdct[buf + 4 * (i + 6 * 0)];
-            mdct[buf + 4 * (i + 6 * 1)] = mulh3(out2[i + 6], win[i + 6], 1.0);
-            mdct[buf + 4 * (i + 6 * 2)] = 0.0;
-        }
-        ptr += 18;
-        buf += if (j & 3) != 3 { 1 } else { 4 * 18 - 3 };
-    }
-    // zero bands
-    for j in sblimit..SBLIMIT {
-        // overlap
-        let sb_out = &mut sb_samples[ch];
-        let mdct = &mut mdct_buf[ch];
-        let mut out_ptr = j;
-        for i in 0..18usize {
-            sb_out[out_ptr] = mdct[buf + 4 * i];
-            mdct[buf + 4 * i] = 0.0;
-            out_ptr += SBLIMIT;
-        }
-        buf += if (j & 3) != 3 { 1 } else { 4 * 18 - 3 };
-    }
-}
-
 // ---------------------------------------------------------------------
 // The decode core — MPADecodeContext minus the AVCodecContext soup
 // (mpegaudiodec_template.c:77-99)
@@ -2485,16 +831,6 @@ struct MpaDecodeCore {
     granules: [[GranuleDef; 2]; 2],
     dither_state: i32,
     crc: u32,
-}
-
-/// Copy `src` into `dst`, zero-filling where C would read stale
-/// bytes past the reader's region (malformed streams only).
-fn copy_clamped(dst: &mut [u8], src: &[u8]) {
-    let n = src.len().min(dst.len());
-    dst[..n].copy_from_slice(&src[..n]);
-    for b in dst[n..].iter_mut() {
-        *b = 0;
-    }
 }
 
 impl MpaDecodeCore {
@@ -3106,6 +1442,1667 @@ impl AudioDecoder for Mp3Decoder {
     }
 }
 
+// ---------------------------------------------------------------------
+// Bit reader — get_bits.h / bitstream_template.h (safe BE reader)
+// ---------------------------------------------------------------------
+
+/// `GetBitContext` — big-endian MSB-first reader with the *safe*
+/// semantics: reads at or past the end return 0 bits, and the position
+/// saturates at `ceil(size_in_bits / 8) * 8` (C's `buffer_end * 8`).
+/// Unlike C the buffer is owned (a copy of the window), so the decoder
+/// can stash/restore readers freely (`gb` / `in_gb`).
+#[derive(Clone, Debug)]
+struct GetBits {
+    buf: Vec<u8>,
+    index: i64,
+    size_in_bits: i64,
+}
+
+impl GetBits {
+    /// `init_get_bits(gb, buf, size_in_bits)`.
+    fn init(buf: Vec<u8>, size_in_bits: i64) -> GetBits {
+        debug_assert_eq!(buf.len(), ((size_in_bits + 7) >> 3) as usize);
+        GetBits {
+            buf,
+            index: 0,
+            size_in_bits,
+        }
+    }
+
+    /// C's saturation point: `buffer_end * 8`.
+    fn cap(&self) -> i64 {
+        (self.size_in_bits + 7) & !7
+    }
+
+    /// One bit at absolute position `i` (0 past the buffer, like the
+    /// safe reader's zero-refill).
+    fn bit(&self, i: i64) -> u32 {
+        if i >= 0 && (i >> 3) < self.buf.len() as i64 {
+            ((self.buf[(i >> 3) as usize] >> (7 - (i & 7))) & 1) as u32
+        } else {
+            0
+        }
+    }
+
+    /// `get_bits_count`.
+    fn get_bits_count(&self) -> i64 {
+        self.index
+    }
+
+    /// `get_bits_left`.
+    fn get_bits_left(&self) -> i64 {
+        self.size_in_bits - self.index
+    }
+
+    /// `get_bits1` / one bit of `get_bits`.
+    fn get_bits1(&mut self) -> u32 {
+        let v = self.bit(self.index);
+        self.index = (self.index + 1).min(self.cap());
+        v
+    }
+
+    /// `get_bits` (`bits_read_nz`) for n in 1..=32; `get_bitsz` for
+    /// n == 0 (returns 0, consumes nothing).
+    fn get_bits(&mut self, n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        let mut v = 0u32;
+        for k in 0..n {
+            v = (v << 1) | self.bit(self.index + k as i64);
+        }
+        self.index = (self.index + n as i64).min(self.cap());
+        v
+    }
+
+    /// `show_bits` (peek without consuming) for n in 0..=32.
+    fn peek(&self, n: u32) -> u32 {
+        let mut v = 0u32;
+        for k in 0..n {
+            v = (v << 1) | self.bit(self.index + k as i64);
+        }
+        v
+    }
+
+    /// `skip_bits` (unsigned in C's new reader; clamped at the cap).
+    fn skip_bits(&mut self, n: u32) {
+        self.index = (self.index + n as i64).min(self.cap());
+    }
+
+    /// `skip_bits_long` — the legacy signed reader semantics the
+    /// decoder was written for (`mpegaudiodec_template.c:1466`): a
+    /// negative count moves the index back (possibly below 0, where
+    /// reads return 0).
+    fn skip_bits_long(&mut self, n: i64) {
+        self.index = (self.index + n).clamp(0, self.cap());
+    }
+
+    /// `align_get_bits` — skip to the next byte boundary; returns the
+    /// byte offset of the new position (C returns the pointer).
+    fn align_get_bits(&mut self) -> usize {
+        let n = (-self.index) & 7;
+        if n != 0 {
+            self.skip_bits(n as u32);
+        }
+        (self.index >> 3) as usize
+    }
+}
+
+/// One of the 15 big-value Huffman tables, built from code lengths the
+/// way `ff_vlc_init_from_lengths` (`vlc.c:306-351`) does: a running
+/// 32-bit top-aligned counter advances by `1 << (32 - len)` per symbol
+/// **in array order** (`vlc.c:319-345`) — not sorted by length, so the
+/// codes must be matched explicitly rather than by canonical ranges.
+/// Decoding walks bit by bit and matches the accumulated prefix.
+struct BigVlc {
+    /// Per code length: sorted `(code, symbol)` pairs.
+    by_len: Vec<Vec<(u32, i32)>>,
+    max_len: u32,
+}
+
+impl BigVlc {
+    /// `ff_vlc_init_from_lengths` + the mpa symbol packing
+    /// (`mpegaudiodec_common.c:423-427`):
+    /// `tmp_symbols[j] = high << 1 | ((high && low) << 4) | low`.
+    fn build(lens: &[u8], syms: &[u8]) -> BigVlc {
+        if lens.is_empty() {
+            // index 0 is the unused dummy slot (ff_huff_vlc[0]).
+            return BigVlc {
+                by_len: vec![Vec::new(); 1],
+                max_len: 0,
+            };
+        }
+        let mut code: u64 = 0;
+        let max_len = *lens.iter().max().unwrap() as u32;
+        let mut by_len: Vec<Vec<(u32, i32)>> = vec![Vec::new(); (max_len + 1) as usize];
+        for j in 0..lens.len() {
+            let len = lens[j] as u32;
+            let c = (code >> (32 - len)) as u32;
+            let high = (syms[j] & 0xf0) as i32;
+            let low = (syms[j] & 0x0f) as i32;
+            let sym = (high << 1) | (((high != 0 && low != 0) as i32) << 4) | low;
+            by_len[len as usize].push((c, sym));
+            code += 1u64 << (32 - len);
+        }
+        debug_assert_eq!(code, 1 << 32, "over/under-determined VLC tree");
+        for v in by_len.iter_mut() {
+            v.sort_unstable();
+        }
+        BigVlc { by_len, max_len }
+    }
+
+    /// `get_vlc2(gb, table, 7, 3)` for a lengths-built table. Complete
+    /// trees always terminate; returns -1 only if the tree is somehow
+    /// incomplete (C returns -1 for invalid codes).
+    fn decode(&self, gb: &mut GetBits) -> i32 {
+        let mut code: u32 = 0;
+        for len in 1..=self.max_len as usize {
+            let b = gb.get_bits1();
+            code = (code << 1) | b;
+            #[cfg(test)]
+            eprintln!(
+                "DBG decode len={len} bit={b} code={code} looking in {:?}",
+                self.by_len[len]
+            );
+            if let Ok(idx) = self.by_len[len].binary_search_by_key(&code, |&(c, _)| c) {
+                return self.by_len[len][idx].1;
+            }
+        }
+        -1
+    }
+}
+
+/// One of the 2 quad (count1) tables — built from explicit
+/// (code, length) pairs like `vlc_init` (`mpegaudiodec_common.c:438-447`),
+/// with a flat `1 << bits` LUT exactly like C's one-level table.
+struct QuadVlc {
+    lut: Vec<(i32, u8)>, // (sym, len); len 0 = invalid (C: sym -1)
+}
+
+impl QuadVlc {
+    fn build(bits: u32, lengths: &[u8], codes: &[u8]) -> QuadVlc {
+        let size = 1usize << bits;
+        let mut lut = vec![(-1i32, 0u8); size];
+        for i in 0..16 {
+            let len = lengths[i] as u32;
+            let code = codes[i] as u32;
+            let lo = (code << (bits - len)) as usize;
+            for slot in lut.iter_mut().take(lo + (1usize << (bits - len))).skip(lo) {
+                *slot = (i as i32, len as u8);
+            }
+        }
+        QuadVlc { lut }
+    }
+
+    /// `get_vlc2(gb, vlc->table, vlc->bits, 1)` — invalid code consumes
+    /// no bits and returns -1 (bitstream_template.h:499-529).
+    fn decode(&self, gb: &mut GetBits, bits: u32) -> i32 {
+        let idx = gb.peek(bits) as usize;
+        let (sym, len) = self.lut[idx];
+        gb.skip_bits(len as u32);
+        sym
+    }
+}
+
+/// Everything C builds in the `decode_init_static` /
+/// `ff_mpegaudiodec_common_init_static` / `ff_mpadsp_init` once-blocks.
+struct Tables {
+    /// `ff_band_index_long[9][23]` (`mpegaudiodec_common.c:450-457`).
+    band_index_long: [[u16; 23]; 9],
+    /// `exp_table_float[512]` (`mpegaudio_tablegen.h`).
+    exp_table: Vec<f32>,
+    /// `expval_table_float[512][16]`.
+    expval_table: Vec<[f32; 16]>,
+    /// `ff_table_4_3_exp[TABLE_4_3_SIZE]`.
+    table_4_3_exp: Vec<i8>,
+    /// `ff_table_4_3_value[TABLE_4_3_SIZE]`.
+    table_4_3_value: Vec<u32>,
+    /// `ff_mdct_win_float[8][MDCT_BUF_SIZE]` (`mpegaudiodsp.c:30-79`).
+    mdct_win: [[f32; MDCT_BUF_SIZE]; 8],
+    /// `ff_mpa_synth_window_float[512+256]` (`mpegaudiodsp_template.c:197-224`).
+    synth_window: Vec<f32>,
+    /// `is_table_lsf[2][2][16]` (`mpegaudiodec_template.c:107,264-278`).
+    is_table_lsf: [[[f32; 16]; 2]; 2],
+    /// `ff_huff_vlc[1..=15]` (index 0 unused, dummy present).
+    huff_vlc: Vec<BigVlc>,
+    /// `ff_huff_quad_vlc[2]`.
+    huff_quad: [QuadVlc; 2],
+}
+
+// ---------------------------------------------------------------------
+// Header decode — mpegaudiodecheader.c + mpegaudiodecheader.h
+// ---------------------------------------------------------------------
+
+/// `MPA_DECODE_HEADER` (`mpegaudiodecheader.h:35-49`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MpaDecodeHeader {
+    pub frame_size: i32,
+    pub error_protection: i32,
+    pub layer: i32,
+    pub sample_rate: i32,
+    /// between 0 and 8.
+    pub sample_rate_index: i32,
+    pub bit_rate: i32,
+    pub nb_channels: i32,
+    pub mode: i32,
+    pub mode_ext: i32,
+    pub lsf: i32,
+}
+
+/// `ff_mpa_check_header` (`mpegaudiodecheader.h:62-79`) — the fast
+/// resync check. C returns a bare -1; here each rejection is named.
+pub fn ff_mpa_check_header(header: u32) -> Result<()> {
+    // header
+    if (header & 0xffe0_0000) != 0xffe0_0000 {
+        return Err(Error::InvalidData("invalid frame sync".into()));
+    }
+    // version check
+    if (header & (3 << 19)) == 1 << 19 {
+        return Err(Error::InvalidData("reserved MPEG audio version".into()));
+    }
+    // layer check
+    if (header & (3 << 17)) == 0 {
+        return Err(Error::InvalidData("invalid MPEG audio layer".into()));
+    }
+    // bit rate
+    if (header & (0xf << 12)) == 0xf << 12 {
+        return Err(Error::InvalidData("invalid bitrate index".into()));
+    }
+    // frequency
+    if (header & (3 << 10)) == 3 << 10 {
+        return Err(Error::InvalidData("invalid sample rate index".into()));
+    }
+    Ok(())
+}
+
+/// `avpriv_mpegaudio_decode_header` (`mpegaudiodecheader.c:34-118`).
+///
+/// Returns `Ok(true)` for a free-format frame (bitrate index 0; C's
+/// return value 1 — "frame size must be computed externally", rejected
+/// by `decode_frame`), `Ok(false)` when the header filled in fully.
+pub fn avpriv_mpegaudio_decode_header(s: &mut MpaDecodeHeader, header: u32) -> Result<bool> {
+    ff_mpa_check_header(header)?;
+
+    let (lsf, mpeg25) = if header & (1 << 20) != 0 {
+        (((header & (1 << 19)) == 0) as i32, 0)
+    } else {
+        (1, 1)
+    };
+    s.lsf = lsf;
+
+    s.layer = 4 - ((header >> 17) & 3) as i32;
+    // extract frequency
+    let mut sample_rate_index = ((header >> 10) & 3) as i32;
+    if sample_rate_index as usize >= FF_MPA_FREQ_TAB.len() {
+        sample_rate_index = 0;
+    }
+    let sample_rate = (FF_MPA_FREQ_TAB[sample_rate_index as usize] >> (lsf + mpeg25)) as i32;
+    sample_rate_index += 3 * (lsf + mpeg25);
+    s.sample_rate_index = sample_rate_index;
+    s.error_protection = (((header >> 16) & 1) ^ 1) as i32;
+    s.sample_rate = sample_rate;
+
+    let bitrate_index = ((header >> 12) & 0xf) as usize;
+    let padding = ((header >> 9) & 1) as i32;
+    s.mode = ((header >> 6) & 3) as i32;
+    s.mode_ext = ((header >> 4) & 3) as i32;
+
+    s.nb_channels = if s.mode == MPA_MONO { 1 } else { 2 };
+
+    if bitrate_index != 0 {
+        let mut frame_size =
+            FF_MPA_BITRATE_TAB[s.lsf as usize][(s.layer - 1) as usize][bitrate_index] as i32;
+        s.bit_rate = frame_size * 1000;
+        match s.layer {
+            1 => {
+                frame_size = (frame_size * 12000) / sample_rate;
+                frame_size = (frame_size + padding) * 4;
+            }
+            2 => {
+                frame_size = (frame_size * 144000) / sample_rate;
+                frame_size += padding;
+            }
+            _ => {
+                frame_size = (frame_size * 144000) / (sample_rate << s.lsf);
+                frame_size += padding;
+            }
+        }
+        s.frame_size = frame_size;
+    } else {
+        // if no frame size computed, signal it
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// `ff_mpa_decode_header` (`mpegaudiodecheader.c:120-152`) — the
+/// stream-probe helper: full header parse plus the layer → codec /
+/// samples-per-frame mapping. Returns the coded frame size in bytes.
+pub fn ff_mpa_decode_header(
+    head: u32,
+    sample_rate: &mut i32,
+    channels: &mut i32,
+    frame_size: &mut i32,
+    bit_rate: &mut i32,
+    codec_id: &mut CodecId,
+) -> Result<i32> {
+    let mut s = MpaDecodeHeader::default();
+    if avpriv_mpegaudio_decode_header(&mut s, head)? {
+        return Err(Error::InvalidData(
+            "free-format frame: frame size must be computed externally".into(),
+        ));
+    }
+
+    *frame_size = match s.layer {
+        1 => {
+            *codec_id = CodecId::Mp1;
+            384
+        }
+        2 => {
+            *codec_id = CodecId::Mp2;
+            1152
+        }
+        _ => {
+            // C keeps AV_CODEC_ID_MP3ADU when the caller passed it; the
+            // port has no ADU codec, so the mapping is unconditional.
+            *codec_id = CodecId::Mp3;
+            if s.lsf != 0 { 576 } else { 1152 }
+        }
+    };
+
+    *sample_rate = s.sample_rate;
+    *channels = s.nb_channels;
+    *bit_rate = s.bit_rate;
+    Ok(s.frame_size)
+}
+
+// ---------------------------------------------------------------------
+// Runtime-generated tables (C's tablegen headers, computed at startup)
+// ---------------------------------------------------------------------
+
+/// `frexp(3)` — C uses it in `mpegaudiodec_common_tablegen.h:59`; std
+/// has no frexp. Returns `(m, e)` with `f == m * 2^e`, `m ∈ [0.5, 1)`.
+fn frexp(f: f64) -> (f64, i32) {
+    if f == 0.0 || !f.is_finite() {
+        return (f, 0);
+    }
+    let bits = f.to_bits();
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    if raw_exp == 0 {
+        // subnormal: scale up then recurse (never hit by these tables,
+        // kept for exactness of the helper).
+        let (m, e) = frexp(f * 2f64.powi(64));
+        return (m, e - 64);
+    }
+    let m = f64::from_bits((bits & !(0x7ffu64 << 52)) | (0x3feu64 << 52));
+    (m, raw_exp - 1022)
+}
+
+/// `llrint` with the C default rounding mode (round-to-nearest-even);
+/// `f64::round` is half-away-from-zero and differs on exact `.5`.
+fn llrint_even(v: f64) -> i64 {
+    let mut r = v.round();
+    if (v - v.trunc()).abs() == 0.5 && r % 2.0 != 0.0 {
+        r -= r.signum();
+    }
+    r as i64
+}
+
+fn tables() -> &'static Tables {
+    TABLES.get_or_init(build_tables)
+}
+
+fn build_tables() -> Tables {
+    // ---- ff_band_index_long (mpegaudiodec_common.c:450-457) ----
+    let mut band_index_long = [[0u16; 23]; 9];
+    for i in 0..9 {
+        let mut k = 0u16;
+        for j in 0..22 {
+            band_index_long[i][j] = k;
+            k += (FF_BAND_SIZE_LONG[i][j] >> 1) as u16;
+        }
+        band_index_long[i][22] = k;
+    }
+
+    // ---- exp/expval float tables (mpegaudio_tablegen.h:48-84) ----
+    let mut pow43_lut = [0f64; 16];
+    for (i, v) in pow43_lut.iter_mut().enumerate() {
+        *v = i as f64 * (i as f64).cbrt();
+    }
+    // 2^(-72), written as the exact C decimal literal.
+    let exp2_base_0 = 2.11758236813575084767080625169910490512847900390625e-22f64;
+    let mut exp_table = vec![0f32; 512];
+    let mut expval_table = vec![[0f32; 16]; 512];
+    let mut exp2_base = exp2_base_0;
+    for exponent in 0..512usize {
+        if exponent > 0 && exponent & 3 == 0 {
+            exp2_base *= 2.0;
+        }
+        let exp2_val = exp2_base * EXP2_LUT[exponent & 3] / IMDCT_SCALAR;
+        for value in 0..16 {
+            expval_table[exponent][value] = (pow43_lut[value] * exp2_val) as f32;
+        }
+        exp_table[exponent] = expval_table[exponent][1];
+    }
+
+    // ---- ff_table_4_3 (mpegaudiodec_common_tablegen.h:44-69) ----
+    // FRAC_BITS = 23 there.
+    let mut table_4_3_exp = vec![0i8; TABLE_4_3_SIZE];
+    let mut table_4_3_value = vec![0u32; TABLE_4_3_SIZE];
+    let mut pow43_val = 0f64;
+    for i in 1..TABLE_4_3_SIZE {
+        let value = i as f64 / 4.0;
+        if (i & 3) == 0 {
+            pow43_val = value / IMDCT_SCALAR * value.cbrt();
+        }
+        let f = pow43_val * EXP2_LUT[i & 3];
+        let (fm, e) = frexp(f);
+        let m = llrint_even(fm * (1u64 << 31) as f64);
+        let e = e + 23 - 31 + 5 - 100; // FRAC_BITS - 31 + 5 - 100
+        table_4_3_value[i] = m as u32;
+        table_4_3_exp[i] = (-e) as i8;
+    }
+
+    // ---- ff_mdct_win (mpegaudiodsp.c:30-79) ----
+    let mut mdct_win = [[0f32; MDCT_BUF_SIZE]; 8];
+    for i in 0..36usize {
+        for j in 0..4usize {
+            if j == 2 && i % 3 != 1 {
+                continue;
+            }
+            let mut d = (std::f64::consts::PI * (i as f64 + 0.5) / 36.0).sin();
+            if j == 1 {
+                if i >= 30 {
+                    d = 0.0;
+                } else if i >= 24 {
+                    d = (std::f64::consts::PI * (i as f64 - 18.0 + 0.5) / 12.0).sin();
+                } else if i >= 18 {
+                    d = 1.0;
+                }
+            } else if j == 3 {
+                if i < 6 {
+                    d = 0.0;
+                } else if i < 12 {
+                    d = (std::f64::consts::PI * (i as f64 - 6.0 + 0.5) / 12.0).sin();
+                } else if i < 18 {
+                    d = 1.0;
+                }
+            }
+            // merge last stage of imdct into the window coefficients
+            d *= 0.5 * IMDCT_SCALAR / (std::f64::consts::PI * (2.0 * i as f64 + 19.0) / 72.0).cos();
+            if j == 2 {
+                mdct_win[j][i / 3] = (d / 32.0) as f32;
+            } else {
+                let idx = if i < 18 {
+                    i
+                } else {
+                    i + (MDCT_BUF_SIZE / 2 - 18)
+                };
+                mdct_win[j][idx] = (d / 32.0) as f32;
+            }
+        }
+    }
+    // NOTE: we do frequency inversion after the MDCT by changing
+    // the sign of the right window coefs (mpegaudiodsp.c:65-74).
+    for j in 0..4 {
+        let mut i = 0;
+        while i < MDCT_BUF_SIZE {
+            mdct_win[j + 4][i] = mdct_win[j][i];
+            mdct_win[j + 4][i + 1] = -mdct_win[j][i + 1];
+            i += 2;
+        }
+    }
+
+    // ---- ff_mpa_synth_window (mpegaudiodsp_template.c:197-224) ----
+    // max = 18760, max sum over all 16 coefs : 44736
+    let mut synth_window = vec![0f32; 512 + 256];
+    for i in 0..257usize {
+        let mut v = (FF_MPA_ENWINDOW[i] as f64 * (1.0 / (1u64 << (16 + 23)) as f64)) as f32;
+        synth_window[i] = v;
+        if (i & 63) != 0 {
+            v = -v;
+        }
+        if i != 0 {
+            synth_window[512 - i] = v;
+        }
+    }
+    // Needed for avoiding shuffles in ASM implementations
+    for i in 0..8usize {
+        for j in 0..16usize {
+            synth_window[512 + 16 * i + j] = synth_window[64 * i + 32 - j];
+        }
+    }
+    for i in 0..8usize {
+        for j in 0..16usize {
+            synth_window[512 + 128 + 16 * i + j] = synth_window[64 * i + 48 - j];
+        }
+    }
+
+    // ---- is_table_lsf (mpegaudiodec_template.c:264-278) ----
+    let mut is_table_lsf = [[[0f32; 16]; 2]; 2];
+    for i in 0..16usize {
+        for j in 0..2usize {
+            let e = -((j + 1) as f64) * (((i + 1) >> 1) as f64);
+            let f = (e / 4.0).exp2();
+            let k = i & 1;
+            is_table_lsf[j][k ^ 1][i] = f as f32;
+            is_table_lsf[j][k][i] = 1.0f32;
+        }
+    }
+
+    // ---- ff_huff_vlc[1..=15] (mpegaudiodec_common.c:404-436) ----
+    let mut huff_vlc = Vec::with_capacity(16);
+    huff_vlc.push(BigVlc::build(&[], &[])); // index 0 unused
+    let mut lens_off = 0usize;
+    let mut sym_off = 0usize;
+    for &nb_codes_minus_one in MPA_HUFF_SIZES_MINUS_ONE {
+        let n = nb_codes_minus_one + 1;
+        huff_vlc.push(BigVlc::build(
+            &MPA_HUFFLENS[lens_off..lens_off + n],
+            &MPA_HUFFSYMBOLS[sym_off..sym_off + n],
+        ));
+        lens_off += n;
+        sym_off += n;
+    }
+    debug_assert_eq!(lens_off, MPA_HUFFLENS.len());
+    debug_assert_eq!(sym_off, MPA_HUFFSYMBOLS.len());
+
+    // ---- ff_huff_quad_vlc[2] (mpegaudiodec_common.c:438-447) ----
+    let huff_quad = [
+        QuadVlc::build(6, &MPA_QUAD_BITS[0], &MPA_QUAD_CODES[0]),
+        QuadVlc::build(4, &MPA_QUAD_BITS[1], &MPA_QUAD_CODES[1]),
+    ];
+
+    Tables {
+        band_index_long,
+        exp_table,
+        expval_table,
+        table_4_3_exp,
+        table_4_3_value,
+        mdct_win,
+        synth_window,
+        is_table_lsf,
+        huff_vlc,
+        huff_quad,
+    }
+}
+// ---------------------------------------------------------------------
+// Float DSP helpers — the USE_FLOATS macro set
+// (mpegaudiodsp_template.c:35-49, dct32_template.c:34-46)
+// ---------------------------------------------------------------------
+
+/// `MULH3(x, y, s)` with `s = 1 << shift` (float build: `(s)*(y)*(x)`).
+#[inline(always)]
+fn mulh3(x: f32, y: f32, s: f32) -> f32 {
+    s * y * x
+}
+
+/// `MULLx(x, y, FRAC_BITS)` (float build: `(y)*(x)`).
+#[inline(always)]
+fn mullx(x: f32, y: f32) -> f32 {
+    y * x
+}
+
+/// `SHR(a, b)` (float build: `a * (1.0 / (1 << b))`).
+#[inline(always)]
+fn shr(a: f32, b: u32) -> f32 {
+    a * (1.0f32 / (1u32 << b) as f32)
+}
+
+/// `FIXR`/`FIXHR` for the float build: `((x) as f64) as f32` mirrors
+/// C's double constant folding followed by the float cast.
+#[inline(always)]
+const fn fx(x: f64) -> f32 {
+    x as f32
+}
+
+/// 12 points IMDCT — `imdct12` (`mpegaudiodec_template.c:329-368`),
+/// computed "by hand" by factorizing obvious cases. `in` is the
+/// stride-3 triple starting at `base` (the three short-window
+/// subblocks of one subband).
+fn imdct12(out: &mut [f32; 12], sb: &[f32], base: usize) {
+    let at = |k: usize| sb[base + k];
+    let in0 = at(0 * 3);
+    let in1 = at(1 * 3) + at(0 * 3);
+    let mut in2 = at(2 * 3) + at(1 * 3);
+    let mut in3 = at(3 * 3) + at(2 * 3);
+    let in4 = at(4 * 3) + at(3 * 3);
+    let mut in5 = at(5 * 3) + at(4 * 3);
+    in5 += in3;
+    in3 += in1;
+
+    in2 = mulh3(in2, I12_C3, 2.0);
+    in3 = mulh3(in3, I12_C3, 4.0);
+
+    let t1 = in0 - in4;
+    let t2 = mulh3(in1 - in5, I12_C4, 2.0);
+
+    out[7] = t1 + t2;
+    out[10] = t1 + t2;
+    out[1] = t1 - t2;
+    out[4] = t1 - t2;
+
+    let mut in0 = in0 + shr(in4, 1);
+    let in4b = in0 + in2;
+    in5 += 2.0 * in1;
+    let in1b = mulh3(in5 + in3, I12_C5, 1.0);
+    out[8] = in4b + in1b;
+    out[9] = in4b + in1b;
+    out[2] = in4b - in1b;
+    out[3] = in4b - in1b;
+
+    in0 -= in2;
+    let in5b = mulh3(in5 - in3, I12_C6, 2.0);
+    out[0] = in0 - in5b;
+    out[5] = in0 - in5b;
+    out[6] = in0 + in5b;
+    out[11] = in0 + in5b;
+}
+
+/// `imdct36` — `mpegaudiodsp_template.c:274-352`, Lee-like
+/// decomposition followed by a hand coded 9-point DCT. `out`/`buf` are
+/// flat arrays with the block's base offsets applied; `in` is this
+/// block's 18 spectral lines (modified in place: prefix sums).
+fn imdct36(
+    out: &mut [f32],
+    out_off: usize,
+    buf: &mut [f32],
+    buf_off: usize,
+    input: &mut [f32],
+    win: &[f32],
+) {
+    let mut tmp = [0f32; 18];
+
+    let mut i = 17i32;
+    while i >= 1 {
+        input[i as usize] += input[(i - 1) as usize];
+        i -= 1;
+    }
+    let mut i = 17i32;
+    while i >= 3 {
+        input[i as usize] += input[(i - 2) as usize];
+        i -= 2;
+    }
+
+    for j in 0..2usize {
+        let in1 = &input[j..];
+        let t2 = in1[2 * 4] + in1[2 * 8] - in1[2 * 2];
+
+        let t3 = in1[2 * 0] + shr(in1[2 * 6], 1);
+        let t1 = in1[2 * 0] - in1[2 * 6];
+        tmp[j + 6] = t1 - shr(t2, 1);
+        tmp[j + 16] = t1 + t2;
+
+        let t0 = mulh3(in1[2 * 2] + in1[2 * 4], C2, 2.0);
+        let t1 = mulh3(in1[2 * 4] - in1[2 * 8], -2.0 * C8, 1.0);
+        let t2 = mulh3(in1[2 * 2] + in1[2 * 8], -C4, 2.0);
+
+        tmp[j + 10] = t3 - t0 - t2;
+        tmp[j + 2] = t3 + t0 + t1;
+        tmp[j + 14] = t3 + t2 - t1;
+
+        tmp[j + 4] = mulh3(in1[2 * 5] + in1[2 * 7] - in1[2 * 1], -C3, 2.0);
+        let t2 = mulh3(in1[2 * 1] + in1[2 * 5], C1, 2.0);
+        let t3 = mulh3(in1[2 * 5] - in1[2 * 7], -2.0 * C7, 1.0);
+        let t0 = mulh3(in1[2 * 3], C3, 2.0);
+
+        let t1 = mulh3(in1[2 * 1] + in1[2 * 7], -C5, 2.0);
+
+        tmp[j] = t2 + t3 + t0;
+        tmp[j + 12] = t2 + t1 - t0;
+        tmp[j + 8] = t3 - t1 - t0;
+    }
+
+    let mut i = 0usize;
+    for j in 0..4usize {
+        let t0 = tmp[i];
+        let t1 = tmp[i + 2];
+        let s0 = t1 + t0;
+        let s2 = t1 - t0;
+
+        let t2 = tmp[i + 1];
+        let t3 = tmp[i + 3];
+        let s1 = mulh3(t3 + t2, ICOS36H[j], 2.0);
+        let s3 = mullx(t3 - t2, ICOS36[8 - j]);
+
+        let t0 = s0 + s1;
+        let t1 = s0 - s1;
+        out[out_off + (9 + j) * SBLIMIT] = mulh3(t1, win[9 + j], 1.0) + buf[buf_off + 4 * (9 + j)];
+        out[out_off + (8 - j) * SBLIMIT] = mulh3(t1, win[8 - j], 1.0) + buf[buf_off + 4 * (8 - j)];
+        buf[buf_off + 4 * (9 + j)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 9 + j], 1.0);
+        buf[buf_off + 4 * (8 - j)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 8 - j], 1.0);
+
+        let t0 = s2 + s3;
+        let t1 = s2 - s3;
+        out[out_off + (9 + 8 - j) * SBLIMIT] =
+            mulh3(t1, win[9 + 8 - j], 1.0) + buf[buf_off + 4 * (9 + 8 - j)];
+        out[out_off + j * SBLIMIT] = mulh3(t1, win[j], 1.0) + buf[buf_off + 4 * j];
+        buf[buf_off + 4 * (9 + 8 - j)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 9 + 8 - j], 1.0);
+        buf[buf_off + 4 * j] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + j], 1.0);
+        i += 4;
+    }
+
+    let s0 = tmp[16];
+    let s1 = mulh3(tmp[17], ICOS36H[4], 2.0);
+    let t0 = s0 + s1;
+    let t1 = s0 - s1;
+    out[out_off + (9 + 4) * SBLIMIT] = mulh3(t1, win[9 + 4], 1.0) + buf[buf_off + 4 * (9 + 4)];
+    out[out_off + (8 - 4) * SBLIMIT] = mulh3(t1, win[8 - 4], 1.0) + buf[buf_off + 4 * (8 - 4)];
+    buf[buf_off + 4 * (9 + 4)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 9 + 4], 1.0);
+    buf[buf_off + 4 * (8 - 4)] = mulh3(t0, win[MDCT_BUF_SIZE / 2 + 8 - 4], 1.0);
+}
+
+/// `ff_imdct36_blocks_float` (`mpegaudiodsp_template.c:354-371`).
+/// `out` is the granule's `sb_samples` base, `buf` the channel's
+/// `mdct_buf`, `input` the granule's `sb_hybrid`.
+fn imdct36_blocks(
+    out: &mut [f32],
+    out_base: usize,
+    buf: &mut [f32],
+    buf_base: usize,
+    input: &mut [f32],
+    count: usize,
+    switch_point: bool,
+    block_type: u8,
+) {
+    let t = tables();
+    let mut in_off = 0usize;
+    let mut buf_off = buf_base;
+    let mut out_off = out_base;
+    for j in 0..count {
+        // select window
+        let win_idx = if switch_point && j < 2 {
+            0
+        } else {
+            block_type as usize
+        };
+        let win = &t.mdct_win[win_idx + (4 & (0usize.wrapping_sub(j & 1)))];
+        imdct36(
+            out,
+            out_off,
+            buf,
+            buf_off,
+            &mut input[in_off..in_off + 18],
+            win,
+        );
+        in_off += 18;
+        buf_off += if (j & 3) != 3 { 1 } else { 72 - 3 };
+        out_off += 1;
+    }
+}
+
+/// `ff_dct32_float` (`dct32_template.c:126-288`) — DCT32 without
+/// 1/sqrt(2) coefficient scaling, butterfly form. `tab` holds the 32
+/// subband samples; `out` receives 32 values.
+pub fn dct32(out: &mut [f32], tab: &[f32]) {
+    let mut val = [0f32; 32];
+
+    // BF(a, b, c, s): butterfly on the register array
+    macro_rules! bf {
+        ($a:literal, $b:literal, $c:expr, $s:literal) => {{
+            let tmp0 = val[$a] + val[$b];
+            let tmp1 = val[$a] - val[$b];
+            val[$a] = tmp0;
+            val[$b] = mulh3(tmp1, $c, (1u32 << $s) as f32);
+        }};
+    }
+    // BF0: butterfly straight from the input table
+    macro_rules! bf0 {
+        ($a:literal, $b:literal, $c:expr, $s:literal) => {{
+            let tmp0 = tab[$a] + tab[$b];
+            let tmp1 = tab[$a] - tab[$b];
+            val[$a] = tmp0;
+            val[$b] = mulh3(tmp1, $c, (1u32 << $s) as f32);
+        }};
+    }
+    macro_rules! bf1 {
+        ($a:literal, $b:literal, $c:literal, $d:literal) => {{
+            bf!($a, $b, COS4_0, 1);
+            bf!($c, $d, -COS4_0, 1);
+            val[$c] += val[$d];
+        }};
+    }
+    macro_rules! bf2 {
+        ($a:literal, $b:literal, $c:literal, $d:literal) => {{
+            bf!($a, $b, COS4_0, 1);
+            bf!($c, $d, -COS4_0, 1);
+            val[$c] += val[$d];
+            val[$a] += val[$c];
+            val[$c] += val[$b];
+            val[$b] += val[$d];
+        }};
+    }
+    macro_rules! add {
+        ($a:literal, $b:literal) => {
+            val[$a] += val[$b]
+        };
+    }
+
+    /* pass 1 */
+    bf0!(0, 31, COS0_0, 1);
+    bf0!(15, 16, COS0_15, 5);
+    /* pass 2 */
+    bf!(0, 15, COS1_0, 1);
+    bf!(16, 31, -COS1_0, 1);
+    /* pass 1 */
+    bf0!(7, 24, COS0_7, 1);
+    bf0!(8, 23, COS0_8, 1);
+    /* pass 2 */
+    bf!(7, 8, COS1_7, 4);
+    bf!(23, 24, -COS1_7, 4);
+    /* pass 3 */
+    bf!(0, 7, COS2_0, 1);
+    bf!(8, 15, -COS2_0, 1);
+    bf!(16, 23, COS2_0, 1);
+    bf!(24, 31, -COS2_0, 1);
+    /* pass 1 */
+    bf0!(3, 28, COS0_3, 1);
+    bf0!(12, 19, COS0_12, 2);
+    /* pass 2 */
+    bf!(3, 12, COS1_3, 1);
+    bf!(19, 28, -COS1_3, 1);
+    /* pass 1 */
+    bf0!(4, 27, COS0_4, 1);
+    bf0!(11, 20, COS0_11, 2);
+    /* pass 2 */
+    bf!(4, 11, COS1_4, 1);
+    bf!(20, 27, -COS1_4, 1);
+    /* pass 3 */
+    bf!(3, 4, COS2_3, 3);
+    bf!(11, 12, -COS2_3, 3);
+    bf!(19, 20, COS2_3, 3);
+    bf!(27, 28, -COS2_3, 3);
+    /* pass 4 */
+    bf!(0, 3, COS3_0, 1);
+    bf!(4, 7, -COS3_0, 1);
+    bf!(8, 11, COS3_0, 1);
+    bf!(12, 15, -COS3_0, 1);
+    bf!(16, 19, COS3_0, 1);
+    bf!(20, 23, -COS3_0, 1);
+    bf!(24, 27, COS3_0, 1);
+    bf!(28, 31, -COS3_0, 1);
+
+    /* pass 1 */
+    bf0!(1, 30, COS0_1, 1);
+    bf0!(14, 17, COS0_14, 3);
+    /* pass 2 */
+    bf!(1, 14, COS1_1, 1);
+    bf!(17, 30, -COS1_1, 1);
+    /* pass 1 */
+    bf0!(6, 25, COS0_6, 1);
+    bf0!(9, 22, COS0_9, 1);
+    /* pass 2 */
+    bf!(6, 9, COS1_6, 2);
+    bf!(22, 25, -COS1_6, 2);
+    /* pass 3 */
+    bf!(1, 6, COS2_1, 1);
+    bf!(9, 14, -COS2_1, 1);
+    bf!(17, 22, COS2_1, 1);
+    bf!(25, 30, -COS2_1, 1);
+
+    /* pass 1 */
+    bf0!(2, 29, COS0_2, 1);
+    bf0!(13, 18, COS0_13, 3);
+    /* pass 2 */
+    bf!(2, 13, COS1_2, 1);
+    bf!(18, 29, -COS1_2, 1);
+    /* pass 1 */
+    bf0!(5, 26, COS0_5, 1);
+    bf0!(10, 21, COS0_10, 1);
+    /* pass 2 */
+    bf!(5, 10, COS1_5, 2);
+    bf!(21, 26, -COS1_5, 2);
+    /* pass 3 */
+    bf!(2, 5, COS2_2, 1);
+    bf!(10, 13, -COS2_2, 1);
+    bf!(18, 21, COS2_2, 1);
+    bf!(26, 29, -COS2_2, 1);
+    /* pass 4 */
+    bf!(1, 2, COS3_1, 2);
+    bf!(5, 6, -COS3_1, 2);
+    bf!(9, 10, COS3_1, 2);
+    bf!(13, 14, -COS3_1, 2);
+    bf!(17, 18, COS3_1, 2);
+    bf!(21, 22, -COS3_1, 2);
+    bf!(25, 26, COS3_1, 2);
+    bf!(29, 30, -COS3_1, 2);
+
+    /* pass 5 */
+    bf1!(0, 1, 2, 3);
+    bf2!(4, 5, 6, 7);
+    bf1!(8, 9, 10, 11);
+    bf2!(12, 13, 14, 15);
+    bf1!(16, 17, 18, 19);
+    bf2!(20, 21, 22, 23);
+    bf1!(24, 25, 26, 27);
+    bf2!(28, 29, 30, 31);
+
+    /* pass 6 */
+
+    add!(8, 12);
+    add!(12, 10);
+    add!(10, 14);
+    add!(14, 9);
+    add!(9, 13);
+    add!(13, 11);
+    add!(11, 15);
+
+    out[0] = val[0];
+    out[16] = val[1];
+    out[8] = val[2];
+    out[24] = val[3];
+    out[4] = val[4];
+    out[20] = val[5];
+    out[12] = val[6];
+    out[28] = val[7];
+    out[2] = val[8];
+    out[18] = val[9];
+    out[10] = val[10];
+    out[26] = val[11];
+    out[6] = val[12];
+    out[22] = val[13];
+    out[14] = val[14];
+    out[30] = val[15];
+
+    add!(24, 28);
+    add!(28, 26);
+    add!(26, 30);
+    add!(30, 25);
+    add!(25, 29);
+    add!(29, 27);
+    add!(27, 31);
+
+    out[1] = val[16] + val[24];
+    out[17] = val[17] + val[25];
+    out[9] = val[18] + val[26];
+    out[25] = val[19] + val[27];
+    out[5] = val[20] + val[28];
+    out[21] = val[21] + val[29];
+    out[13] = val[22] + val[30];
+    out[29] = val[23] + val[31];
+    out[3] = val[24] + val[20];
+    out[19] = val[25] + val[21];
+    out[11] = val[26] + val[22];
+    out[27] = val[27] + val[23];
+    out[7] = val[28] + val[18];
+    out[23] = val[29] + val[19];
+    out[15] = val[30] + val[17];
+    out[31] = val[31];
+}
+
+/// `round_sample` float build (`mpegaudiodsp_template.c:35-40`):
+/// return the accumulator and zero it.
+#[inline(always)]
+fn round_sample(sum: &mut f32) -> f32 {
+    let sum1 = *sum;
+    *sum = 0.0;
+    sum1
+}
+
+/// `ff_mpadsp_apply_window_float` (`mpegaudiodsp_template.c:123-174`).
+/// `synth_buf` is the 1024-float channel window at the current offset
+/// base; `samples`/`incr` form the output pointer/stride.
+fn apply_window(
+    synth_buf: &mut [f32],
+    window: &[f32],
+    dither_state: &mut i32,
+    samples: &mut [f32],
+    incr: usize,
+) {
+    // copy to avoid wrap
+    synth_buf.copy_within(0..32, 512);
+
+    let mut s_idx = 0usize;
+    let mut s2_idx = 31 * incr;
+    let mut w = 0usize;
+    let mut w2 = 31usize;
+
+    let mut sum = *dither_state as f32;
+    // SUM8(MACS, sum, w, p) with p = synth_buf + 16
+    for k in 0..8 {
+        sum += window[w + k * 64] * synth_buf[16 + k * 64];
+    }
+    // SUM8(MLSS, sum, w + 32, p) with p = synth_buf + 48
+    for k in 0..8 {
+        sum -= window[w + 32 + k * 64] * synth_buf[48 + k * 64];
+    }
+    samples[s_idx] = round_sample(&mut sum);
+    s_idx += incr;
+    w += 1;
+
+    // we calculate two samples at the same time to avoid one memory
+    // access per two sample
+    for j in 1..16usize {
+        let mut sum2 = 0f32;
+        // SUM8P2(sum, MACS, sum2, MLSS, w, w2, p), p = synth_buf + 16 + j
+        for k in 0..8 {
+            let t = synth_buf[16 + j + k * 64];
+            sum += window[w + k * 64] * t;
+            sum2 -= window[w2 + k * 64] * t;
+        }
+        // SUM8P2(sum, MLSS, sum2, MLSS, w + 32, w2 + 32, p), p = synth_buf + 48 - j
+        for k in 0..8 {
+            let t = synth_buf[48 - j + k * 64];
+            sum -= window[w + 32 + k * 64] * t;
+            sum2 -= window[w2 + 32 + k * 64] * t;
+        }
+
+        samples[s_idx] = round_sample(&mut sum);
+        s_idx += incr;
+        sum += sum2;
+        samples[s2_idx] = round_sample(&mut sum);
+        s2_idx -= incr;
+        w += 1;
+        w2 -= 1;
+    }
+
+    // SUM8(MLSS, sum, w + 32, p), p = synth_buf + 32
+    for k in 0..8 {
+        sum -= window[w + 32 + k * 64] * synth_buf[32 + k * 64];
+    }
+    samples[s_idx] = round_sample(&mut sum);
+    *dither_state = sum as i32;
+}
+
+/// `ff_mpa_synth_filter_float` (`mpegaudiodsp_template.c:178-195`) —
+/// 32 sub band synthesis: input 32 subband samples, output 32 samples.
+fn mpa_synth_filter(
+    synth_buf: &mut [f32],
+    synth_buf_offset: &mut usize,
+    window: &[f32],
+    dither_state: &mut i32,
+    samples: &mut [f32],
+    incr: usize,
+    sb_samples: &[f32],
+) {
+    let offset = *synth_buf_offset;
+    dct32(&mut synth_buf[offset..offset + 32], sb_samples);
+    apply_window(
+        &mut synth_buf[offset..],
+        window,
+        dither_state,
+        samples,
+        incr,
+    );
+    *synth_buf_offset = (offset + 512 - 32) & 511;
+}
+/// `l3_unscale` (`mpegaudiodec_template.c:222-239`) — compute
+/// `value^(4/3) * 2^(exponent/4)` normalized to FRAC_BITS, via the
+/// shared fixed-point 4/3 table (used by the float decoder's linbits
+/// escape path exactly as in C).
+fn l3_unscale(value: i64, exponent: i32) -> i32 {
+    let t = tables();
+    let idx = (4 * value + (exponent & 3) as i64) as usize;
+    let idx = idx.min(TABLE_4_3_SIZE - 1);
+    let mut e = t.table_4_3_exp[idx] as i32;
+    let m = t.table_4_3_value[idx];
+    e -= exponent >> 2;
+    if !(0..=31).contains(&e) {
+        // C: `if (e > (SUINT)31) return 0;` — negative e reads as
+        // unsigned, so both out-of-range directions return 0.
+        return 0;
+    }
+    let m = (m + ((1u32 << e) >> 1)) >> e;
+    m as i32
+}
+
+// ---------------------------------------------------------------------
+// Layer 3 scale-factor helpers — mpegaudiodec_template.c:659-723
+// ---------------------------------------------------------------------
+
+/// The `SPLIT` macro (`mpegaudiodec_template.c:659-677`).
+fn split(dst: &mut i32, sf: &mut i32, n: i32) {
+    match n {
+        3 => {
+            let m = (*sf * 171) >> 9;
+            *dst = *sf - 3 * m;
+            *sf = m;
+        }
+        4 => {
+            *dst = *sf & 3;
+            *sf >>= 2;
+        }
+        5 => {
+            let m = (*sf * 205) >> 10;
+            *dst = *sf - 5 * m;
+            *sf = m;
+        }
+        6 => {
+            let m = (*sf * 171) >> 10;
+            *dst = *sf - 6 * m;
+            *sf = m;
+        }
+        _ => *dst = 0,
+    }
+}
+
+/// `lsf_sf_expand` (`mpegaudiodec_template.c:679-686`).
+pub fn lsf_sf_expand(slen: &mut [i32; 4], mut sf: i32, n1: i32, n2: i32, n3: i32) {
+    split(&mut slen[3], &mut sf, n3);
+    split(&mut slen[2], &mut sf, n2);
+    split(&mut slen[1], &mut sf, n1);
+    slen[0] = sf;
+}
+
+/// `exponents_from_scale_factors` (`mpegaudiodec_template.c:688-723`).
+fn exponents_from_scale_factors(sri: i32, g: &GranuleDef, exponents: &mut [i16; 576]) {
+    let mut ptr = 0usize;
+    let gain = g.global_gain - 210;
+    let shift = g.scalefac_scale as i32 + 1;
+
+    let sri = sri as usize;
+    let bstab = &FF_BAND_SIZE_LONG[sri];
+    let pretab = &FF_MPA_PRETAB[(g.preflag != 0) as usize];
+    for i in 0..g.long_end as usize {
+        let v0 = gain - ((g.scale_factors[i] as i32 + pretab[i] as i32) << shift) + 400;
+        for _ in 0..bstab[i] {
+            exponents[ptr] = v0 as i16;
+            ptr += 1;
+        }
+    }
+
+    if g.short_start < 13 {
+        let bstab = &FF_BAND_SIZE_SHORT[sri];
+        let gains = [
+            gain - (g.subblock_gain[0] << 3),
+            gain - (g.subblock_gain[1] << 3),
+            gain - (g.subblock_gain[2] << 3),
+        ];
+        let mut k = g.long_end as usize;
+        for i in g.short_start as usize..13 {
+            let len = bstab[i];
+            for l in 0..3usize {
+                let v0 = gains[l] - ((g.scale_factors[k] as i32) << shift) + 400;
+                k += 1;
+                for _ in 0..len {
+                    exponents[ptr] = v0 as i16;
+                    ptr += 1;
+                }
+            }
+        }
+    }
+}
+
+/// `switch_buffer` (`mpegaudiodec_template.c:725-738`) — hop from the
+/// reservoir view back to the frame reader when the position runs past
+/// the reservoir-only bytes, fixing up the caller's position and
+/// end-position bookkeeping.
+fn switch_buffer(bs: &mut Bitstream, pos: &mut i64, end_pos: &mut i64, end_pos2: &mut i64) {
+    if bs.in_gb.is_some() && *pos >= bs.gb.size_in_bits - bs.extrasize as i64 * 8 {
+        let mut gb = bs.in_gb.take().unwrap();
+        bs.extrasize = 0;
+        gb.skip_bits_long(*pos - *end_pos);
+        *end_pos2 = *end_pos2 + gb.get_bits_count() - *pos;
+        *end_pos = *end_pos2;
+        *pos = gb.get_bits_count();
+        bs.gb = gb;
+    }
+}
+
+/// `huffman_decode` (`mpegaudiodec_template.c:756-903`) — read the
+/// Huffman-coded residue into `g->sb_hybrid`.
+fn huffman_decode(
+    bs: &mut Bitstream,
+    g: &mut GranuleDef,
+    exponents: &[i16; 576],
+    end_pos2_in: i64,
+) {
+    let mut end_pos2 = end_pos2_in;
+    let mut end_pos = end_pos2.min(bs.gb.size_in_bits - bs.extrasize as i64 * 8);
+    let t = tables();
+    let mut s_index = 0usize;
+
+    /* low frequencies (called big values) */
+    for i in 0..3usize {
+        let mut j = g.region_size[i];
+        if j == 0 {
+            continue;
+        }
+        // select vlc table
+        let k = g.table_select[i] as usize;
+        let l = FF_MPA_HUFF_DATA[k][0] as usize;
+        let linbits = FF_MPA_HUFF_DATA[k][1] as u32;
+
+        if l == 0 {
+            let n = 2 * j as usize;
+            g.sb_hybrid[s_index..s_index + n].fill(0.0);
+            s_index += n;
+            continue;
+        }
+        let vlc = &t.huff_vlc[l];
+
+        // read huffcode and compute each couple
+        while j > 0 {
+            let mut pos = bs.gb.get_bits_count();
+            if pos >= end_pos {
+                switch_buffer(bs, &mut pos, &mut end_pos, &mut end_pos2);
+                if pos >= end_pos {
+                    break;
+                }
+            }
+            let y = vlc.decode(&mut bs.gb);
+
+            if y == 0 {
+                g.sb_hybrid[s_index] = 0.0;
+                g.sb_hybrid[s_index + 1] = 0.0;
+                s_index += 2;
+                continue;
+            }
+
+            // C indexes the float tables with the raw exponent; values
+            // outside [0, 512) are undefined behavior there and clamp
+            // to the table here (see module notes).
+            let exponent = exponents[s_index].clamp(0, 511) as usize;
+            let raw_exponent = exponents[s_index] as i32;
+            if y & 16 != 0 {
+                let x = y >> 5;
+                let yy = y & 0x0f;
+                g.sb_hybrid[s_index] = if x < 15 {
+                    let mut v = t.expval_table[exponent][x as usize];
+                    if bs.gb.get_bits1() != 0 {
+                        v = -v;
+                    }
+                    v
+                } else {
+                    let xv = x as i64 + bs.gb.get_bits(linbits) as i64;
+                    let mut v = l3_unscale(xv, raw_exponent) as f32;
+                    if bs.gb.get_bits1() != 0 {
+                        v = -v;
+                    }
+                    v
+                };
+                g.sb_hybrid[s_index + 1] = if yy < 15 {
+                    let mut v = t.expval_table[exponent][yy as usize];
+                    if bs.gb.get_bits1() != 0 {
+                        v = -v;
+                    }
+                    v
+                } else {
+                    let yv = yy as i64 + bs.gb.get_bits(linbits) as i64;
+                    let mut v = l3_unscale(yv, raw_exponent) as f32;
+                    if bs.gb.get_bits1() != 0 {
+                        v = -v;
+                    }
+                    v
+                };
+            } else {
+                let x0 = y >> 5;
+                let yy = y & 0x0f;
+                let x = x0 + yy;
+                let dst = s_index + (yy != 0) as usize;
+                g.sb_hybrid[dst] = if x < 15 {
+                    let mut v = t.expval_table[exponent][x as usize];
+                    if bs.gb.get_bits1() != 0 {
+                        v = -v;
+                    }
+                    v
+                } else {
+                    let xv = x as i64 + bs.gb.get_bits(linbits) as i64;
+                    let mut v = l3_unscale(xv, raw_exponent) as f32;
+                    if bs.gb.get_bits1() != 0 {
+                        v = -v;
+                    }
+                    v
+                };
+                g.sb_hybrid[s_index + (yy == 0) as usize] = 0.0;
+            }
+            s_index += 2;
+            j -= 1;
+        }
+    }
+
+    /* high frequencies */
+    let quad_bits = [6u32, 4u32];
+    let vlc = &t.huff_quad[g.count1table_select as usize];
+    let mut last_pos = 0i64;
+    while s_index <= 572 {
+        let mut pos = bs.gb.get_bits_count();
+        if pos >= end_pos {
+            if pos > end_pos2 && last_pos != 0 {
+                // some encoders generate an incorrect size for this
+                // part. We must go back into the data
+                s_index -= 4;
+                bs.gb.skip_bits_long(last_pos - pos);
+                break;
+            }
+            switch_buffer(bs, &mut pos, &mut end_pos, &mut end_pos2);
+            if pos >= end_pos {
+                break;
+            }
+        }
+        last_pos = pos;
+
+        let mut code = vlc.decode(&mut bs.gb, quad_bits[g.count1table_select as usize]);
+        if code < 0 {
+            code = 0; // unreachable for these complete tables (C: -1)
+        }
+        g.sb_hybrid[s_index..s_index + 4].fill(0.0);
+        while code != 0 {
+            const IDXTAB: [usize; 16] = [3, 3, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+            let idx = IDXTAB[code as usize];
+            let pos_i = s_index + idx;
+            let exp = exponents[pos_i].clamp(0, 511) as usize;
+            let mut v = t.exp_table[exp];
+            if bs.gb.get_bits1() != 0 {
+                v = -v;
+            }
+            g.sb_hybrid[pos_i] = v;
+            code ^= (8 >> idx) as i32;
+        }
+        s_index += 4;
+    }
+    // skip extension bits (the err_recognition checks around this are
+    // off by default in C and not ported)
+    let bits_left = end_pos2 - bs.gb.get_bits_count();
+    g.sb_hybrid[s_index.min(576)..].fill(0.0);
+    bs.gb.skip_bits_long(bits_left);
+
+    let mut i = bs.gb.get_bits_count();
+    switch_buffer(bs, &mut i, &mut end_pos, &mut end_pos2);
+}
+
+/// `reorder_block` (`mpegaudiodec_template.c:908-939`) — reorder short
+/// blocks from bitstream order to interleaved order.
+fn reorder_block(sri: i32, g: &mut GranuleDef) {
+    if g.block_type != 2 {
+        return;
+    }
+    let sri = sri as usize;
+    let mut tmp = [0f32; 576];
+
+    let mut ptr = if g.switch_point != 0 {
+        if sri != 8 { 36 } else { 72 }
+    } else {
+        0
+    };
+
+    for i in g.short_start as usize..13 {
+        let len = FF_BAND_SIZE_SHORT[sri][i] as usize;
+        let ptr1 = ptr;
+        let mut dst = 0usize;
+        for _ in 0..len {
+            tmp[dst] = g.sb_hybrid[ptr];
+            dst += 1;
+            tmp[dst] = g.sb_hybrid[ptr + len];
+            dst += 1;
+            tmp[dst] = g.sb_hybrid[ptr + 2 * len];
+            dst += 1;
+            ptr += 1;
+        }
+        ptr += 2 * len;
+        for k in 0..len * 3 {
+            g.sb_hybrid[ptr1 + k] = tmp[k];
+        }
+    }
+}
+
+/// `compute_stereo` (`mpegaudiodec_template.c:943-1071`) — intensity
+/// stereo + mid/side stereo over the granule pair.
+fn compute_stereo(
+    mode_ext: i32,
+    lsf: bool,
+    sri: i32,
+    granules: &mut [[GranuleDef; 2]; 2],
+    gr: usize,
+) {
+    let (left, right) = granules.split_at_mut(1);
+    let g0 = &mut left[0][gr];
+    let g1 = &mut right[0][gr];
+    let sb0 = &mut *g0.sb_hybrid;
+    let sb1 = &mut *g1.sb_hybrid;
+    let sri = sri as usize;
+
+    if mode_ext & MODE_EXT_I_STEREO != 0 {
+        let (is_tab, sf_max): (&[[f32; 16]; 2], i32) = if !lsf {
+            (&IS_TABLE, 7)
+        } else {
+            (
+                &tables().is_table_lsf[(g1.scalefac_compress & 1) as usize],
+                16,
+            )
+        };
+
+        let mut t0o = 576usize;
+        let mut t1o = 576usize;
+        let mut non_zero_found_short = [false; 3];
+        let mut k = (13 - g1.short_start) * 3 + g1.long_end - 3;
+        for i in (g1.short_start..=12).rev() {
+            // for last band, use previous scale factor
+            if i != 11 {
+                k -= 3;
+            }
+            let len = FF_BAND_SIZE_SHORT[sri][i as usize] as usize;
+            for l in (0..3usize).rev() {
+                t0o -= len;
+                t1o -= len;
+                let mut did_istereo = false;
+                if !non_zero_found_short[l] {
+                    // test if non zero band. if so, stop doing i-stereo
+                    let mut found = false;
+                    for j in 0..len {
+                        if sb1[t1o + j] != 0.0 {
+                            non_zero_found_short[l] = true;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        let sf = g1.scale_factors[(k + l as i32) as usize] as i32;
+                        if sf < sf_max {
+                            let v1 = is_tab[0][sf as usize];
+                            let v2 = is_tab[1][sf as usize];
+                            for j in 0..len {
+                                let tmp0 = sb0[t0o + j];
+                                sb0[t0o + j] = mullx(tmp0, v1);
+                                sb1[t1o + j] = mullx(tmp0, v2);
+                            }
+                            did_istereo = true;
+                        }
+                    }
+                }
+                if !did_istereo {
+                    // found1: lower part of the spectrum : do ms stereo
+                    // if enabled
+                    if mode_ext & MODE_EXT_MS_STEREO != 0 {
+                        for j in 0..len {
+                            let tmp0 = sb0[t0o + j];
+                            let tmp1 = sb1[t1o + j];
+                            sb0[t0o + j] = mullx(tmp0 + tmp1, ISQRT2);
+                            sb1[t1o + j] = mullx(tmp0 - tmp1, ISQRT2);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut non_zero_found =
+            non_zero_found_short[0] | non_zero_found_short[1] | non_zero_found_short[2];
+
+        for i in (0..g1.long_end).rev() {
+            let len = FF_BAND_SIZE_LONG[sri][i as usize] as usize;
+            t0o -= len;
+            t1o -= len;
+            let mut did_istereo = false;
+            // test if non zero band. if so, stop doing i-stereo
+            if !non_zero_found {
+                let mut found = false;
+                for j in 0..len {
+                    if sb1[t1o + j] != 0.0 {
+                        non_zero_found = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    // for last band, use previous scale factor
+                    let k = if i == 21 { 20 } else { i };
+                    let sf = g1.scale_factors[k as usize] as i32;
+                    if sf < sf_max {
+                        let v1 = is_tab[0][sf as usize];
+                        let v2 = is_tab[1][sf as usize];
+                        for j in 0..len {
+                            let tmp0 = sb0[t0o + j];
+                            sb0[t0o + j] = mullx(tmp0, v1);
+                            sb1[t1o + j] = mullx(tmp0, v2);
+                        }
+                        did_istereo = true;
+                    }
+                }
+            }
+            if !did_istereo {
+                // found2
+                if mode_ext & MODE_EXT_MS_STEREO != 0 {
+                    for j in 0..len {
+                        let tmp0 = sb0[t0o + j];
+                        let tmp1 = sb1[t1o + j];
+                        sb0[t0o + j] = mullx(tmp0 + tmp1, ISQRT2);
+                        sb1[t1o + j] = mullx(tmp0 - tmp1, ISQRT2);
+                    }
+                }
+            }
+        }
+    } else if mode_ext & MODE_EXT_MS_STEREO != 0 {
+        // ms stereo ONLY. NOTE: the 1/sqrt(2) normalization factor is
+        // included in the global gain (butterflies_float_c semantics).
+        for i in 0..576 {
+            let tmp0 = sb0[i];
+            let tmp1 = sb1[i];
+            sb0[i] = tmp0 + tmp1;
+            sb1[i] = tmp0 - tmp1;
+        }
+    }
+}
+
+/// `compute_antialias` (`mpegaudiodec_template.c:1101-1129`) — the
+/// float `AA` butterflies against `csa_table`.
+fn compute_antialias(g: &mut GranuleDef) {
+    // we antialias only "long" bands
+    let n = if g.block_type == 2 {
+        if g.switch_point == 0 {
+            return;
+        }
+        // XXX: check this for 8000Hz case
+        1
+    } else {
+        SBLIMIT - 1
+    };
+
+    let sb = &mut g.sb_hybrid;
+    let mut ptr = 18usize;
+    for _ in 0..n {
+        for j in 0..8usize {
+            let tmp0 = sb[ptr - 1 - j];
+            let tmp1 = sb[ptr + j];
+            sb[ptr - 1 - j] = tmp0 * CSA_TABLE[j][0] - tmp1 * CSA_TABLE[j][1];
+            sb[ptr + j] = tmp0 * CSA_TABLE[j][1] + tmp1 * CSA_TABLE[j][0];
+        }
+        ptr += 18;
+    }
+}
+
+/// `compute_imdct` (`mpegaudiodec_template.c:1132-1209`) — find the
+/// last non-zero block, run the long IMDCTs, then the 12-point ones
+/// for short bands and pure overlap for zero bands.
+fn compute_imdct(
+    ch: usize,
+    gr: usize,
+    granules: &mut [[GranuleDef; 2]; 2],
+    sb_samples: &mut [[f32; 36 * SBLIMIT]; MPA_MAX_CHANNELS],
+    mdct_buf: &mut [[f32; SBLIMIT * 18]; MPA_MAX_CHANNELS],
+) {
+    let g = &mut granules[ch][gr];
+
+    // find last non zero block (C ORs the float bits as int32)
+    let mut ptr: i64 = 576;
+    let ptr1: i64 = 2 * 18;
+    while ptr >= ptr1 {
+        ptr -= 6;
+        if (0..6).any(|i| g.sb_hybrid[(ptr + i) as usize].to_bits() != 0) {
+            break;
+        }
+    }
+    let sblimit = ((ptr / 18) + 1) as usize;
+
+    let mdct_long_end = if g.block_type == 2 {
+        // XXX: check for 8000 Hz
+        if g.switch_point != 0 { 2 } else { 0 }
+    } else {
+        sblimit
+    };
+
+    imdct36_blocks(
+        &mut sb_samples[ch],
+        32 * 18 * gr,
+        &mut mdct_buf[ch],
+        0,
+        &mut g.sb_hybrid[..],
+        mdct_long_end,
+        g.switch_point != 0,
+        g.block_type,
+    );
+
+    let mut buf = 4 * 18 * (mdct_long_end >> 2) + (mdct_long_end & 3);
+    let mut ptr = 18 * mdct_long_end;
+    let t = tables();
+
+    for j in mdct_long_end..sblimit {
+        // select frequency inversion
+        let win = &t.mdct_win[2 + (4 & (0usize.wrapping_sub(j & 1)))];
+        let sb_h = &g.sb_hybrid[..];
+        let sb_out = &mut sb_samples[ch];
+        let mdct = &mut mdct_buf[ch];
+        let mut out_ptr = j;
+        let mut out2 = [0f32; 12];
+
+        for i in 0..6usize {
+            sb_out[out_ptr] = mdct[buf + 4 * i];
+            out_ptr += SBLIMIT;
+        }
+        imdct12(&mut out2, sb_h, ptr);
+        for i in 0..6usize {
+            sb_out[out_ptr] = mulh3(out2[i], win[i], 1.0) + mdct[buf + 4 * (i + 6)];
+            mdct[buf + 4 * (i + 6 * 2)] = mulh3(out2[i + 6], win[i + 6], 1.0);
+            out_ptr += SBLIMIT;
+        }
+        imdct12(&mut out2, sb_h, ptr + 1);
+        for i in 0..6usize {
+            sb_out[out_ptr] = mulh3(out2[i], win[i], 1.0) + mdct[buf + 4 * (i + 6 * 2)];
+            mdct[buf + 4 * (i + 6 * 0)] = mulh3(out2[i + 6], win[i + 6], 1.0);
+            out_ptr += SBLIMIT;
+        }
+        imdct12(&mut out2, sb_h, ptr + 2);
+        for i in 0..6usize {
+            mdct[buf + 4 * (i + 6 * 0)] = mulh3(out2[i], win[i], 1.0) + mdct[buf + 4 * (i + 6 * 0)];
+            mdct[buf + 4 * (i + 6 * 1)] = mulh3(out2[i + 6], win[i + 6], 1.0);
+            mdct[buf + 4 * (i + 6 * 2)] = 0.0;
+        }
+        ptr += 18;
+        buf += if (j & 3) != 3 { 1 } else { 4 * 18 - 3 };
+    }
+    // zero bands
+    for j in sblimit..SBLIMIT {
+        // overlap
+        let sb_out = &mut sb_samples[ch];
+        let mdct = &mut mdct_buf[ch];
+        let mut out_ptr = j;
+        for i in 0..18usize {
+            sb_out[out_ptr] = mdct[buf + 4 * i];
+            mdct[buf + 4 * i] = 0.0;
+            out_ptr += SBLIMIT;
+        }
+        buf += if (j & 3) != 3 { 1 } else { 4 * 18 - 3 };
+    }
+}
+
+/// Copy `src` into `dst`, zero-filling where C would read stale
+/// bytes past the reader's region (malformed streams only).
+fn copy_clamped(dst: &mut [u8], src: &[u8]) {
+    let n = src.len().min(dst.len());
+    dst[..n].copy_from_slice(&src[..n]);
+    for b in dst[n..].iter_mut() {
+        *b = 0;
+    }
+}
 // ---------------------------------------------------------------------
 // Tests — C-line-verified vectors and hand-built bitstreams; no system
 // ffmpeg anywhere near these.
@@ -4194,6 +4191,11 @@ mod smoke {
             }
         }
         eprintln!("SMOKE: frames={frames} samples={n} max_diff={max_diff:.4} over=/{over}");
+        let mut dump = Vec::with_capacity(out.len() * 4);
+        for v in &out {
+            dump.extend_from_slice(&v.to_le_bytes());
+        }
+        let _ = std::fs::write("/tmp/our.pcm", dump);
         assert!(
             over * 1000 < (n - 2 * skip),
             "{over} samples (of {}) differ by >0.02, max {max_diff:.4}",
