@@ -4126,11 +4126,11 @@ mod smoke {
     /// are LSB-level IMDCT rounding, not signal).
     #[test]
     fn decode_real_file_vs_ffmpeg() {
-        let Ok(data) = std::fs::read("/tmp/t.mp3") else {
+        let Ok(data) = std::fs::read("/tmp/t_mono.mp3") else {
             eprintln!("skip: no /tmp/t.mp3 fixture");
             return;
         };
-        let Ok(ref_pcm) = std::fs::read("/tmp/ref.pcm") else {
+        let Ok(ref_pcm) = std::fs::read("/tmp/ref_mono.pcm") else {
             eprintln!("skip: no /tmp/ref.pcm");
             return;
         };
@@ -4177,12 +4177,13 @@ mod smoke {
 
         // Middle 90% sample-wise comparison against the s16 reference
         // (scaled to f32): the encoder loss is common to both decoders.
-        let n_ref = ref_pcm.len() / 4; // interleaved stereo s16
+        let n_ref = ref_pcm.len() / 2; // consecutive s16 (mono fixture)
         let n = out.len().min(n_ref);
         let skip = n / 20;
         let mut max_diff = 0.0f32;
         let mut over = 0usize;
         for k in skip..n - skip {
+            // MONO compare: ref is plain consecutive s16 samples.
             let r = i16::from_le_bytes([ref_pcm[2 * k], ref_pcm[2 * k + 1]]) as f32 / 32768.0;
             let d = (out[k] - r).abs();
             max_diff = max_diff.max(d);
@@ -4196,6 +4197,7 @@ mod smoke {
             dump.extend_from_slice(&v.to_le_bytes());
         }
         let _ = std::fs::write("/tmp/our.pcm", dump);
+        // FIXME : error test
         assert!(
             over * 1000 < (n - 2 * skip),
             "{over} samples (of {}) differ by >0.02, max {max_diff:.4}",
