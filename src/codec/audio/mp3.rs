@@ -3200,13 +3200,16 @@ mod tests {
         );
 
         // Layer 1, MPEG-1 44100 64k: (br*12000)/sr then (fs+pad)*4.
+        // (0xFFF72000 is MPEG-2 LSF — bit 19 = 0 — giving 22050 Hz/104;
+        // MPEG-1 needs bits 20-19 = 11: 0xFFFE_.)
         let mut h = MpaDecodeHeader::default();
-        assert!(!avpriv_mpegaudio_decode_header(&mut h, 0xFFF72000).unwrap());
+        assert!(!avpriv_mpegaudio_decode_header(&mut h, 0xFFFE2000).unwrap());
         assert_eq!((h.layer, h.frame_size), (1, 68));
 
-        // Layer 2, MPEG-1 44100 128k: (br*144000)/sr.
+        // Layer 2, MPEG-1 44100 128k: (br*144000)/sr. (0xFFF59000 is
+        // MPEG-2 LSF — 522; MPEG-1 needs bits 20-19 = 11: 0xFFFC_.)
         let mut h = MpaDecodeHeader::default();
-        assert!(!avpriv_mpegaudio_decode_header(&mut h, 0xFFF59000).unwrap());
+        assert!(!avpriv_mpegaudio_decode_header(&mut h, 0xFFFC8000).unwrap());
         assert_eq!((h.layer, h.frame_size), (2, 417));
 
         // error_protection: protection bit 0 → CRC present.
@@ -3238,11 +3241,11 @@ mod tests {
         assert_eq!((id, fs, coded), (CodecId::Mp3, 576, 156)); // lsf → 576 samples
 
         let coded =
-            ff_mpa_decode_header(0xFFF59000, &mut sr, &mut ch, &mut fs, &mut br, &mut id).unwrap();
+            ff_mpa_decode_header(0xFFFC8000, &mut sr, &mut ch, &mut fs, &mut br, &mut id).unwrap();
         assert_eq!((id, fs, coded), (CodecId::Mp2, 1152, 417));
 
         let coded =
-            ff_mpa_decode_header(0xFFF72000, &mut sr, &mut ch, &mut fs, &mut br, &mut id).unwrap();
+            ff_mpa_decode_header(0xFFFE2000, &mut sr, &mut ch, &mut fs, &mut br, &mut id).unwrap();
         assert_eq!((id, fs, coded), (CodecId::Mp1, 384, 68));
 
         // free format is an error through this helper too (C: avpriv
@@ -3393,9 +3396,17 @@ mod tests {
         // (high << 1 | both << 4 | low) (common.c:423-427).
         let vlc = BigVlc::build(&table_lens(0), &table_syms(0));
         let decode = |bits: &[u32]| -> i32 {
+            // Bits are MSB-first in the byte stream (the reader's order):
+            // pack each chunk left-aligned.
             let bytes: Vec<u8> = bits
                 .chunks(8)
-                .map(|c| c.iter().fold(0u8, |a, &b| (a << 1) | b as u8))
+                .map(|c| {
+                    let mut byte = 0u8;
+                    for (k, &b) in c.iter().enumerate() {
+                        byte |= (b as u8) << (7 - k);
+                    }
+                    byte
+                })
                 .collect();
             let mut gb = GetBits::init(bytes, bits.len() as i64);
             vlc.decode(&mut gb)
@@ -3612,7 +3623,7 @@ mod tests {
         assert_eq!(gb.get_bits_count(), 8); // saturated at buffer end
         // partial last byte: bits beyond size_in_bits but inside the
         // byte are still real (C's buffer_end = buffer + ceil).
-        let mut gb = GetBits::init(vec![0b1000_0000], 4);
+        let mut gb = GetBits::init(vec![0b1000_1000], 4);
         assert_eq!(gb.get_bits(4), 0b1000);
         assert_eq!(gb.get_bits(1), 1); // real bit from the partial byte
         // skip_bits_long is the legacy signed reader.
@@ -4107,48 +4118,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod dbg_probe {
-    use super::*;
-    #[test]
-    fn probe() {
-        let mut h = MpaDecodeHeader::default();
-        let r = avpriv_mpegaudio_decode_header(&mut h, 0xFFF72000);
-        eprintln!(
-            "L1: ret={r:?} layer={} lsf={} sr={} idx={} br={} fs={}",
-            h.layer, h.lsf, h.sample_rate, h.sample_rate_index, h.bit_rate, h.frame_size
-        );
-        let lens: Vec<u8> = MPA_HUFFLENS[0..9].to_vec();
-        let syms: Vec<u8> = MPA_HUFFSYMBOLS[0..9].to_vec();
-        eprintln!("t0 lens={lens:?} syms={syms:?}");
-        eprintln!("sizes[0..3]={:?}", &MPA_HUFF_SIZES_MINUS_ONE[0..3]);
-        let g2 = GetBits::init(vec![0x20], 3);
-        eprintln!(
-            "bits of 0x20: {:?}",
-            (0..8).map(|i| g2.bit(i)).collect::<Vec<_>>()
-        );
-        let vlc = BigVlc::build(&[3u8, 3, 2, 1], &[17u8, 1, 16, 0]);
-        eprintln!("by_len={:?}", vlc.by_len);
-        for (bits, want) in [
-            ((&[0u32, 0, 0][..]), 49i32),
-            ((&[0u32, 0, 1][..]), 1i32),
-            ((&[0u32, 1][..]), 32i32),
-            ((&[1u32][..]), 0i32),
-        ] {
-            let bytes: Vec<u8> = vec![bits.iter().fold(0u8, |a, &b| (a << 1) | b as u8)];
-            let mut gb = GetBits::init(bytes.clone(), 3);
-            eprintln!("pre-bits: {} {} {}", gb.bit(0), gb.bit(1), gb.bit(2));
-            let g3 = gb.get_bits1();
-            let g4 = gb.get_bits1();
-            let g5 = gb.get_bits1();
-            eprintln!("manual get_bits1 x3: {g3}{g4}{g5}");
-            let mut gb = GetBits::init(bytes, 3);
-            let got = vlc.decode(&mut gb);
-            eprintln!(
-                "decode {:?} -> {got} (want {want}) index={}",
-                bits, gb.index
-            );
-        }
-        panic!("probe");
-    }
-}
