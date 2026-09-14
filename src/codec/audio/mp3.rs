@@ -3114,8 +3114,7 @@ impl AudioDecoder for Mp3Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::packet::PacketFlags;
-    use crate::util::rational::Rational;
+    use crate::{codec::packet::PacketFlags, util::rational::Rational};
 
     // ================= header decode (mpegaudiodecheader.c) =========
 
@@ -4118,3 +4117,87 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod smoke {
+    use super::*;
+    use crate::codec::traits::AudioDecoder;
+
+    /// REAL-file smoke: decode /tmp/t.mp3 frame-by-frame (a sync-word scan —
+    /// the mp3 demuxer's job later) and compare against system ffmpeg's
+    /// decode of the same file. Both decode the SAME encoded stream, so
+    /// samples must agree closely (both are float L3 decoders; differences
+    /// are LSB-level IMDCT rounding, not signal).
+    #[test]
+    fn decode_real_file_vs_ffmpeg() {
+        let Ok(data) = std::fs::read("/tmp/t.mp3") else {
+            eprintln!("skip: no /tmp/t.mp3 fixture");
+            return;
+        };
+        let Ok(ref_pcm) = std::fs::read("/tmp/ref.pcm") else {
+            eprintln!("skip: no /tmp/ref.pcm");
+            return;
+        };
+
+        let mut params = crate::codec::params::CodecParameters::default();
+        params.codec_id = CodecId::Mp3;
+        let mut dec = Mp3Decoder::new();
+        dec.init(&params).unwrap();
+
+        // Interleave the planar output frames into one stereo f32 stream.
+        let mut out: Vec<f32> = Vec::new();
+        let mut i = 0usize;
+        let mut frames = 0u32;
+        while i + 4 <= data.len() && frames < 200 {
+            let head = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+            if ff_mpa_check_header(head).is_err() {
+                i += 1;
+                continue;
+            }
+            let mut h = MpaDecodeHeader::default();
+            if avpriv_mpegaudio_decode_header(&mut h, head).unwrap() {
+                i += 1; // free format: advance one byte and rescan
+                continue;
+            }
+            let fs = h.frame_size as usize;
+            if i + fs > data.len() {
+                break;
+            }
+            let pkt = crate::codec::packet::Packet::from_vec(data[i..i + fs].to_vec());
+            dec.send_packet(Some(&pkt)).unwrap();
+            while let Ok(f) = dec.receive_frame() {
+                let ch = f.nb_planes();
+                for s in 0..f.nb_samples {
+                    for c in 0..ch {
+                        let b = &f.plane(c)[s * 4..s * 4 + 4];
+                        out.push(f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                    }
+                }
+                frames += 1;
+            }
+            i += fs;
+        }
+        assert!(frames > 20, "decoded only {frames} frames");
+
+        // Middle 90% sample-wise comparison against the s16 reference
+        // (scaled to f32): the encoder loss is common to both decoders.
+        let n_ref = ref_pcm.len() / 4; // interleaved stereo s16
+        let n = out.len().min(n_ref);
+        let skip = n / 20;
+        let mut max_diff = 0.0f32;
+        let mut over = 0usize;
+        for k in skip..n - skip {
+            let r = i16::from_le_bytes([ref_pcm[2 * k], ref_pcm[2 * k + 1]]) as f32 / 32768.0;
+            let d = (out[k] - r).abs();
+            max_diff = max_diff.max(d);
+            if d > 0.02 {
+                over += 1;
+            }
+        }
+        eprintln!("SMOKE: frames={frames} samples={n} max_diff={max_diff:.4} over=/{over}");
+        assert!(
+            over * 1000 < (n - 2 * skip),
+            "{over} samples (of {}) differ by >0.02, max {max_diff:.4}",
+            n - 2 * skip
+        );
+    }
+}
