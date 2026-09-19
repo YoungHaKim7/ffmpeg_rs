@@ -4305,3 +4305,94 @@ mod dsp_probe {
         );
     }
 }
+
+#[cfg(test)]
+mod dct32_c_ref {
+    use super::*;
+    /// Port dct32 vs the C reference vectors (compiled from
+    /// FFmpeg/libavcodec/dct32_template.c float arm by /tmp/cprobe/d32).
+    #[test]
+    fn dct32_matches_c_reference() {
+        let Ok(text) = std::fs::read_to_string("/tmp/cprobe/d32ref.txt") else {
+            eprintln!("skip: no C reference vectors");
+            return;
+        };
+        let mut checked = 0;
+        for line in text.lines().filter(|l| l.starts_with('T')) {
+            let t = line[1..2].parse::<u64>().unwrap() as usize;
+            let vals: Vec<f32> = line[2..]
+                .split_whitespace()
+                .map(|v| v.parse::<f32>().unwrap())
+                .collect();
+            assert_eq!(vals.len(), 32);
+            // same LCG as the C harness
+            let mut x = (t as u64)
+                .wrapping_mul(2654435761)
+                .wrapping_add(12345);
+            let mut tab = [0f32; 32];
+            for v in tab.iter_mut() {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *v = ((x >> 33) as i32 as f32) / 65536.0;
+            }
+            let mut out = [0f32; 32];
+            dct32(&mut out, &tab);
+            for k in 0..32usize {
+                let expect = vals[k];
+                assert!(
+                    (out[k] - expect).abs() < 2e-3 * (1.0 + expect.abs()),
+                    "t={t} k={k}: port {:+e} vs C {expect:+e}",
+                    out[k]
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 5, "vectors loaded: {checked}");
+    }
+}
+
+#[cfg(test)]
+mod apply_window_c_ref {
+    use super::*;
+    /// Port apply_window vs C reference (/tmp/cprobe/awref.txt, compiled
+    /// from mpegaudiodsp_template.c's ff_mpadsp_apply_window float arm).
+    /// Same LCG-filled synth_buf and ramp window as the harness.
+    #[test]
+    fn apply_window_matches_c_reference() {
+        let Ok(text) = std::fs::read_to_string("/tmp/cprobe/awref.txt") else {
+            eprintln!("skip: no C reference vectors");
+            return;
+        };
+        let mut synth_buf = vec![0f32; 1024];
+        let mut x: u64 = 777;
+        for v in synth_buf.iter_mut() {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *v = ((x >> 33) as i32 as f32) / 65536.0;
+        }
+        let window: Vec<f32> = (0..512 + 256).map(|k| k as f32 * 0.001).collect();
+        let mut samples = vec![0f32; 32];
+        let mut dither = 0i32;
+        apply_window(&mut synth_buf, &window, &mut dither, &mut samples, 1);
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix('S') {
+                let c: Vec<f32> = rest.split_whitespace()
+                    .map(|v| v.parse().unwrap()).collect();
+                assert_eq!(c.len(), 32);
+                for k in 0..32 {
+                    assert!(
+                        (samples[k] - c[k]).abs() < 2e-3 * (1.0 + c[k].abs()),
+                        "sample {k}: port {:+e} vs C {:+e}",
+                        samples[k], c[k]
+                    );
+                }
+            }
+            if let Some(rest) = line.strip_prefix("D ") {
+                let cd: i32 = rest.trim().parse().unwrap();
+                assert_eq!(dither, cd, "dither state");
+            }
+        }
+    }
+}
