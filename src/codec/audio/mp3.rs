@@ -4396,3 +4396,72 @@ mod apply_window_c_ref {
         }
     }
 }
+
+#[cfg(test)]
+mod synth_chain_c_ref {
+    use super::*;
+    /// Full synth chain (36 rows: dct32+apply_window with the REAL
+    /// enwindow table and rotation) vs the C reference
+    /// (/tmp/cprobe/synthref.txt). Same LCG rows.
+    #[test]
+    fn synth_chain_matches_c_reference() {
+        let Ok(text) = std::fs::read_to_string("/tmp/cprobe/synthref.txt") else {
+            eprintln!("skip: no C reference vectors");
+            return;
+        };
+        let t = tables();
+        let mut rows = vec![0f32; 36 * 32];
+        let mut x: u64 = 4242;
+        for v in rows.iter_mut() {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *v = ((x >> 33) as i32 as f32) / 65536.0;
+        }
+        let mut synth_buf = vec![0f32; 1024];
+        let mut off = 0usize;
+        let mut dither = 0i32;
+        let mut out = vec![0f32; 36 * 32];
+        for i in 0..36 {
+            mpa_synth_filter(
+                &mut synth_buf,
+                &mut off,
+                &t.synth_window,
+                &mut dither,
+                &mut out[i * 32..(i + 1) * 32],
+                1,
+                &rows[i * 32..(i + 1) * 32],
+            );
+        }
+        let mut checked = 0;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix('R') {
+                let c: Vec<f32> = rest[2..]
+                    .split_whitespace()
+                    .map(|v| v.parse().unwrap())
+                    .collect();
+                let r = rest[..2].parse::<usize>().unwrap();
+                assert_eq!(c.len(), 32, "row {r}");
+                for k in 0..32 {
+                    let got = out[r * 32 + k];
+                    let scale = 1.0 + c[k].abs() + out[0..r * 32].iter().fold(0f32, |m, v| m.max(v.abs()));
+                    assert!(
+                        (got - c[k]).abs() < 3e-3 * scale,
+                        "row {r} k={k}: port {got:+e} vs C {:+e}",
+                        c[k]
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked == 36, "rows checked: {checked}");
+        // OFF line: final rotation offset
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("OFF ") {
+                let mut it = rest.split_whitespace();
+                let c_off: usize = it.next().unwrap().parse().unwrap();
+                assert_eq!(off, c_off, "final synth_buf offset");
+            }
+        }
+    }
+}
