@@ -471,9 +471,10 @@ pub fn codec_id_for_packed_le(fmt: SampleFormat) -> Option<CodecId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::packet::PacketFlags;
-    use crate::util::channel_layout::ChannelLayout;
-    use crate::util::rational::Rational;
+    use crate::{
+        codec::packet::PacketFlags,
+        util::{channel_layout::ChannelLayout, rational::Rational},
+    };
 
     fn params(id: CodecId, channels: usize, rate: i32) -> CodecParameters {
         let mut p = CodecParameters::default();

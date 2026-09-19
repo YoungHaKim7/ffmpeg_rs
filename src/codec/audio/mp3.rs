@@ -824,6 +824,8 @@ struct MpaDecodeCore {
     last_buf_size: usize,
     bs: Bitstream,
     synth_buf: [Vec<f32>; MPA_MAX_CHANNELS],
+    #[cfg(test)]
+    dump_tag: u32,
     synth_buf_offset: [usize; MPA_MAX_CHANNELS],
     sb_samples: [[f32; 36 * SBLIMIT]; MPA_MAX_CHANNELS],
     mdct_buf: [[f32; SBLIMIT * 18]; MPA_MAX_CHANNELS],
@@ -845,6 +847,8 @@ impl MpaDecodeCore {
                 extrasize: 0,
             },
             synth_buf: [Vec::new(), Vec::new()],
+            #[cfg(test)]
+            dump_tag: 0,
             synth_buf_offset: [0; 2],
             sb_samples: [[0.0; 36 * SBLIMIT]; MPA_MAX_CHANNELS],
             mdct_buf: [[0.0; SBLIMIT * 18]; MPA_MAX_CHANNELS],
@@ -1180,6 +1184,16 @@ impl MpaDecodeCore {
                 compute_stereo(self.header.mode_ext, lsf, sri, &mut self.granules, gr);
             }
 
+            if std::env::var("MP3_DUMP").is_ok() && self.dump_tag < 9 {
+                let g = &self.granules[0][gr];
+                let mut prof = String::new();
+                for band in 0..32usize {
+                    let e: f32 = g.sb_hybrid[band*18..band*18+18].iter().map(|v| v*v).sum();
+                    prof.push_str(&format!("{:1.0} ", e*1e6));
+                }
+                let nz = g.sb_hybrid.iter().filter(|v| v.abs() > 1e-9).count(); eprintln!("SBHYB ch0 gr{gr} bt{} sp{} le{} nz={nz}: {prof}", g.block_type, g.switch_point, g.long_end);
+                self.dump_tag += 1;
+            }
             for ch in 0..nch {
                 reorder_block(sri, &mut self.granules[ch][gr]);
                 compute_antialias(&mut self.granules[ch][gr]);
@@ -4203,5 +4217,59 @@ mod smoke {
             "{over} samples (of {}) differ by >0.02, max {max_diff:.4}",
             n - 2 * skip
         );
+    }
+}
+
+#[cfg(test)]
+mod dsp_probe {
+    use super::*;
+    /// Impulse response: one spectral line in sb_hybrid → the IMDCT+synth
+    /// chain must produce a pure tone whose frequency follows the band
+    /// index. Verifies the time-domain chain WITHOUT any bitstream.
+    #[test]
+    fn imdct_synth_impulse_is_pure_tone() {
+        let mut g = GranuleDef::default();
+        g.block_type = 0;
+        g.long_end = 22;
+        g.short_start = 13;
+        // band 3 line 9 (of 18) — mid-band impulse
+        g.sb_hybrid[3 * 18 + 9] = 1.0e5;
+        let mut granules = [[GranuleDef::default(); 2]; 2];
+        granules[0][0] = { let mut x = GranuleDef::default(); x.block_type = 0; x.long_end = 22; x.short_start = 13; x };
+        granules[0][0].sb_hybrid[3 * 18 + 9] = 1.0e5;
+        let mut sb_samples = [[0f32; 36 * SBLIMIT]; MPA_MAX_CHANNELS];
+        let mut mdct_buf = [[0f32; SBLIMIT * 18]; MPA_MAX_CHANNELS];
+        compute_imdct(0, 0, &mut granules, &mut sb_samples, &mut mdct_buf);
+
+        let t = tables();
+        let mut synth_buf = vec![0f32; 1024];
+        let mut off = 0usize;
+        let mut dither = 0i32;
+        let mut out = vec![0f32; 36 * 32];
+        for i in 0..36 {
+            let row = &sb_samples[0][i * SBLIMIT..(i + 1) * SBLIMIT];
+            mpa_synth_filter(&mut synth_buf, &mut off, &t.synth_window, &mut dither, &mut out[i * 32..(i + 1) * 32], 1, row);
+        }
+        // Tone check: consecutive-sample sign-change count over the middle
+        // region. Band 3 ≈ frequencies (3*18+9)/576 * 22050 ≈ 2.4 kHz →
+        // ~0.11 zero-crossings/sample.
+        let mut zc = 0usize;
+        let mut mx = 0f32;
+        for k in 64..1088 {
+            if out[k - 1] <= 0.0 && out[k] > 0.0 { zc += 1; }
+            mx = mx.max(out[k].abs());
+        }
+        eprintln!("IMPULSE: zc={zc} max={mx:.1} first16={:?}", &out[64..80]);
+        // A pure tone at f gives zc ≈ f/22050 * 1024 samples. Band-3 line
+        // → bin 63/576 of Nyquist → f ≈ 63/576*22050 ≈ 2411 Hz → zc ≈ 112.
+        assert!(zc > 80 && zc < 145, "zero crossings {zc} not a ~2.4 kHz tone");
+        assert!(mx > 1.0 && mx < 1e7, "amplitude {mx} plausible for 1e5 line");
+        // Smoothness: no sample should jump more than a tone at Nyquist/2.
+        let mut maxjump = 0f32;
+        for k in 65..1088 {
+            maxjump = maxjump.max((out[k] - out[k - 1]).abs());
+        }
+        eprintln!("IMPULSE: maxjump={maxjump:.1} (mx={mx:.1}, ratio {:.3})", maxjump / mx);
+        assert!(maxjump < mx * 0.7, "waveform not smooth: jump {maxjump} vs max {mx}");
     }
 }
