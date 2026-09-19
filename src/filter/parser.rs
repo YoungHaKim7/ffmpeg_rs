@@ -89,8 +89,10 @@ use crate::{
     util::error::{Error, Result},
 };
 
-use super::link::NodeId;
-use super::{FilterDef, FilterGraph, InOut, Options, filter_def};
+use super::{
+    link::NodeId,
+    {FilterDef, FilterGraph, InOut, Options, filter_def},
+};
 
 // ---------------------------------------------------------------------------
 // Segment data model (avfilter.h:820-941) — the parsed intermediate form
@@ -1089,9 +1091,21 @@ pub fn parse_ptr(g: &mut FilterGraph, desc: &str) -> Result<(Vec<InOut>, Vec<InO
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::graph::engine_test_helpers::run_to_quiescence;
-    use crate::filter::{FilterFlags, filter};
-    use crate::util::frame::Frame;
+    use crate::{
+        filter::{
+            graph::engine_test_helpers::run_to_quiescence,
+            {FilterFlags, filter},
+        },
+        util::frame::Frame,
+    };
+    static W_DEF: FilterDef = FilterDef {
+        name: "wtest",
+        inputs: &[],
+        outputs: &[],
+        flags: FilterFlags(0),
+        shorthand: &["w"],
+        make: || Box::new(Noop),
+    };
 
     /// A minimal def with one shorthand slot, for `filter_opt_parse` rules.
     struct Noop;
@@ -1106,14 +1120,6 @@ mod tests {
             Ok(())
         }
     }
-    static W_DEF: FilterDef = FilterDef {
-        name: "wtest",
-        inputs: &[],
-        outputs: &[],
-        flags: FilterFlags(0),
-        shorthand: &["w"],
-        make: || Box::new(Noop),
-    };
 
     fn invalid_arg<T: std::fmt::Debug>(res: Result<T>) -> String {
         match res {
