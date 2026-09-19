@@ -4326,9 +4326,7 @@ mod dct32_c_ref {
                 .collect();
             assert_eq!(vals.len(), 32);
             // same LCG as the C harness
-            let mut x = (t as u64)
-                .wrapping_mul(2654435761)
-                .wrapping_add(12345);
+            let mut x = (t as u64).wrapping_mul(2654435761).wrapping_add(12345);
             let mut tab = [0f32; 32];
             for v in tab.iter_mut() {
                 x = x
@@ -4378,14 +4376,17 @@ mod apply_window_c_ref {
         apply_window(&mut synth_buf, &window, &mut dither, &mut samples, 1);
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix('S') {
-                let c: Vec<f32> = rest.split_whitespace()
-                    .map(|v| v.parse().unwrap()).collect();
+                let c: Vec<f32> = rest
+                    .split_whitespace()
+                    .map(|v| v.parse().unwrap())
+                    .collect();
                 assert_eq!(c.len(), 32);
                 for k in 0..32 {
                     assert!(
                         (samples[k] - c[k]).abs() < 2e-3 * (1.0 + c[k].abs()),
                         "sample {k}: port {:+e} vs C {:+e}",
-                        samples[k], c[k]
+                        samples[k],
+                        c[k]
                     );
                 }
             }
@@ -4444,7 +4445,8 @@ mod synth_chain_c_ref {
                 assert_eq!(c.len(), 32, "row {r}");
                 for k in 0..32 {
                     let got = out[r * 32 + k];
-                    let scale = 1.0 + c[k].abs() + out[0..r * 32].iter().fold(0f32, |m, v| m.max(v.abs()));
+                    let scale =
+                        1.0 + c[k].abs() + out[0..r * 32].iter().fold(0f32, |m, v| m.max(v.abs()));
                     assert!(
                         (got - c[k]).abs() < 3e-3 * scale,
                         "row {r} k={k}: port {got:+e} vs C {:+e}",
