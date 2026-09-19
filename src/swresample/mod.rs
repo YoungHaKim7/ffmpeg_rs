@@ -2377,8 +2377,10 @@ impl Drop for SwrContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::audio_frame::AudioFrame;
-    use crate::util::mathematics::{Rounding, rescale_rnd};
+    use crate::util::{
+        audio_frame::AudioFrame,
+        mathematics::{Rounding, rescale_rnd},
+    };
 
     // -- helpers --------------------------------------------------------------
 
