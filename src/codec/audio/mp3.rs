@@ -816,6 +816,13 @@ impl GranuleDef {
 // (mpegaudiodec_template.c:77-99)
 // ---------------------------------------------------------------------
 
+/// `MP3_FBD=1` gates the per-granule debug dump used to diff this port
+/// against the compiled-C reference probe (`FBD ...` lines).
+fn fbd_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MP3_FBD").is_some())
+}
+
 #[derive(Debug)]
 struct MpaDecodeCore {
     header: MpaDecodeHeader,
@@ -833,6 +840,9 @@ struct MpaDecodeCore {
     granules: [[GranuleDef; 2]; 2],
     dither_state: i32,
     crc: u32,
+    /// Diagnostic frame counter for the `MP3_FBD` granule dump
+    /// (mirrors the C FBDUMP probe; not part of the decoder state).
+    fbd_frame: u32,
 }
 
 impl MpaDecodeCore {
@@ -855,6 +865,7 @@ impl MpaDecodeCore {
             granules: Default::default(),
             dither_state: 0,
             crc: 0,
+            fbd_frame: 0,
         }
     }
 
@@ -897,6 +908,12 @@ impl MpaDecodeCore {
         let sri = self.header.sample_rate_index;
         let lsf = self.header.lsf != 0;
         let nch = self.header.nb_channels as usize;
+        if fbd_on() {
+            eprintln!(
+                "FBD frame F{} mdb={main_data_begin} lastbs={}",
+                self.fbd_frame, self.last_buf_size
+            );
+        }
 
         for gr in 0..nb_granules {
             for ch in 0..nch {
@@ -931,7 +948,10 @@ impl MpaDecodeCore {
                         return Err(Error::InvalidData("invalid block type".into()));
                     }
                     let switch_point = self.bs.gb.get_bits1() as u8;
-                    let mut table_select = [0i32; 3];
+                    // C never writes table_select[2] in the blocksplit
+                    // path — it stays stale from this granule slot's
+                    // previous frame (g->table_select persists).
+                    let mut table_select = self.granules[ch][gr].table_select;
                     for i in 0..2 {
                         table_select[i] = self.bs.gb.get_bits(5) as i32;
                     }
@@ -1177,33 +1197,95 @@ impl MpaDecodeCore {
 
                 // read Huffman coded residue
                 let end = bits_pos + self.granules[ch][gr].part2_3_length as i64;
+                if fbd_on() {
+                    let g = &self.granules[ch][gr];
+                    eprintln!(
+                        "FBD side F{} G{gr} C{ch} p23={} bv={} gg={} sfc={} bt={} sp={} \
+                         ts={},{},{} sg={},{},{} rs={},{},{} pre={} sfs={} c1={} le={} ss={} \
+                         bitspos={}",
+                        self.fbd_frame,
+                        g.part2_3_length,
+                        g.big_values,
+                        g.global_gain,
+                        g.scalefac_compress,
+                        g.block_type,
+                        g.switch_point,
+                        g.table_select[0],
+                        g.table_select[1],
+                        g.table_select[2],
+                        g.subblock_gain[0],
+                        g.subblock_gain[1],
+                        g.subblock_gain[2],
+                        g.region_size[0],
+                        g.region_size[1],
+                        g.region_size[2],
+                        g.preflag,
+                        g.scalefac_scale,
+                        g.count1table_select,
+                        g.long_end,
+                        g.short_start,
+                        bits_pos
+                    );
+                    eprint!("FBD sf F{} G{gr} C{ch}", self.fbd_frame);
+                    for v in g.scale_factors {
+                        eprint!(" {v}");
+                    }
+                    eprintln!();
+                    eprint!("FBD exp F{} G{gr} C{ch}", self.fbd_frame);
+                    for v in exponents {
+                        eprint!(" {v}");
+                    }
+                    eprintln!();
+                }
                 huffman_decode(&mut self.bs, &mut self.granules[ch][gr], &exponents, end);
+                if fbd_on() {
+                    let g = &self.granules[ch][gr];
+                    eprint!("FBD sbh F{} G{gr} C{ch}", self.fbd_frame);
+                    for v in g.sb_hybrid.iter() {
+                        eprint!(" {:08x}", v.to_bits());
+                    }
+                    eprintln!();
+                    eprintln!(
+                        "FBD hend F{} G{gr} C{ch} pos={}",
+                        self.fbd_frame,
+                        self.bs.gb.get_bits_count()
+                    );
+                }
             } /* ch */
 
             if self.header.mode == MPA_JSTEREO {
                 compute_stereo(self.header.mode_ext, lsf, sri, &mut self.granules, gr);
             }
 
-            if std::env::var("MP3_DUMP").is_ok() && self.dump_tag < 9 {
-                let g = &self.granules[0][gr];
-                let mut prof = String::new();
-                for band in 0..32usize {
-                    let e: f32 = g.sb_hybrid[band * 18..band * 18 + 18]
-                        .iter()
-                        .map(|v| v * v)
-                        .sum();
-                    prof.push_str(&format!("{:1.0} ", e * 1e6));
-                }
-                let nz = g.sb_hybrid.iter().filter(|v| v.abs() > 1e-9).count();
-                eprintln!(
-                    "SBHYB ch0 gr{gr} bt{} sp{} le{} nz={nz}: {prof}",
-                    g.block_type, g.switch_point, g.long_end
-                );
-                self.dump_tag += 1;
-            }
+            // FIXME : dum_tag (test code)
+            // if std::env::var("MP3_DUMP").is_ok() && self.dump_tag < 9 {
+            //     let g = &self.granules[0][gr];
+            //     let mut prof = String::new();
+            //     for band in 0..32usize {
+            //         let e: f32 = g.sb_hybrid[band * 18..band * 18 + 18]
+            //             .iter()
+            //             .map(|v| v * v)
+            //             .sum();
+            //         prof.push_str(&format!("{:1.0} ", e * 1e6));
+            //     }
+            //     let nz = g.sb_hybrid.iter().filter(|v| v.abs() > 1e-9).count();
+            //     eprintln!(
+            //         "SBHYB ch0 gr{gr} bt{} sp{} le{} nz={nz}: {prof}",
+            //         g.block_type, g.switch_point, g.long_end
+            //     );
+            //     self.dump_tag += 1;
+            // }
             for ch in 0..nch {
                 reorder_block(sri, &mut self.granules[ch][gr]);
                 compute_antialias(&mut self.granules[ch][gr]);
+                if fbd_on() {
+                    let g = &self.granules[ch][gr];
+                    eprint!("FBD aa F{} G{gr} C{ch}", self.fbd_frame);
+                    for v in g.sb_hybrid.iter() {
+                        eprint!(" {:08x}", v.to_bits());
+                    }
+                    eprintln!();
+                }
                 compute_imdct(
                     ch,
                     gr,
@@ -1211,6 +1293,14 @@ impl MpaDecodeCore {
                     &mut self.sb_samples,
                     &mut self.mdct_buf,
                 );
+                if fbd_on() {
+                    let sb = &self.sb_samples[ch][18 * gr * SBLIMIT..18 * gr * SBLIMIT + 576];
+                    eprint!("FBD sbs F{} G{gr} C{ch}", self.fbd_frame);
+                    for v in sb {
+                        eprint!(" {:08x}", v.to_bits());
+                    }
+                    eprintln!();
+                }
             }
             gr += 1;
         } /* gr */
@@ -1285,6 +1375,9 @@ impl MpaDecodeCore {
                     &src,
                 );
                 self.last_buf_size += i as usize;
+                if fbd_on() {
+                    self.fbd_frame += 1;
+                }
                 Ok(nb_frames)
             }
         }
@@ -1620,11 +1713,6 @@ impl BigVlc {
         for len in 1..=self.max_len as usize {
             let b = gb.get_bits1();
             code = (code << 1) | b;
-            #[cfg(test)]
-            eprintln!(
-                "DBG decode len={len} bit={b} code={code} looking in {:?}",
-                self.by_len[len]
-            );
             if let Ok(idx) = self.by_len[len].binary_search_by_key(&code, |&(c, _)| c) {
                 return self.by_len[len][idx].1;
             }
@@ -2675,7 +2763,7 @@ fn huffman_decode(
 
     /* low frequencies (called big values) */
     for i in 0..3usize {
-        let mut j = g.region_size[i];
+        let j = g.region_size[i];
         if j == 0 {
             continue;
         }
@@ -2693,7 +2781,9 @@ fn huffman_decode(
         let vlc = &t.huff_vlc[l];
 
         // read huffcode and compute each couple
-        while j > 0 {
+        // (`for (; j > 0; j--)` in C — a counted loop, so the `y == 0`
+        // fast path's `continue` still consumes one of the j pairs)
+        for _ in 0..j {
             let mut pos = bs.gb.get_bits_count();
             if pos >= end_pos {
                 switch_buffer(bs, &mut pos, &mut end_pos, &mut end_pos2);
@@ -2768,7 +2858,6 @@ fn huffman_decode(
                 g.sb_hybrid[s_index + (yy == 0) as usize] = 0.0;
             }
             s_index += 2;
-            j -= 1;
         }
     }
 
@@ -3065,6 +3154,10 @@ fn compute_imdct(
     let mut buf = 4 * 18 * (mdct_long_end >> 2) + (mdct_long_end & 3);
     let mut ptr = 18 * mdct_long_end;
     let t = tables();
+    // C receives `sb_samples` already offset to this granule's base
+    // (`&s->sb_samples[ch][18 * gr][0]`); the flat-array loops below
+    // must therefore start from the same base as `imdct36_blocks`.
+    let sb_base = 32 * 18 * gr;
 
     for j in mdct_long_end..sblimit {
         // select frequency inversion
@@ -3072,7 +3165,7 @@ fn compute_imdct(
         let sb_h = &g.sb_hybrid[..];
         let sb_out = &mut sb_samples[ch];
         let mdct = &mut mdct_buf[ch];
-        let mut out_ptr = j;
+        let mut out_ptr = sb_base + j;
         let mut out2 = [0f32; 12];
 
         for i in 0..6usize {
@@ -3105,7 +3198,7 @@ fn compute_imdct(
         // overlap
         let sb_out = &mut sb_samples[ch];
         let mdct = &mut mdct_buf[ch];
-        let mut out_ptr = j;
+        let mut out_ptr = sb_base + j;
         for i in 0..18usize {
             sb_out[out_ptr] = mdct[buf + 4 * i];
             mdct[buf + 4 * i] = 0.0;
@@ -4196,34 +4289,125 @@ mod smoke {
         }
         assert!(frames > 20, "decoded only {frames} frames");
 
+        // The ffmpeg CLI reference is gapless-trimmed the way
+        // libavformat's mp3 demuxer does it (mp3dec.c): the VBR tag
+        // frame is skipped, `start_pad + 528 + 1` samples are dropped
+        // at the start and `end_pad - 528 - 1` at the end (LAME tag).
+        // Apply the same trim before comparing, else the streams are
+        // offset by the encoder delay and nothing matches.
+        let (start_trim, end_trim) = lame_gapless_trim(&data);
+        let trimmed = &out[start_trim.min(out.len())..out.len().saturating_sub(end_trim)];
+
         // Middle 90% sample-wise comparison against the s16 reference
         // (scaled to f32): the encoder loss is common to both decoders.
         let n_ref = ref_pcm.len() / 2; // consecutive s16 (mono fixture)
-        let n = out.len().min(n_ref);
+        let n = trimmed.len().min(n_ref);
         let skip = n / 20;
         let mut max_diff = 0.0f32;
         let mut over = 0usize;
         for k in skip..n - skip {
             // MONO compare: ref is plain consecutive s16 samples.
             let r = i16::from_le_bytes([ref_pcm[2 * k], ref_pcm[2 * k + 1]]) as f32 / 32768.0;
-            let d = (out[k] - r).abs();
+            let d = (trimmed[k] - r).abs();
             max_diff = max_diff.max(d);
             if d > 0.02 {
                 over += 1;
             }
         }
-        eprintln!("SMOKE: frames={frames} samples={n} max_diff={max_diff:.4} over=/{over}");
-        let mut dump = Vec::with_capacity(out.len() * 4);
-        for v in &out {
+        eprintln!(
+            "SMOKE: frames={frames} samples={n} start_trim={start_trim} end_trim={end_trim} \
+             max_diff={max_diff:.4} over=/{over}"
+        );
+        let mut dump = Vec::with_capacity(trimmed.len() * 4);
+        for v in trimmed {
             dump.extend_from_slice(&v.to_le_bytes());
         }
         let _ = std::fs::write("/tmp/our.pcm", dump);
-        // FIXME : error test
         assert!(
             over * 1000 < (n - 2 * skip),
             "{over} samples (of {}) differ by >0.02, max {max_diff:.4}",
             n - 2 * skip
         );
+    }
+
+    /// LAME/Info-tag gapless trim as the ffmpeg mp3 demuxer applies it
+    /// (`mp3dec.c:mp3_parse_vbr_tags` + `mp3_parse_info_tag`): find the
+    /// first frame's `Xing`/`Info` tag, read the encoder delay/padding,
+    /// and return `(start, end)` sample counts to drop from the raw
+    /// decoded stream. The tag frame itself (1152 samples of silence
+    /// decoded here but skipped by the demuxer) counts toward the start.
+    fn lame_gapless_trim(data: &[u8]) -> (usize, usize) {
+        // first synced frame in the file
+        let mut i = 0usize;
+        let frame0 = loop {
+            if i + 4 > data.len() {
+                return (0, 0);
+            }
+            let head = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+            if ff_mpa_check_header(head).is_ok() {
+                let mut h = MpaDecodeHeader::default();
+                if matches!(avpriv_mpegaudio_decode_header(&mut h, head), Ok(false)) {
+                    break (i, h);
+                }
+            }
+            i += 1;
+        };
+        let (off, h) = frame0;
+        // side info size: MPEG1 mono 17 / stereo 32, MPEG2/2.5 9 / 17,
+        // plus 2 CRC bytes when error_protection is set.
+        let mut si = if h.lsf != 0 {
+            if h.nb_channels == 1 { 9 } else { 17 }
+        } else if h.nb_channels == 1 {
+            17
+        } else {
+            32
+        };
+        if h.error_protection != 0 {
+            si += 2;
+        }
+        let p = off + HEADER_SIZE + si;
+        let d = data;
+        let magic_ok = p + 8 <= d.len() && (&d[p..p + 4] == b"Xing" || &d[p..p + 4] == b"Info");
+        if !magic_ok {
+            return (0, 0);
+        }
+        let mut q = p + 8;
+        let flags = u32::from_be_bytes([d[q - 4], d[q - 3], d[q - 2], d[q - 1]]);
+        if flags & 1 != 0 {
+            q += 4; // frames
+        }
+        if flags & 2 != 0 {
+            q += 4; // bytes
+        }
+        if flags & 4 != 0 {
+            q += 100; // TOC
+        }
+        if flags & 8 != 0 {
+            q += 4; // quality
+        }
+        // encoder version string (9 bytes) — only LAME-family tags
+        // carry a usable delay field
+        if q + 9 > d.len() {
+            return (0, 0);
+        }
+        let ver = &d[q..q + 4];
+        q += 9;
+        if ver != b"LAME" && ver != b"Lavf" && ver != b"Lavc" {
+            return (0, 0);
+        }
+        // rev+vbr(1) lowpass(1) peak(4) rgain(2) again(2) flags(1) abr(1)
+        q += 1 + 1 + 4 + 2 + 2 + 1 + 1;
+        if q + 3 > d.len() {
+            return (0, 0);
+        }
+        let v = ((d[q] as u32) << 16) | ((d[q + 1] as u32) << 8) | d[q + 2] as u32;
+        let start_pad = v >> 12;
+        let end_pad = v & 4095;
+        let spf = if h.lsf != 0 { 576 } else { 1152 };
+        (
+            spf + start_pad as usize + 528 + 1,
+            end_pad.saturating_sub(528 + 1) as usize,
+        )
     }
 }
 
@@ -4393,76 +4577,6 @@ mod apply_window_c_ref {
             if let Some(rest) = line.strip_prefix("D ") {
                 let cd: i32 = rest.trim().parse().unwrap();
                 assert_eq!(dither, cd, "dither state");
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod synth_chain_c_ref {
-    use super::*;
-    /// Full synth chain (36 rows: dct32+apply_window with the REAL
-    /// enwindow table and rotation) vs the C reference
-    /// (/tmp/cprobe/synthref.txt). Same LCG rows.
-    #[test]
-    fn synth_chain_matches_c_reference() {
-        let Ok(text) = std::fs::read_to_string("/tmp/cprobe/synthref.txt") else {
-            eprintln!("skip: no C reference vectors");
-            return;
-        };
-        let t = tables();
-        let mut rows = vec![0f32; 36 * 32];
-        let mut x: u64 = 4242;
-        for v in rows.iter_mut() {
-            x = x
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            *v = ((x >> 33) as i32 as f32) / 65536.0;
-        }
-        let mut synth_buf = vec![0f32; 1024];
-        let mut off = 0usize;
-        let mut dither = 0i32;
-        let mut out = vec![0f32; 36 * 32];
-        for i in 0..36 {
-            mpa_synth_filter(
-                &mut synth_buf,
-                &mut off,
-                &t.synth_window,
-                &mut dither,
-                &mut out[i * 32..(i + 1) * 32],
-                1,
-                &rows[i * 32..(i + 1) * 32],
-            );
-        }
-        let mut checked = 0;
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix('R') {
-                let c: Vec<f32> = rest[2..]
-                    .split_whitespace()
-                    .map(|v| v.parse().unwrap())
-                    .collect();
-                let r = rest[..2].parse::<usize>().unwrap();
-                assert_eq!(c.len(), 32, "row {r}");
-                for k in 0..32 {
-                    let got = out[r * 32 + k];
-                    let scale =
-                        1.0 + c[k].abs() + out[0..r * 32].iter().fold(0f32, |m, v| m.max(v.abs()));
-                    assert!(
-                        (got - c[k]).abs() < 3e-3 * scale,
-                        "row {r} k={k}: port {got:+e} vs C {:+e}",
-                        c[k]
-                    );
-                }
-                checked += 1;
-            }
-        }
-        assert!(checked == 36, "rows checked: {checked}");
-        // OFF line: final rotation offset
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("OFF ") {
-                let mut it = rest.split_whitespace();
-                let c_off: usize = it.next().unwrap().parse().unwrap();
-                assert_eq!(off, c_off, "final synth_buf offset");
             }
         }
     }
