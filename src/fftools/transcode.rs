@@ -639,8 +639,52 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
     let in_st = ictx.streams[0].clone();
 
     // ---- decoder ----------------------------------------------------------
-    let mut decoder = PcmDecoder::new();
-    decoder.init(&in_st.codecpar)?;
+    // Codec dispatch: PCM family direct, MP3 through Mp3Decoder (FLTP
+    // out, resampled to the output format below like every source).
+    let mut pcm_decoder;
+    let mut mp3_decoder;
+    enum AnyDecoder<'a> {
+        Pcm(&'a mut PcmDecoder),
+        Mp3(&'a mut crate::codec::audio::mp3::Mp3Decoder),
+    }
+    impl AnyDecoder<'_> {
+        fn init(&mut self, p: &CodecParameters) -> Result<()> {
+            match self {
+                AnyDecoder::Pcm(d) => AudioDecoder::init(*d, p),
+                AnyDecoder::Mp3(d) => AudioDecoder::init(*d, p),
+            }
+        }
+        fn send_packet(&mut self, p: Option<&Packet>) -> Result<()> {
+            match self {
+                AnyDecoder::Pcm(d) => AudioDecoder::send_packet(*d, p),
+                AnyDecoder::Mp3(d) => AudioDecoder::send_packet(*d, p),
+            }
+        }
+        fn receive_frame(&mut self) -> Result<crate::util::audio_frame::AudioFrame> {
+            match self {
+                AnyDecoder::Pcm(d) => AudioDecoder::receive_frame(*d),
+                AnyDecoder::Mp3(d) => AudioDecoder::receive_frame(*d),
+            }
+        }
+    }
+    let mut decoder = match in_st.codecpar.codec_id {
+        CodecId::Mp1 | CodecId::Mp2 | CodecId::Mp3 => {
+            mp3_decoder = crate::codec::audio::mp3::Mp3Decoder::new();
+            AudioDecoder::init(&mut mp3_decoder, &in_st.codecpar)?;
+            AnyDecoder::Mp3(&mut mp3_decoder)
+        }
+        id if crate::codec::audio::pcm::sample_fmt(id).is_some() => {
+            pcm_decoder = PcmDecoder::new();
+            AudioDecoder::init(&mut pcm_decoder, &in_st.codecpar)?;
+            AnyDecoder::Pcm(&mut pcm_decoder)
+        }
+        id => {
+            return Err(Error::Unsupported(format!(
+                "no decoder for codec '{}' on this path",
+                id.name()
+            )));
+        }
+    };
 
     // ---- output parameters (ffmpeg_filter.c's ofilter for audio) ----------
     let out_rate = cli.output_sample_rate.unwrap_or(in_st.codecpar.sample_rate);
@@ -658,7 +702,14 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
             }
         }
     };
-    let out_fmt = cli_sample_fmt(cli, in_st.codecpar.sample_fmt)?;
+    // ffmpeg defaults mp3→wav to pcm_s16le; the FLTP that MP3 decoding
+    // produces converts through swresample like any other mismatch.
+    let fallback = if in_st.codecpar.sample_fmt.is_planar() {
+        crate::util::samplefmt::SampleFormat::S16
+    } else {
+        in_st.codecpar.sample_fmt
+    };
+    let out_fmt = cli_sample_fmt(cli, fallback)?;
     let codec_id = codec_id_for_packed_le(out_fmt)
         .ok_or_else(|| Error::Unsupported(format!("no PCM codec for '{}'", out_fmt.name())))?;
 

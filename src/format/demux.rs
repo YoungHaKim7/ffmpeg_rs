@@ -42,6 +42,13 @@ pub static INPUT_FORMATS: &[InputFormat] = &[
         make: |_| Box::new(super::wav::WavDemuxer::new()),
     },
     InputFormat {
+        name: "mp3",
+        long_name: "MP3 (MPEG audio layer 3)",
+        extensions: &["mp3"],
+        probe: Some(super::mp3::probe),
+        make: |_| Box::new(super::mp3::Mp3Demuxer::new()),
+    },
+    InputFormat {
         name: "nut",
         long_name: "NUT",
         extensions: &["nut"],

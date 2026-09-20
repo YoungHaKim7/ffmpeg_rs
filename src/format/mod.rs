@@ -26,6 +26,7 @@
 
 pub mod demux;
 pub mod io;
+pub mod mp3;
 pub mod mux;
 pub mod nut;
 pub mod rawvideo;
