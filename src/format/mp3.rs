@@ -51,121 +51,14 @@ const MP3_MASK: u32 = 0xfffe_0cc0;
 /// `MPA_MAX_CODED_FRAME_SIZE` (mpegaudio.h): free-format read cap.
 const MPA_MAX_CODED_FRAME_SIZE: usize = 2880;
 
-/// ID3v2 magic `ff_id3v2_match` (id3v2.h/c): "ID3" + version ≠ 0xff.
-fn id3v2_match(buf: &[u8]) -> bool {
-    buf.len() >= 10
-        && buf[0] == b'I'
-        && buf[1] == b'D'
-        && buf[2] == b'3'
-        && buf[3] != 0xff
-        && buf[4] != 0xff
-}
-
-/// `get_size` (id3v2.c:210-217): 7-bit-per-byte syncsafe size.
-fn id3v2_tag_len(buf: &[u8]) -> usize {
-    ((buf[6] as usize & 0x7f) << 21)
-        | ((buf[7] as usize & 0x7f) << 14)
-        | ((buf[8] as usize & 0x7f) << 7)
-        | (buf[9] as usize & 0x7f) + 10
-}
-
-/// `ff_id3v2_skip` shape: consume the whole tag (header + body + footer).
-/// Returns the total tag length.
-fn skip_id3v2(io: &mut IoContext) -> Result<usize> {
-    let mut head = [0u8; 10];
-    read_full(io, &mut head)?;
-    let len = id3v2_tag_len(&head);
-    let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
-    io.seek(io.tell() + (len - 10 + footer) as u64)?;
-    Ok(len + footer)
-}
-
-/// `io.read` until the buffer is full; Err(Eof) if it runs dry mid-way
-/// (C's avio_read + short-check).
-fn read_full(io: &mut IoContext, buf: &mut [u8]) -> Result<()> {
-    let mut got = 0;
-    while got < buf.len() {
-        match io.read(&mut buf[got..])? {
-            0 => return Err(Error::Eof),
-            n => got += n,
-        }
-    }
-    Ok(())
-}
-
-/// `check()` (mp3dec.c:536-559): header at `pos` → (header, frame size),
-/// Err(Eof) past the end, Err(_) for a non-frame.
-fn check_at(io: &mut IoContext, pos: u64) -> Result<(u32, usize)> {
-    io.seek(pos)?;
-    let mut hb = [0u8; 4];
-    read_full(io, &mut hb)?;
-    let header = u32::from_be_bytes(hb);
-    ff_mpa_check_header(header)?;
-    let mut h = MpaDecodeHeader::default();
-    if avpriv_mpegaudio_decode_header(&mut h, header)? {
-        return Err(Error::InvalidData("free-format frame".into()));
-    }
-    Ok((header, h.frame_size as usize))
-}
-
-/// `mp3_read_probe` (mp3dec.c:70-137): scan for runs of consecutive
-/// valid frame headers; score by run length. The header-emulation guard
-/// (positions inside the frame that mask-match the header) is simplified
-/// to a length-only check — the guard exists to reject MPEG *video*
-/// streams, which none of this port's other demuxers produce.
-pub fn probe(buf: &[u8]) -> u32 {
-    if buf.len() < 4 {
-        return 0;
-    }
-    let end = buf.len().saturating_sub(4);
-    let mut buf0 = 0;
-    while buf0 < end && buf[buf0] == 0 {
-        buf0 += 1;
-    }
-    let mut max_frames = 0usize;
-    let mut max_framesizes = 0usize;
-    let mut first_frames = 0usize;
-    let mut b = buf0;
-    while b < end {
-        let mut b2 = b;
-        let mut frames = 0usize;
-        let mut framesizes = 0usize;
-        while b2 < end {
-            let header = u32::from_be_bytes([buf[b2], buf[b2 + 1], buf[b2 + 2], buf[b2 + 3]]);
-            let mut h = MpaDecodeHeader::default();
-            if !matches!(avpriv_mpegaudio_decode_header(&mut h, header), Ok(false)) {
-                break;
-            }
-            framesizes += h.frame_size as usize;
-            frames += 1;
-            if (h.frame_size as usize) > end - b2 {
-                break; // frame would run past the buffer
-            }
-            b2 += h.frame_size as usize;
-        }
-        if b == buf0 {
-            first_frames = frames;
-        }
-        max_frames = max_frames.max(frames);
-        max_framesizes = max_framesizes.max(framesizes);
-        b += 1;
-    }
-    // Score tiers (mp3dec.c:127-137); the registry's >50 threshold makes
-    // the extension+2 tier the one that actually wins.
-    if first_frames >= 7 {
-        52
-    } else if max_frames > 200 && buf.len() < 2 * max_framesizes {
-        50
-    } else if max_frames >= 4 && buf.len() < 2 * max_framesizes {
-        25
-    } else if id3v2_match(&buf[buf0.min(buf.len() - 10)..]) {
-        13
-    } else if max_frames >= 1 && buf.len() < 10 * max_framesizes {
-        1
-    } else {
-        0
-    }
-}
+/// The registry row (`ff_mp3_demuxer`).
+pub static MP3_INPUT_FORMAT: InputFormat = InputFormat {
+    name: "mp3",
+    long_name: "MP3 (MPEG audio layer 3)",
+    extensions: &["mp3"],
+    probe: Some(probe),
+    make: |_opts: &DemuxOptions| Box::new(Mp3Demuxer::new()),
+};
 
 /// The demuxer state: first header's mask + running sample stamps.
 pub struct Mp3Demuxer {
@@ -293,14 +186,121 @@ impl Demuxer for Mp3Demuxer {
     }
 }
 
-/// The registry row (`ff_mp3_demuxer`).
-pub static MP3_INPUT_FORMAT: InputFormat = InputFormat {
-    name: "mp3",
-    long_name: "MP3 (MPEG audio layer 3)",
-    extensions: &["mp3"],
-    probe: Some(probe),
-    make: |_opts: &DemuxOptions| Box::new(Mp3Demuxer::new()),
-};
+/// ID3v2 magic `ff_id3v2_match` (id3v2.h/c): "ID3" + version ≠ 0xff.
+fn id3v2_match(buf: &[u8]) -> bool {
+    buf.len() >= 10
+        && buf[0] == b'I'
+        && buf[1] == b'D'
+        && buf[2] == b'3'
+        && buf[3] != 0xff
+        && buf[4] != 0xff
+}
+
+/// `get_size` (id3v2.c:210-217): 7-bit-per-byte syncsafe size.
+fn id3v2_tag_len(buf: &[u8]) -> usize {
+    ((buf[6] as usize & 0x7f) << 21)
+        | ((buf[7] as usize & 0x7f) << 14)
+        | ((buf[8] as usize & 0x7f) << 7)
+        | (buf[9] as usize & 0x7f) + 10
+}
+
+/// `ff_id3v2_skip` shape: consume the whole tag (header + body + footer).
+/// Returns the total tag length.
+fn skip_id3v2(io: &mut IoContext) -> Result<usize> {
+    let mut head = [0u8; 10];
+    read_full(io, &mut head)?;
+    let len = id3v2_tag_len(&head);
+    let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
+    io.seek(io.tell() + (len - 10 + footer) as u64)?;
+    Ok(len + footer)
+}
+
+/// `io.read` until the buffer is full; Err(Eof) if it runs dry mid-way
+/// (C's avio_read + short-check).
+fn read_full(io: &mut IoContext, buf: &mut [u8]) -> Result<()> {
+    let mut got = 0;
+    while got < buf.len() {
+        match io.read(&mut buf[got..])? {
+            0 => return Err(Error::Eof),
+            n => got += n,
+        }
+    }
+    Ok(())
+}
+
+/// `check()` (mp3dec.c:536-559): header at `pos` → (header, frame size),
+/// Err(Eof) past the end, Err(_) for a non-frame.
+fn check_at(io: &mut IoContext, pos: u64) -> Result<(u32, usize)> {
+    io.seek(pos)?;
+    let mut hb = [0u8; 4];
+    read_full(io, &mut hb)?;
+    let header = u32::from_be_bytes(hb);
+    ff_mpa_check_header(header)?;
+    let mut h = MpaDecodeHeader::default();
+    if avpriv_mpegaudio_decode_header(&mut h, header)? {
+        return Err(Error::InvalidData("free-format frame".into()));
+    }
+    Ok((header, h.frame_size as usize))
+}
+
+/// `mp3_read_probe` (mp3dec.c:70-137): scan for runs of consecutive
+/// valid frame headers; score by run length. The header-emulation guard
+/// (positions inside the frame that mask-match the header) is simplified
+/// to a length-only check — the guard exists to reject MPEG *video*
+/// streams, which none of this port's other demuxers produce.
+pub fn probe(buf: &[u8]) -> u32 {
+    if buf.len() < 4 {
+        return 0;
+    }
+    let end = buf.len().saturating_sub(4);
+    let mut buf0 = 0;
+    while buf0 < end && buf[buf0] == 0 {
+        buf0 += 1;
+    }
+    let mut max_frames = 0usize;
+    let mut max_framesizes = 0usize;
+    let mut first_frames = 0usize;
+    let mut b = buf0;
+    while b < end {
+        let mut b2 = b;
+        let mut frames = 0usize;
+        let mut framesizes = 0usize;
+        while b2 < end {
+            let header = u32::from_be_bytes([buf[b2], buf[b2 + 1], buf[b2 + 2], buf[b2 + 3]]);
+            let mut h = MpaDecodeHeader::default();
+            if !matches!(avpriv_mpegaudio_decode_header(&mut h, header), Ok(false)) {
+                break;
+            }
+            framesizes += h.frame_size as usize;
+            frames += 1;
+            if (h.frame_size as usize) > end - b2 {
+                break; // frame would run past the buffer
+            }
+            b2 += h.frame_size as usize;
+        }
+        if b == buf0 {
+            first_frames = frames;
+        }
+        max_frames = max_frames.max(frames);
+        max_framesizes = max_framesizes.max(framesizes);
+        b += 1;
+    }
+    // Score tiers (mp3dec.c:127-137); the registry's >50 threshold makes
+    // the extension+2 tier the one that actually wins.
+    if first_frames >= 7 {
+        52
+    } else if max_frames > 200 && buf.len() < 2 * max_framesizes {
+        50
+    } else if max_frames >= 4 && buf.len() < 2 * max_framesizes {
+        25
+    } else if id3v2_match(&buf[buf0.min(buf.len() - 10)..]) {
+        13
+    } else if max_frames >= 1 && buf.len() < 10 * max_framesizes {
+        1
+    } else {
+        0
+    }
+}
 
 #[cfg(test)]
 mod tests {
