@@ -57,6 +57,16 @@ pub static INPUT_FORMATS: &[InputFormat] = &[
     },
 ];
 
+/// The demuxer vtable (`FFInputFormat` callbacks).
+pub trait Demuxer {
+    /// `read_header` — parse the stream header, return the (single, video)
+    /// stream description.
+    fn read_header(&mut self, io: &mut IoContext) -> Result<Stream>;
+
+    /// `read_packet` — next packet or `Err(Error::Eof)`.
+    fn read_packet(&mut self, io: &mut IoContext) -> Result<Packet>;
+}
+
 /// Options only the rawvideo demuxer consumes (its AVOptions
 /// `pixel_format`/`video_size`/`framerate`, rawvideodec.c:211-227, typed).
 #[derive(Debug, Clone)]
@@ -96,16 +106,6 @@ pub struct InputFormat {
     pub probe: Option<fn(&[u8]) -> u32>,
     /// `read_header` + `read_packet` owner.
     pub make: fn(&DemuxOptions) -> Box<dyn Demuxer>,
-}
-
-/// The demuxer vtable (`FFInputFormat` callbacks).
-pub trait Demuxer {
-    /// `read_header` — parse the stream header, return the (single, video)
-    /// stream description.
-    fn read_header(&mut self, io: &mut IoContext) -> Result<Stream>;
-
-    /// `read_packet` — next packet or `Err(Error::Eof)`.
-    fn read_packet(&mut self, io: &mut IoContext) -> Result<Packet>;
 }
 
 /// `av_find_input_format` — registry lookup by `-f` name.

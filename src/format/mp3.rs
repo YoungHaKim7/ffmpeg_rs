@@ -305,9 +305,10 @@ pub fn probe(buf: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::audio::mp3::Mp3Decoder;
-    use crate::codec::traits::AudioDecoder;
-    use crate::format::testutil::MemHandler;
+    use crate::{
+        codec::{audio::mp3::Mp3Decoder, traits::AudioDecoder},
+        format::testutil::MemHandler,
+    };
 
     /// Build a minimal valid MPEG-1 L3 mono 44100 32k frame: header +
     /// side info (17 bytes mono) + main data, padded to frame_size (104).
