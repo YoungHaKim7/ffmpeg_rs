@@ -823,6 +823,13 @@ fn fbd_on() -> bool {
     *ON.get_or_init(|| std::env::var_os("MP3_FBD").is_some())
 }
 
+/// `MP3_DUMP` — enables the ad-hoc `SBHYB` hybrid-band energy dump
+/// (debug scratch, see `MpaDecodeCore::dump_tag`).
+fn sbhyb_dump_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MP3_DUMP").is_some())
+}
+
 #[derive(Debug)]
 struct MpaDecodeCore {
     header: MpaDecodeHeader,
@@ -831,7 +838,8 @@ struct MpaDecodeCore {
     last_buf_size: usize,
     bs: Bitstream,
     synth_buf: [Vec<f32>; MPA_MAX_CHANNELS],
-    #[cfg(test)]
+    /// Diagnostic counter limiting the `MP3_DUMP` hybrid-band dump
+    /// (debug scratch; not part of the decoder state).
     dump_tag: u32,
     synth_buf_offset: [usize; MPA_MAX_CHANNELS],
     sb_samples: [[f32; 36 * SBLIMIT]; MPA_MAX_CHANNELS],
@@ -857,7 +865,6 @@ impl MpaDecodeCore {
                 extrasize: 0,
             },
             synth_buf: [Vec::new(), Vec::new()],
-            #[cfg(test)]
             dump_tag: 0,
             synth_buf_offset: [0; 2],
             sb_samples: [[0.0; 36 * SBLIMIT]; MPA_MAX_CHANNELS],
@@ -1258,23 +1265,23 @@ impl MpaDecodeCore {
             }
 
             // FIXME : dum_tag (test code)
-            // if std::env::var("MP3_DUMP").is_ok() && self.dump_tag < 9 {
-            //     let g = &self.granules[0][gr];
-            //     let mut prof = String::new();
-            //     for band in 0..32usize {
-            //         let e: f32 = g.sb_hybrid[band * 18..band * 18 + 18]
-            //             .iter()
-            //             .map(|v| v * v)
-            //             .sum();
-            //         prof.push_str(&format!("{:1.0} ", e * 1e6));
-            //     }
-            //     let nz = g.sb_hybrid.iter().filter(|v| v.abs() > 1e-9).count();
-            //     eprintln!(
-            //         "SBHYB ch0 gr{gr} bt{} sp{} le{} nz={nz}: {prof}",
-            //         g.block_type, g.switch_point, g.long_end
-            //     );
-            //     self.dump_tag += 1;
-            // }
+            if sbhyb_dump_on() && self.dump_tag < 9 {
+                let g = &self.granules[0][gr];
+                let mut prof = String::new();
+                for band in 0..32usize {
+                    let e: f32 = g.sb_hybrid[band * 18..band * 18 + 18]
+                        .iter()
+                        .map(|v| v * v)
+                        .sum();
+                    prof.push_str(&format!("{:1.0} ", e * 1e6));
+                }
+                let nz = g.sb_hybrid.iter().filter(|v| v.abs() > 1e-9).count();
+                eprintln!(
+                    "SBHYB ch0 gr{gr} bt{} sp{} le{} nz={nz}: {prof}",
+                    g.block_type, g.switch_point, g.long_end
+                );
+                self.dump_tag += 1;
+            }
             for ch in 0..nch {
                 reorder_block(sri, &mut self.granules[ch][gr]);
                 compute_antialias(&mut self.granules[ch][gr]);
@@ -4472,7 +4479,10 @@ mod dsp_probe {
         eprintln!("IMPULSE: zc={zc} max={mx:.4} first16={:?}", &out[64..80]);
         // ≈2·1250/22050·1024 ≈ 116 both-edge crossings. The DSP chain is
         // C-exact (synth_chain_c_ref); this only pins the band math.
-        assert!(zc > 85 && zc < 150, "zero crossings {zc} not a ~1.25 kHz tone");
+        assert!(
+            zc > 85 && zc < 150,
+            "zero crossings {zc} not a ~1.25 kHz tone"
+        );
         // 1e5 line · win ≤0.5 · 2^-39 float synth window ⇒ O(1e-2); the
         // exact value is the C-vector tests' job — reject absurdity here.
         assert!(mx > 1e-4 && mx < 10.0, "amplitude {mx} implausible");
