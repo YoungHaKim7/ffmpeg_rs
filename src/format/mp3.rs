@@ -175,6 +175,18 @@ impl Demuxer for Mp3Demuxer {
             if read_full(io, &mut data[4..]).is_err() {
                 return Err(Error::Eof);
             }
+            // mp3_parse_vbr_tags (mp3dec.c:383-441): a frame whose
+            // main data starts with "Info"/"Xing" is a VBR metadata
+            // tag, not audio — skip it (its gapless trim is what keeps
+            // ffmpeg's output aligned; without it the leading Info frame
+            // decodes as one garbage frame and shifts everything).
+            let tag_off = 4 + if h.nb_channels == 1 { 17 } else { 32 };
+            if data.len() >= tag_off + 4
+                && (&data[tag_off..tag_off + 4] == b"Info"
+                    || &data[tag_off..tag_off + 4] == b"Xing")
+            {
+                continue;
+            }
             let mut pkt = Packet::from_vec(data);
             pkt.pts = self.next_pts;
             pkt.duration = self.frame_samples;
