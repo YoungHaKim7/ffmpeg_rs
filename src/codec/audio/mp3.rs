@@ -1264,7 +1264,6 @@ impl MpaDecodeCore {
                 compute_stereo(self.header.mode_ext, lsf, sri, &mut self.granules, gr);
             }
 
-            // FIXME : dum_tag (test code)
             if sbhyb_dump_on() && self.dump_tag < 9 {
                 let g = &self.granules[0][gr];
                 let mut prof = String::new();
