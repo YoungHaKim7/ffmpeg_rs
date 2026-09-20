@@ -3911,9 +3911,12 @@ mod tests {
     #[test]
     fn end_to_end_frame_with_huffman_line() {
         // Granule 0 carries one big-value pair from huff table 1:
-        // code '10' → symbol 0x10 → x = 1, y = 0; sign bit 0 →
+        // code '01' → symbol 0x10 → x = 1, y = 0; sign bit 0 →
         // sb_hybrid[0] = +expval[300][1] = 2^3/1.759 ≈ 4.548
         // (global_gain 110 → exponent = 110 - 210 + 400 = 300).
+        // (The earlier '10' was WRONG: '1' alone is sym 0's code — y=0
+        // zeroes the pair, so the old test only passed against the
+        // pre-fix bit-order bug.)
         let g = GranuleSpec {
             part2_3_length: 3,
             big_values: 1,
@@ -3922,7 +3925,7 @@ mod tests {
         };
         let mut w = BitWriter::new();
         mono_frame(0, &g, &GranuleSpec::default(), false, &mut w);
-        w.put(0b10, 2); // huff table 1 code for 0x10
+        w.put(0b01, 2); // huff table 1 code for 0x10
         w.put(0, 1); // sign of x
         w.pad_to(104);
 
@@ -4003,10 +4006,12 @@ mod tests {
                 w.put(0, 1);
             }
         }
-        // main data: per granule, per channel: huff '10' + sign 0.
+        // main data: per granule, per channel: huff '01' + sign 0
+        // ('01' is table 1's codeword for 0x10; '10' hits sym 0's
+        // 1-bit code '1' first → y=0 → silent).
         for _ in 0..2 {
             for _ in 0..2 {
-                w.put(0b10, 2);
+                w.put(0b01, 2);
                 w.put(0, 1);
             }
         }
@@ -4452,28 +4457,25 @@ mod dsp_probe {
                 row,
             );
         }
-        // Tone check: consecutive-sample sign-change count over the middle
-        // region. Band 3 ≈ frequencies (3*18+9)/576 * 22050 ≈ 2.4 kHz →
-        // ~0.11 zero-crossings/sample.
+        // Tone check: band 3 is ODD — frequency inversion (win[4..8]
+        // sign-flip every other sample BY DESIGN, mpegaudiodsp.c:65-74)
+        // wraps the apparent tone to ≈1.25 kHz. Count BOTH-edge
+        // crossings over the middle region.
         let mut zc = 0usize;
         let mut mx = 0f32;
         for k in 64..1088 {
-            if out[k - 1] <= 0.0 && out[k] > 0.0 {
+            if (out[k - 1] <= 0.0) != (out[k] <= 0.0) {
                 zc += 1;
             }
             mx = mx.max(out[k].abs());
         }
-        eprintln!("IMPULSE: zc={zc} max={mx:.1} first16={:?}", &out[64..80]);
-        // A pure tone at f gives zc ≈ f/22050 * 1024 samples. Band-3 line
-        // → bin 63/576 of Nyquist → f ≈ 63/576*22050 ≈ 2411 Hz → zc ≈ 112.
-        assert!(
-            zc > 80 && zc < 145,
-            "zero crossings {zc} not a ~2.4 kHz tone"
-        );
-        assert!(
-            mx > 1.0 && mx < 1e7,
-            "amplitude {mx} plausible for 1e5 line"
-        );
+        eprintln!("IMPULSE: zc={zc} max={mx:.4} first16={:?}", &out[64..80]);
+        // ≈2·1250/22050·1024 ≈ 116 both-edge crossings. The DSP chain is
+        // C-exact (synth_chain_c_ref); this only pins the band math.
+        assert!(zc > 85 && zc < 150, "zero crossings {zc} not a ~1.25 kHz tone");
+        // 1e5 line · win ≤0.5 · 2^-39 float synth window ⇒ O(1e-2); the
+        // exact value is the C-vector tests' job — reject absurdity here.
+        assert!(mx > 1e-4 && mx < 10.0, "amplitude {mx} implausible");
         // Smoothness: no sample should jump more than a tone at Nyquist/2.
         let mut maxjump = 0f32;
         for k in 65..1088 {
