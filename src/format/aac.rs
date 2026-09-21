@@ -103,7 +103,7 @@ fn parse_adts(data: &[u8]) -> Result<AdtsHeaderInfo> {
         sampling_index,
         sample_rate: SAMPLE_RATES[sampling_index],
         chan_config: ((data[2] & 1) << 2) | (data[3] >> 6),
-        num_rdb: (data[6] & 3) + 1,
+        num_rdb: (data[6] & 3) as u32 + 1,
     })
 }
 
@@ -167,7 +167,7 @@ impl Demuxer for AdtsDemuxer {
         st.codecpar.ch_layout = match info.chan_config {
             1 => ChannelLayout::MONO,
             2 => ChannelLayout::STEREO,
-            c if (1..=7).contains(&c) => ChannelLayout::unspecified(channels),
+            c if (1..=7).contains(&c) => ChannelLayout::unspecified(channels as usize),
             _ => ChannelLayout::default(),
         };
         st.set_pts_info(1, info.sample_rate as i64);
@@ -212,7 +212,7 @@ impl Demuxer for AdtsDemuxer {
             let mut pkt = Packet::from_vec(data);
             pkt.pts = self.next_pts;
             pkt.duration = 1024 * info.num_rdb as i64;
-            pkt.time_base = Rational::new(1, self.sample_rate.max(1) as i64);
+            pkt.time_base = Rational::new(1, self.sample_rate.max(1));
             pkt.flags = PacketFlags::KEY;
             self.next_pts += pkt.duration;
             return Ok(pkt);
@@ -299,7 +299,7 @@ mod tests {
         f.push(b3);
         f.push((fl >> 3) as u8);
         f.push(((fl & 7) as u8) << 5);
-        f.push(0x1f); // buffer fullness high + rdb-1 = 0
+        f.push(0xfc); // fullness 0x7FF tail + rdb-1 = 0 (rdb = byte&3)
         f.resize(fsize, 0x55);
         f
     }

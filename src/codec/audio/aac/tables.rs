@@ -118,7 +118,7 @@ pub static TNS_TMP2_MAP_1_4: [f32; 8] = [0.00000000, -0.20791170, -0.40673664, -
 pub static TNS_TMP2_MAP: [&[f32]; 4] = [&TNS_TMP2_MAP_0_3, &TNS_TMP2_MAP_0_4, &TNS_TMP2_MAP_1_3, &TNS_TMP2_MAP_1_4];
 
 /// `ff_aac_scalefactor_code` (aactab.c:181) — VLC symbols for `get_vlc2(ff_vlc_scalefactors)`.
-pub static AAC_SCALEFACTOR_CODE: [u16; 121] = [
+pub static AAC_SCALEFACTOR_CODE: [u32; 121] = [
     262120, 262118, 262119, 262117, 524277, 524273, 524269, 524278, 524270, 524271, 524272, 524284, 524285, 524287, 524286, 524279,
     524280, 524283, 524281, 262116, 524282, 262115, 131055, 131056, 65525, 131054, 65522, 65523, 65524, 65521, 32758, 32759,
     16377, 16373, 16375, 16371, 16374, 16370, 8183, 8181, 4089, 4087, 4086, 2041, 4084, 2040, 1017, 1015,
@@ -142,7 +142,7 @@ pub static AAC_SCALEFACTOR_BITS: [u8; 121] = [
 ];
 
 /// `codes1` (aactab.c) — codebook 1 codes.
-pub static SPECTRAL_CODES_1: [u16; 81] = [
+pub static SPECTRAL_CODES_1: [u32; 81] = [
     2040, 497, 2045, 1013, 104, 1008, 2039, 492, 2037, 1009, 114, 1012, 116, 17, 118, 491,
     108, 1014, 2044, 481, 2033, 496, 97, 502, 2034, 490, 2043, 498, 105, 493, 119, 23,
     111, 486, 100, 485, 103, 21, 98, 18, 0, 20, 101, 22, 109, 489, 99, 484,
@@ -162,7 +162,7 @@ pub static SPECTRAL_BITS_1: [u8; 81] = [
 ];
 
 /// `codes2` (aactab.c) — codebook 2 codes.
-pub static SPECTRAL_CODES_2: [u16; 81] = [
+pub static SPECTRAL_CODES_2: [u32; 81] = [
     499, 111, 509, 235, 35, 234, 503, 232, 506, 242, 45, 112, 32, 6, 43, 110,
     40, 233, 505, 102, 248, 231, 27, 241, 500, 107, 501, 236, 42, 108, 44, 10,
     39, 103, 26, 245, 36, 8, 31, 9, 0, 7, 29, 11, 48, 239, 28, 100,
@@ -182,7 +182,7 @@ pub static SPECTRAL_BITS_2: [u8; 81] = [
 ];
 
 /// `codes3` (aactab.c) — codebook 3 codes.
-pub static SPECTRAL_CODES_3: [u16; 81] = [
+pub static SPECTRAL_CODES_3: [u32; 81] = [
     0, 9, 239, 11, 25, 240, 491, 486, 1010, 10, 53, 495, 52, 55, 489, 493,
     487, 1011, 494, 1005, 8186, 492, 498, 2041, 2040, 1016, 4088, 8, 56, 1014, 54, 117,
     1009, 1003, 1004, 4084, 24, 118, 2036, 57, 116, 1007, 499, 500, 2038, 488, 1002, 8188,
@@ -202,7 +202,7 @@ pub static SPECTRAL_BITS_3: [u8; 81] = [
 ];
 
 /// `codes4` (aactab.c) — codebook 4 codes.
-pub static SPECTRAL_CODES_4: [u16; 81] = [
+pub static SPECTRAL_CODES_4: [u32; 81] = [
     7, 22, 246, 24, 8, 239, 495, 243, 2040, 25, 23, 237, 21, 1, 226, 240,
     112, 1008, 494, 241, 2042, 238, 228, 1010, 2038, 1007, 2045, 5, 20, 242, 9, 4,
     229, 244, 232, 1012, 6, 2, 231, 3, 0, 107, 227, 105, 499, 235, 230, 1014,
@@ -222,7 +222,7 @@ pub static SPECTRAL_BITS_4: [u8; 81] = [
 ];
 
 /// `codes5` (aactab.c) — codebook 5 codes.
-pub static SPECTRAL_CODES_5: [u16; 81] = [
+pub static SPECTRAL_CODES_5: [u32; 81] = [
     8191, 4087, 2036, 2024, 1009, 2030, 2041, 4088, 8189, 4093, 2033, 1000, 488, 240, 492, 1006,
     2034, 4090, 4084, 1007, 498, 232, 112, 236, 496, 1002, 2035, 2027, 491, 234, 26, 8,
     25, 238, 495, 2029, 1008, 242, 115, 11, 0, 10, 113, 243, 2025, 2031, 494, 239,
@@ -242,7 +242,7 @@ pub static SPECTRAL_BITS_5: [u8; 81] = [
 ];
 
 /// `codes6` (aactab.c) — codebook 6 codes.
-pub static SPECTRAL_CODES_6: [u16; 81] = [
+pub static SPECTRAL_CODES_6: [u32; 81] = [
     2046, 1021, 497, 491, 500, 490, 496, 1020, 2045, 1014, 485, 234, 108, 113, 104, 240,
     486, 1015, 499, 239, 50, 39, 40, 38, 49, 235, 503, 488, 111, 46, 8, 4,
     6, 41, 107, 494, 495, 114, 45, 2, 0, 3, 47, 115, 506, 487, 110, 43,
@@ -262,7 +262,7 @@ pub static SPECTRAL_BITS_6: [u8; 81] = [
 ];
 
 /// `codes7` (aactab.c) — codebook 7 codes.
-pub static SPECTRAL_CODES_7: [u16; 64] = [
+pub static SPECTRAL_CODES_7: [u32; 64] = [
     0, 5, 55, 116, 242, 491, 1005, 2039, 4, 12, 53, 113, 236, 238, 494, 501,
     54, 52, 114, 234, 241, 489, 499, 1013, 115, 112, 235, 240, 497, 496, 1004, 1018,
     243, 237, 488, 495, 1007, 1009, 1017, 2043, 493, 239, 490, 498, 1011, 1016, 2041, 2044,
@@ -278,7 +278,7 @@ pub static SPECTRAL_BITS_7: [u8; 64] = [
 ];
 
 /// `codes8` (aactab.c) — codebook 8 codes.
-pub static SPECTRAL_CODES_8: [u16; 64] = [
+pub static SPECTRAL_CODES_8: [u32; 64] = [
     14, 5, 16, 48, 111, 241, 506, 1022, 3, 0, 4, 18, 44, 106, 117, 248,
     15, 2, 6, 20, 46, 105, 114, 245, 47, 17, 19, 42, 50, 108, 236, 250,
     113, 43, 45, 49, 109, 112, 242, 505, 239, 104, 51, 107, 110, 238, 249, 1020,
@@ -294,7 +294,7 @@ pub static SPECTRAL_BITS_8: [u8; 64] = [
 ];
 
 /// `codes9` (aactab.c) — codebook 9 codes.
-pub static SPECTRAL_CODES_9: [u16; 169] = [
+pub static SPECTRAL_CODES_9: [u32; 169] = [
     0, 5, 55, 231, 478, 974, 985, 1992, 1997, 4040, 4061, 8164, 8172, 4, 12, 53,
     114, 234, 237, 482, 977, 979, 992, 2008, 4047, 4053, 54, 52, 113, 232, 236, 481,
     975, 989, 987, 2000, 4039, 4052, 4068, 230, 112, 233, 477, 483, 978, 988, 1996, 1994,
@@ -324,7 +324,7 @@ pub static SPECTRAL_BITS_9: [u8; 169] = [
 ];
 
 /// `codes10` (aactab.c) — codebook 10 codes.
-pub static SPECTRAL_CODES_10: [u16; 169] = [
+pub static SPECTRAL_CODES_10: [u32; 169] = [
     34, 8, 29, 38, 95, 211, 463, 976, 983, 1005, 2032, 2038, 4093, 7, 0, 1,
     9, 32, 84, 96, 213, 220, 468, 973, 990, 2023, 28, 2, 6, 12, 30, 40,
     91, 205, 217, 462, 476, 985, 1009, 37, 11, 10, 13, 36, 87, 97, 204, 221,
@@ -354,7 +354,7 @@ pub static SPECTRAL_BITS_10: [u8; 169] = [
 ];
 
 /// `codes11` (aactab.c) — codebook 11 codes.
-pub static SPECTRAL_CODES_11: [u16; 289] = [
+pub static SPECTRAL_CODES_11: [u32; 289] = [
     0, 6, 25, 61, 156, 198, 423, 912, 962, 991, 2022, 2035, 4091, 2028, 4090, 4094,
     910, 5, 1, 8, 20, 55, 66, 146, 175, 401, 421, 437, 926, 960, 930, 973,
     2006, 174, 23, 7, 9, 24, 57, 64, 142, 163, 184, 409, 428, 449, 945, 918,
@@ -400,7 +400,7 @@ pub static SPECTRAL_BITS_11: [u8; 289] = [
 ];
 
 /// `ff_aac_spectral_codes` (aactab.c:525).
-pub static SPECTRAL_CODES: [&[u16]; 11] = [&SPECTRAL_CODES_1, &SPECTRAL_CODES_2, &SPECTRAL_CODES_3, &SPECTRAL_CODES_4, &SPECTRAL_CODES_5, &SPECTRAL_CODES_6, &SPECTRAL_CODES_7, &SPECTRAL_CODES_8, &SPECTRAL_CODES_9, &SPECTRAL_CODES_10, &SPECTRAL_CODES_11];
+pub static SPECTRAL_CODES: [&[u32]; 11] = [&SPECTRAL_CODES_1, &SPECTRAL_CODES_2, &SPECTRAL_CODES_3, &SPECTRAL_CODES_4, &SPECTRAL_CODES_5, &SPECTRAL_CODES_6, &SPECTRAL_CODES_7, &SPECTRAL_CODES_8, &SPECTRAL_CODES_9, &SPECTRAL_CODES_10, &SPECTRAL_CODES_11];
 /// `ff_aac_spectral_bits` (aactab.c:530).
 pub static SPECTRAL_BITS: [&[u8]; 11] = [&SPECTRAL_BITS_1, &SPECTRAL_BITS_2, &SPECTRAL_BITS_3, &SPECTRAL_BITS_4, &SPECTRAL_BITS_5, &SPECTRAL_BITS_6, &SPECTRAL_BITS_7, &SPECTRAL_BITS_8, &SPECTRAL_BITS_9, &SPECTRAL_BITS_10, &SPECTRAL_BITS_11];
 
