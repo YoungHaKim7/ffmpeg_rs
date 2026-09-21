@@ -18,7 +18,7 @@
 //! carries range + field order into the parenthetical.
 
 use crate::{
-    codec::params::{CodecId, FieldOrder},
+    codec::params::{CodecId, FieldOrder, MediaType},
     format::{InputFormatContext, OutputFormatContext, Stream},
     log_info,
     util::{color::ColorRange, mathematics, pixfmt::PixelFormat, rational::Rational},
@@ -154,6 +154,13 @@ pub fn dump_input(ctx: &InputFormatContext) {
     } else {
         0.0
     };
+    // The gapless timeline shift (mp3dec.c): start follows the trimmed
+    // head samples; video streams start at 0 either way.
+    let start_secs = if st.start_time != crate::NOPTS && st.time_base.den != 0 {
+        st.start_time as f64 * st.time_base.to_f64()
+    } else {
+        0.0
+    };
     // Bitrate from the file size when the duration is known.
     let size = ctx.io().size();
     let bitrate = if duration_secs > 0.0 {
@@ -166,10 +173,37 @@ pub fn dump_input(ctx: &InputFormatContext) {
     };
     log_info!(
         None,
-        "  Duration: {}, start: 0.000000, bitrate: {}",
+        "  Duration: {}, start: {start_secs:.6}, bitrate: {}",
         time_string(duration_secs),
         bitrate
     );
+
+    if st.codecpar.codec_type == MediaType::Audio {
+        // `Audio: mp3, 44100 Hz, mono, fltp, 130 kb/s, start 0.025057`
+        // (dump.c:568-604 — the codec-tag parenthetical is a wav-side
+        // field the port doesn't carry, so audio prints bare names).
+        let mut extras = format!(
+            "{} Hz, {}, {}",
+            st.codecpar.sample_rate,
+            st.codecpar.ch_layout.describe(),
+            st.codecpar.sample_fmt.name()
+        );
+        if st.codecpar.bit_rate > 0 {
+            extras.push_str(&format!(", {} kb/s", st.codecpar.bit_rate / 1000));
+        }
+        if st.start_time != crate::NOPTS && st.start_time > 0 {
+            extras.push_str(&format!(", start {start_secs:.6}"));
+        }
+        // Bare codec name — the parenthetical is the VIDEO codec-tag path
+        // (Gray8 defaulting to "(Y800)" is how audio first dumped here).
+        log_info!(
+            None,
+            "  Stream #0:0: Audio: {}, {}",
+            st.codecpar.codec_id.name(),
+            extras
+        );
+        return;
+    }
 
     let mut extras: Vec<String> = Vec::new();
     if let Some(sar) = dar_string(st) {

@@ -65,6 +65,15 @@ pub struct Stream {
     /// In `time_base` units (`NOPTS` when the container can't know).
     pub duration: i64,
     pub nb_frames: i64,
+    /// `FFStream.start_skip_samples` (avformat-internal.h): samples the
+    /// demuxer wants dropped from the head of the stream — the gapless
+    /// encoder delay. `read_frame` turns it into packet `skip_samples`.
+    pub start_skip_samples: i64,
+    /// `FFStream.first_discard_sample` / `.last_discard_sample`: the
+    /// half-open sample range to drop at the tail (gapless padding),
+    /// applied by `read_frame` as `discard_padding`.
+    pub first_discard_sample: i64,
+    pub last_discard_sample: i64,
 }
 
 impl Stream {
@@ -83,6 +92,9 @@ impl Stream {
             start_time: NOPTS,
             duration: NOPTS,
             nb_frames: 0,
+            start_skip_samples: 0,
+            first_discard_sample: 0,
+            last_discard_sample: 0,
         }
     }
 
@@ -101,6 +113,9 @@ impl Stream {
             start_time: NOPTS,
             duration: NOPTS,
             nb_frames: 0,
+            start_skip_samples: 0,
+            first_discard_sample: 0,
+            last_discard_sample: 0,
         }
     }
 
@@ -211,7 +226,34 @@ impl InputFormatContext {
     /// `av_read_frame` — next packet of any stream (Phase 1: stream 0 only),
     /// `Err(Error::Eof)` at end.
     pub fn read_frame(&mut self) -> Result<Packet> {
-        self.demuxer.read_packet(&mut self.io)
+        let mut pkt = self.demuxer.read_packet(&mut self.io)?;
+
+        // The gapless half of demux.c's read_frame_internal (1536-1557):
+        // convert the stream's skip/discard sample bookkeeping into
+        // per-packet AV_PKT_DATA_SKIP_SAMPLES side data. The demuxers
+        // here stamp audio in tb = 1/sample_rate, so `ts_to_samples`
+        // (pts · tb · sample_rate) is the identity on pts/duration.
+        let st = &self.streams[0];
+        let mut discard_padding = 0u32;
+        if st.first_discard_sample != 0 && pkt.pts != NOPTS {
+            let sample = pkt.pts;
+            let duration = pkt.duration.max(st.codecpar.frame_size as i64);
+            let end_sample = sample + duration;
+            if duration > 0
+                && end_sample >= st.first_discard_sample
+                && sample < st.last_discard_sample
+            {
+                discard_padding = (end_sample - st.first_discard_sample).min(duration) as u32;
+            }
+        }
+        let mut skip_samples = 0u32;
+        if st.start_skip_samples != 0 && pkt.pts == 0 {
+            skip_samples = st.start_skip_samples as u32;
+        }
+        pkt.skip_samples = skip_samples;
+        pkt.discard_padding = discard_padding;
+
+        Ok(pkt)
     }
 
     /// Underlying I/O (used by the dump code for size queries).

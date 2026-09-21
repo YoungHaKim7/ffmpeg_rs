@@ -1404,6 +1404,9 @@ pub struct Mp3Decoder {
     pending: Option<AudioFrame>,
     /// Drain requested (`avcodec_send_packet(avctx, NULL)`).
     eof: bool,
+    /// `AVCodecContext.skip_samples` carry (decode.c): a skip larger than
+    /// one frame drops whole frames and keeps the remainder.
+    skip_left: u32,
 }
 
 impl Default for Mp3Decoder {
@@ -1421,6 +1424,7 @@ impl Mp3Decoder {
             params: CodecParameters::default(),
             pending: None,
             eof: false,
+            skip_left: 0,
         }
     }
 
@@ -1428,6 +1432,7 @@ impl Mp3Decoder {
     pub fn flush(&mut self) {
         self.core.flush();
         self.pending = None;
+        self.skip_left = 0;
     }
 
     /// `decode_frame` (`mpegaudiodec_template.c:1558-1628`). Returns
@@ -1549,7 +1554,27 @@ impl AudioDecoder for Mp3Decoder {
             return Err(Error::Eof);
         }
         self.pending = None;
-        self.pending = self.decode_frame(pkt)?;
+        let frame = self.decode_frame(pkt)?;
+
+        // libavcodec's application of AV_PKT_DATA_SKIP_SAMPLES (decode.c):
+        // `skip_samples` drops from the head of the stream and may span
+        // frames (whole frames fall while the carry outlasts them);
+        // `discard_padding` trims the tail of THIS packet's frame.
+        self.skip_left = self.skip_left.saturating_add(pkt.skip_samples);
+        if let Some(mut frame) = frame {
+            if self.skip_left > 0 {
+                let skip = (self.skip_left as usize).min(frame.nb_samples);
+                frame.crop(skip, 0);
+                self.skip_left -= skip as u32;
+            }
+            let discard = (pkt.discard_padding as usize).min(frame.nb_samples);
+            if discard > 0 {
+                frame.crop(0, discard);
+            }
+            if frame.nb_samples > 0 {
+                self.pending = Some(frame);
+            }
+        }
         Ok(())
     }
 
@@ -4237,6 +4262,62 @@ mod tests {
         let f = dec.receive_frame().unwrap();
         assert_eq!(f.nb_samples, 1152);
     }
+
+    // ================= gapless trim (AV_PKT_DATA_SKIP_SAMPLES) ==========
+
+    /// decode.c's application of the demuxer's skip/discard side data:
+    /// head samples drop with pts advancing, tail samples drop from the
+    /// same packet's frame.
+    #[test]
+    fn gapless_skip_and_discard_trim_decoded_frames() {
+        let mut dec = Mp3Decoder::new();
+        dec.init(&params()).unwrap();
+        let mut p = pkt(&silent_frame());
+        p.skip_samples = 100;
+        p.discard_padding = 10;
+        dec.send_packet(Some(&p)).unwrap();
+        let f = dec.receive_frame().unwrap();
+        assert_eq!(f.nb_samples, 1152 - 110);
+        assert_eq!(f.pts, 1234 + 100, "pts follows the dropped samples");
+        assert_eq!(f.duration, 1152 - 110);
+    }
+
+    /// A skip larger than one frame (the LAME case: delay + 529 vs 1152
+    /// samples) drops whole frames and carries the remainder (decode.c's
+    /// `skip_samples` carry).
+    #[test]
+    fn gapless_skip_spans_frames() {
+        let mut dec = Mp3Decoder::new();
+        dec.init(&params()).unwrap();
+        let mut p0 = pkt(&silent_frame());
+        p0.skip_samples = 2000;
+        dec.send_packet(Some(&p0)).unwrap();
+        assert!(
+            matches!(dec.receive_frame(), Err(Error::Again)),
+            "frame fully consumed by the skip"
+        );
+        let mut p1 = pkt(&silent_frame());
+        p1.pts = 1234 + 1152;
+        dec.send_packet(Some(&p1)).unwrap();
+        let f = dec.receive_frame().unwrap();
+        assert_eq!(f.nb_samples, 1152 - (2000 - 1152));
+        assert_eq!(f.pts, 1234 + 1152 + (2000 - 1152));
+    }
+
+    /// flush() clears a pending skip carry (mp_flush resets the decoder).
+    #[test]
+    fn flush_clears_skip_carry() {
+        let mut dec = Mp3Decoder::new();
+        dec.init(&params()).unwrap();
+        let mut p = pkt(&silent_frame());
+        p.skip_samples = 3000;
+        dec.send_packet(Some(&p)).unwrap();
+        assert!(matches!(dec.receive_frame(), Err(Error::Again)));
+        dec.flush();
+        dec.send_packet(Some(&pkt(&silent_frame()))).unwrap();
+        let f = dec.receive_frame().unwrap();
+        assert_eq!(f.nb_samples, 1152, "no stale skip after flush");
+    }
 }
 
 #[cfg(test)]
@@ -4244,181 +4325,97 @@ mod smoke {
     use super::*;
     use crate::codec::traits::AudioDecoder;
 
-    /// REAL-file smoke: decode /tmp/t.mp3 frame-by-frame (a sync-word scan —
-    /// the mp3 demuxer's job later) and compare against system ffmpeg's
-    /// decode of the same file. Both decode the SAME encoded stream, so
-    /// samples must agree closely (both are float L3 decoders; differences
-    /// are LSB-level IMDCT rounding, not signal).
+    /// REAL-file smoke through the whole pipeline: probe → open (ID3v2 +
+    /// LAME tag parse, tag-frame skip) → read_frame (skip/discard side
+    /// data) → decode (gapless trim) — vs system ffmpeg's decode of the
+    /// same file. The gapless trims now come from the demuxer, so the
+    /// streams must line up with no test-side massaging: same length
+    /// exactly, same samples closely (both are float L3 decoders; the
+    /// residue is LSB-level IMDCT rounding, not signal).
     #[test]
     fn decode_real_file_vs_ffmpeg() {
-        let Ok(data) = std::fs::read("/tmp/t_mono.mp3") else {
-            eprintln!("skip: no /tmp/t.mp3 fixture");
+        if std::fs::read("/tmp/t_mono.mp3").is_err() {
+            eprintln!("skip: no /tmp/t_mono.mp3 fixture");
             return;
-        };
+        }
         let Ok(ref_pcm) = std::fs::read("/tmp/ref_mono.pcm") else {
-            eprintln!("skip: no /tmp/ref.pcm");
+            eprintln!("skip: no /tmp/ref_mono.pcm fixture");
             return;
         };
 
-        let mut params = crate::codec::params::CodecParameters::default();
-        params.codec_id = CodecId::Mp3;
-        let mut dec = Mp3Decoder::new();
-        dec.init(&params).unwrap();
+        let opts = crate::format::DemuxOptions::default();
+        let mut ictx =
+            crate::format::InputFormatContext::open("/tmp/t_mono.mp3", None, &opts).unwrap();
+        ictx.find_stream_info().unwrap();
+        let (codecpar, start_skip) = {
+            let st = &ictx.streams[0];
+            assert!(st.start_skip_samples > 0, "LAME gapless data parsed");
+            (st.codecpar.clone(), st.start_skip_samples)
+        };
 
-        // Interleave the planar output frames into one stereo f32 stream.
+        let mut dec = Mp3Decoder::new();
+        dec.init(&codecpar).unwrap();
+
+        // Interleave the planar output frames into one f32 stream.
         let mut out: Vec<f32> = Vec::new();
-        let mut i = 0usize;
         let mut frames = 0u32;
-        while i + 4 <= data.len() && frames < 200 {
-            let head = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-            if ff_mpa_check_header(head).is_err() {
-                i += 1;
-                continue;
-            }
-            let mut h = MpaDecodeHeader::default();
-            if avpriv_mpegaudio_decode_header(&mut h, head).unwrap() {
-                i += 1; // free format: advance one byte and rescan
-                continue;
-            }
-            let fs = h.frame_size as usize;
-            if i + fs > data.len() {
-                break;
-            }
-            let pkt = crate::codec::packet::Packet::from_vec(data[i..i + fs].to_vec());
-            dec.send_packet(Some(&pkt)).unwrap();
-            while let Ok(f) = dec.receive_frame() {
-                let ch = f.nb_planes();
-                for s in 0..f.nb_samples {
-                    for c in 0..ch {
-                        let b = &f.plane(c)[s * 4..s * 4 + 4];
-                        out.push(f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-                    }
+        let collect = |f: AudioFrame, out: &mut Vec<f32>| {
+            let ch = f.nb_planes();
+            for s in 0..f.nb_samples {
+                for c in 0..ch {
+                    let b = &f.plane(c)[s * 4..s * 4 + 4];
+                    out.push(f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
                 }
+            }
+        };
+        while let Ok(p) = ictx.read_frame() {
+            dec.send_packet(Some(&p)).unwrap();
+            while let Ok(f) = dec.receive_frame() {
+                collect(f, &mut out);
                 frames += 1;
             }
-            i += fs;
+        }
+        dec.send_packet(None).unwrap();
+        while let Ok(f) = dec.receive_frame() {
+            collect(f, &mut out);
+            frames += 1;
         }
         assert!(frames > 20, "decoded only {frames} frames");
 
-        // The ffmpeg CLI reference is gapless-trimmed the way
-        // libavformat's mp3 demuxer does it (mp3dec.c): the VBR tag
-        // frame is skipped, `start_pad + 528 + 1` samples are dropped
-        // at the start and `end_pad - 528 - 1` at the end (LAME tag).
-        // Apply the same trim before comparing, else the streams are
-        // offset by the encoder delay and nothing matches.
-        let (start_trim, end_trim) = lame_gapless_trim(&data);
-        let trimmed = &out[start_trim.min(out.len())..out.len().saturating_sub(end_trim)];
+        // The ffmpeg CLI reference is gapless-trimmed (mp3dec.c): the
+        // VBR tag frame is skipped, start_pad+529 samples drop at the
+        // head, end_pad-529 at the tail. Same pipeline here ⇒ same
+        // length, to the sample.
+        let n_ref = ref_pcm.len() / 2; // consecutive s16 (mono fixture)
+        assert_eq!(out.len(), n_ref, "gapless-trimmed length must match ffmpeg");
 
         // Middle 90% sample-wise comparison against the s16 reference
         // (scaled to f32): the encoder loss is common to both decoders.
-        let n_ref = ref_pcm.len() / 2; // consecutive s16 (mono fixture)
-        let n = trimmed.len().min(n_ref);
-        let skip = n / 20;
+        let skip = n_ref / 20;
         let mut max_diff = 0.0f32;
         let mut over = 0usize;
-        for k in skip..n - skip {
-            // MONO compare: ref is plain consecutive s16 samples.
+        for k in skip..n_ref - skip {
             let r = i16::from_le_bytes([ref_pcm[2 * k], ref_pcm[2 * k + 1]]) as f32 / 32768.0;
-            let d = (trimmed[k] - r).abs();
+            let d = (out[k] - r).abs();
             max_diff = max_diff.max(d);
             if d > 0.02 {
                 over += 1;
             }
         }
         eprintln!(
-            "SMOKE: frames={frames} samples={n} start_trim={start_trim} end_trim={end_trim} \
+            "SMOKE: frames={frames} samples={n_ref} start_skip={start_skip} \
              max_diff={max_diff:.4} over=/{over}"
         );
-        let mut dump = Vec::with_capacity(trimmed.len() * 4);
-        for v in trimmed {
+        let mut dump = Vec::with_capacity(out.len() * 4);
+        for v in &out {
             dump.extend_from_slice(&v.to_le_bytes());
         }
         let _ = std::fs::write("/tmp/our.pcm", dump);
         assert!(
-            over * 1000 < (n - 2 * skip),
+            over * 1000 < (n_ref - 2 * skip),
             "{over} samples (of {}) differ by >0.02, max {max_diff:.4}",
-            n - 2 * skip
+            n_ref - 2 * skip
         );
-    }
-
-    /// LAME/Info-tag gapless trim as the ffmpeg mp3 demuxer applies it
-    /// (`mp3dec.c:mp3_parse_vbr_tags` + `mp3_parse_info_tag`): find the
-    /// first frame's `Xing`/`Info` tag, read the encoder delay/padding,
-    /// and return `(start, end)` sample counts to drop from the raw
-    /// decoded stream. The tag frame itself (1152 samples of silence
-    /// decoded here but skipped by the demuxer) counts toward the start.
-    fn lame_gapless_trim(data: &[u8]) -> (usize, usize) {
-        // first synced frame in the file
-        let mut i = 0usize;
-        let frame0 = loop {
-            if i + 4 > data.len() {
-                return (0, 0);
-            }
-            let head = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-            if ff_mpa_check_header(head).is_ok() {
-                let mut h = MpaDecodeHeader::default();
-                if matches!(avpriv_mpegaudio_decode_header(&mut h, head), Ok(false)) {
-                    break (i, h);
-                }
-            }
-            i += 1;
-        };
-        let (off, h) = frame0;
-        // side info size: MPEG1 mono 17 / stereo 32, MPEG2/2.5 9 / 17,
-        // plus 2 CRC bytes when error_protection is set.
-        let mut si = if h.lsf != 0 {
-            if h.nb_channels == 1 { 9 } else { 17 }
-        } else if h.nb_channels == 1 {
-            17
-        } else {
-            32
-        };
-        if h.error_protection != 0 {
-            si += 2;
-        }
-        let p = off + HEADER_SIZE + si;
-        let d = data;
-        let magic_ok = p + 8 <= d.len() && (&d[p..p + 4] == b"Xing" || &d[p..p + 4] == b"Info");
-        if !magic_ok {
-            return (0, 0);
-        }
-        let mut q = p + 8;
-        let flags = u32::from_be_bytes([d[q - 4], d[q - 3], d[q - 2], d[q - 1]]);
-        if flags & 1 != 0 {
-            q += 4; // frames
-        }
-        if flags & 2 != 0 {
-            q += 4; // bytes
-        }
-        if flags & 4 != 0 {
-            q += 100; // TOC
-        }
-        if flags & 8 != 0 {
-            q += 4; // quality
-        }
-        // encoder version string (9 bytes) — only LAME-family tags
-        // carry a usable delay field
-        if q + 9 > d.len() {
-            return (0, 0);
-        }
-        let ver = &d[q..q + 4];
-        q += 9;
-        if ver != b"LAME" && ver != b"Lavf" && ver != b"Lavc" {
-            return (0, 0);
-        }
-        // rev+vbr(1) lowpass(1) peak(4) rgain(2) again(2) flags(1) abr(1)
-        q += 1 + 1 + 4 + 2 + 2 + 1 + 1;
-        if q + 3 > d.len() {
-            return (0, 0);
-        }
-        let v = ((d[q] as u32) << 16) | ((d[q + 1] as u32) << 8) | d[q + 2] as u32;
-        let start_pad = v >> 12;
-        let end_pad = v & 4095;
-        let spf = if h.lsf != 0 { 576 } else { 1152 };
-        (
-            spf + start_pad as usize + 528 + 1,
-            end_pad.saturating_sub(528 + 1) as usize,
-        )
     }
 }
 

@@ -53,6 +53,13 @@ pub struct Packet {
     pub time_base: Rational,
     /// Byte position of the packet in the input (0 = unknown in Phase 1).
     pub pos: u64,
+    /// `AV_PKT_DATA_SKIP_SAMPLES` (avcodec.h): leading samples the decoder
+    /// must drop from the frames fed by this packet (gapless encoder
+    /// delay). Carried instead as a plain field — same observable stream.
+    pub skip_samples: u32,
+    /// The same side data's second half: trailing samples to drop from the
+    /// last frame decoded from this packet (gapless encoder padding).
+    pub discard_padding: u32,
 }
 
 impl Default for Packet {
@@ -66,6 +73,8 @@ impl Default for Packet {
             duration: 0,
             time_base: Rational::UNKNOWN,
             pos: 0,
+            skip_samples: 0,
+            discard_padding: 0,
         }
     }
 }

@@ -4432,8 +4432,7 @@ mod mux_tests {
     use crate::codec::params::CodecId;
     use crate::format::mux::Muxer;
     use crate::format::testutil::MemHandler;
-    use crate::format::{DemuxOptions, Demuxer, Stream};
-    use crate::util::rational::Rational;
+    use crate::format::{Demuxer, Stream};
 
     /// Mux `pkts` for `stream` through NutMuxer, return the produced bytes.
     fn mux_bytes(stream: &Stream, pkts: &[Packet]) -> Vec<u8> {

@@ -17,7 +17,8 @@
 //! | junk skip (mp3dec.c:483-500) | two-consecutive-frame check with `MP3_MASK` match, ≤64 KiB window |
 //! | `mp3_read_header` (442-517) | [`Mp3Demuxer::read_header`] — codecpar filled from the first header (C defers to the parser; find_stream_info wants the fields now) |
 //! | `mp3_read_packet` + `mpegaudio_parse` (parser.c) | [`Mp3Demuxer::read_packet`] — one whole frame per packet, resync on garbage |
-//! | Xing/VBRI (`mp3_parse_vbr_tags`, 383-441) | not ported (gapless/duration metadata; documented) |
+//! | Xing/Info/LAME + VBRI (`mp3_parse_vbr_tags`, 267-441) | [`Mp3Demuxer::parse_vbr_tags`] — tag frame skipped, gapless (`start_skip_samples` / `first_discard_sample`) and duration exported to the stream |
+//! | iTunSMPB (`mp3_parse_itunes_smpb`) | not ported (ID3v2 contents are dropped, so the comment is never seen) |
 //! | ID3v1, replaygain, seek index | not ported |
 //!
 //! Timestamps: C sets tb = 1/14112000 (LCM of all mp3 rates) and lets the
@@ -88,15 +89,144 @@ impl Mp3Demuxer {
             started: false,
         }
     }
+
+    /// `mp3_parse_vbr_tags` + `mp3_parse_info_tag` + `mp3_parse_vbri_tag`
+    /// (mp3dec.c:267-441): read the frame at `base`; if it carries a
+    /// Xing/Info (LAME) or VBRI tag, export gapless and duration onto the
+    /// stream and seek past the tag frame. `Ok(false)` = no usable tag;
+    /// the caller restores the position and the frame demuxes as audio.
+    ///
+    /// Empirically (LAME-encoded fixture, vs system ffmpeg): the tag's
+    /// `frames` counts AUDIO frames — the tag frame itself is excluded —
+    /// so these formulas stay in the same sample timeline as the packets
+    /// emitted after the skip: first audio packet pts 0, `frames·spf`
+    /// samples total.
+    fn parse_vbr_tags(&mut self, io: &mut IoContext, st: &mut Stream, base: u64) -> Result<bool> {
+        // mp3_parse_vbr_tags (383-397): decode the header at base — a
+        // non-frame, free-format frame, or non-layer-3 means no tag.
+        let (header, vbrtag_size) = match check_at(io, base) {
+            Ok(v) => v,
+            Err(_) => return Ok(false),
+        };
+        let mut c = MpaDecodeHeader::default();
+        let _free = avpriv_mpegaudio_decode_header(&mut c, header);
+        if c.layer != 3 {
+            return Ok(false);
+        }
+        let spf: i64 = if c.lsf != 0 { 576 } else { 1152 };
+        st.set_pts_info(1, c.sample_rate as i64);
+        st.codecpar.sample_rate = c.sample_rate;
+
+        // The whole frame in memory (C streams it; reads past a truncated
+        // frame yield zeros there, and be32()/be24() below mirror that).
+        io.seek(base)?;
+        let mut buf = vec![0u8; vbrtag_size];
+        read_upto(io, &mut buf);
+
+        let mut frames = 0i64;
+        let mut header_filesize = 0i64;
+        let mut is_cbr = false;
+        let mut start_pad = 0i64;
+        let mut end_pad = 0i64;
+
+        // ---- mp3_parse_info_tag (157-265): Xing/Info ----
+        // xing_offtbl[lsf][mono] (mp3dec.c:166): C measures from AFTER
+        // the 4 consumed header bytes; `buf` includes them, hence +4.
+        let xing_off =
+            4 + [[32usize, 17], [17, 9]][(c.lsf != 0) as usize][(c.nb_channels == 1) as usize];
+        let magic = be32(&buf, xing_off);
+        if magic == u32::from_be_bytes(*b"Info") {
+            is_cbr = true;
+        }
+        if is_cbr || magic == u32::from_be_bytes(*b"Xing") {
+            let flags = be32(&buf, xing_off + 4);
+            let mut q = xing_off + 8;
+            if flags & 1 != 0 {
+                frames = be32(&buf, q) as i64;
+                q += 4; // frames
+            }
+            if flags & 2 != 0 {
+                header_filesize = be32(&buf, q) as i64;
+                q += 4; // bytes
+            }
+            if flags & 4 != 0 {
+                q += 100; // TOC (seek index not ported)
+            }
+            if flags & 8 != 0 {
+                q += 4; // quality
+            }
+            // Encoder short version string — only LAME-family tags carry
+            // a usable delay field (241-253).
+            let version = &buf[q.min(buf.len())..(q + 9).min(buf.len())];
+            q += 9 + 1 + 1 + 4 + 2 + 2 + 1 + 1; // ver, rev+vbr, lowpass, peak, rgains, flags+ath, abr
+            if version.starts_with(b"LAME")
+                || version.starts_with(b"Lavf")
+                || version.starts_with(b"Lavc")
+            {
+                let v = be24(&buf, q);
+                start_pad = (v >> 12) as i64;
+                end_pad = (v & 4095) as i64;
+                st.start_skip_samples = start_pad + 528 + 1;
+                if frames != 0 {
+                    st.first_discard_sample = -end_pad + 528 + 1 + frames * spf;
+                    st.last_discard_sample = frames * spf;
+                }
+            }
+        }
+
+        // ---- mp3_parse_vbri_tag (267-282): always base+4+32 ----
+        if frames == 0 && header_filesize == 0 {
+            let p = 4 + 32;
+            if be32(&buf, p) == u32::from_be_bytes(*b"VBRI") && be16(&buf, p + 4) == 1 {
+                header_filesize = be32(&buf, p + 10) as i64;
+                frames = be32(&buf, p + 14) as i64;
+            }
+        }
+
+        // "Packets keep the skipped samples, so shift the timeline
+        // instead" (431-434): start_time = start_skip_samples in tb —
+        // identity here, tb is 1/sample_rate.
+        if st.start_skip_samples != 0 {
+            st.start_time = st.start_skip_samples;
+        }
+
+        if frames == 0 && header_filesize == 0 {
+            return Ok(false);
+        }
+
+        // Skip the vbr tag frame (437).
+        io.seek(base + vbrtag_size as u64)?;
+
+        if frames != 0 {
+            if st.duration == crate::NOPTS {
+                st.duration = frames * spf - start_pad - end_pad;
+            }
+            if header_filesize != 0 && !is_cbr {
+                st.codecpar.bit_rate = header_filesize * 8 * c.sample_rate as i64 / (frames * spf);
+            }
+        }
+        Ok(true)
+    }
 }
 
 impl Demuxer for Mp3Demuxer {
-    /// `mp3_read_header` (442-517): ID3v2 skip, junk skip to two
-    /// consecutive matching frames, codecpar from the first header.
+    /// `mp3_read_header` (442-517): ID3v2 skip, VBR-tag parse off the
+    /// frame at the current offset (tag frame skipped past), junk skip to
+    /// two consecutive matching frames, codecpar from the first header.
     fn read_header(&mut self, io: &mut IoContext) -> Result<Stream> {
         let head = io.peek(10)?;
         if head.len() >= 10 && id3v2_match(&head) {
             skip_id3v2(io)?;
+        }
+
+        let mut st = Stream::new_audio(0);
+
+        // mp3_parse_vbr_tags first (mp3_read_header 481-482): C parses
+        // the tag off the frame at the post-ID3 offset BEFORE the junk
+        // scan; on failure it seeks back and the frame demuxes normally.
+        let base = io.tell();
+        if !self.parse_vbr_tags(io, &mut st, base)? {
+            io.seek(base)?;
         }
 
         // Junk skip (483-500): find i where headers at off+i and
@@ -129,8 +259,10 @@ impl Demuxer for Mp3Demuxer {
         self.started = true;
 
         // codecpar from the header (C: the parser fills these later; our
-        // find_stream_info wants them immediately).
-        let mut st = Stream::new_audio(0);
+        // find_stream_info wants them immediately). These overwrite the
+        // same fields parse_vbr_tags set — same stream, same values,
+        // except bit_rate, which the tag computes more precisely for VBR.
+        let tag_bit_rate = st.codecpar.bit_rate;
         st.codecpar.codec_id = match h.layer {
             1 => CodecId::Mp1,
             2 => CodecId::Mp2,
@@ -143,9 +275,15 @@ impl Demuxer for Mp3Demuxer {
             crate::util::channel_layout::ChannelLayout::STEREO
         };
         st.codecpar.sample_fmt = crate::util::samplefmt::SampleFormat::Fltp;
-        st.codecpar.bit_rate = h.bit_rate as i64;
+        st.codecpar.bit_rate = if tag_bit_rate != 0 {
+            tag_bit_rate
+        } else {
+            h.bit_rate as i64
+        };
         st.set_pts_info(1, h.sample_rate as i64);
-        st.start_time = 0;
+        if st.start_time == crate::NOPTS {
+            st.start_time = 0;
+        }
         Ok(st)
     }
 
@@ -174,18 +312,6 @@ impl Demuxer for Mp3Demuxer {
             data[..4].copy_from_slice(&hb);
             if read_full(io, &mut data[4..]).is_err() {
                 return Err(Error::Eof);
-            }
-            // mp3_parse_vbr_tags (mp3dec.c:383-441): a frame whose
-            // main data starts with "Info"/"Xing" is a VBR metadata
-            // tag, not audio — skip it (its gapless trim is what keeps
-            // ffmpeg's output aligned; without it the leading Info frame
-            // decodes as one garbage frame and shifts everything).
-            let tag_off = 4 + if h.nb_channels == 1 { 17 } else { 32 };
-            if data.len() >= tag_off + 4
-                && (&data[tag_off..tag_off + 4] == b"Info"
-                    || &data[tag_off..tag_off + 4] == b"Xing")
-            {
-                continue;
             }
             let mut pkt = Packet::from_vec(data);
             pkt.pts = self.next_pts;
@@ -238,6 +364,46 @@ fn read_full(io: &mut IoContext, buf: &mut [u8]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read what `io` will give without failing at EOF — the tag-frame
+/// buffer's short-read shape (a truncated frame parses as zeros, as it
+/// does through C's avio).
+fn read_upto(io: &mut IoContext, buf: &mut [u8]) {
+    let mut got = 0;
+    while got < buf.len() {
+        match io.read(&mut buf[got..]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got += n,
+        }
+    }
+}
+
+/// `avio_rb32` over an in-memory frame; out-of-range reads 0 (past-EOF).
+fn be32(b: &[u8], o: usize) -> u32 {
+    if o + 4 <= b.len() {
+        u32::from_be_bytes(b[o..o + 4].try_into().unwrap())
+    } else {
+        0
+    }
+}
+
+/// `avio_rb24`.
+fn be24(b: &[u8], o: usize) -> u32 {
+    if o + 3 <= b.len() {
+        ((b[o] as u32) << 16) | ((b[o + 1] as u32) << 8) | b[o + 2] as u32
+    } else {
+        0
+    }
+}
+
+/// `avio_rb16`.
+fn be16(b: &[u8], o: usize) -> u16 {
+    if o + 2 <= b.len() {
+        u16::from_be_bytes([b[o], b[o + 1]])
+    } else {
+        0
+    }
 }
 
 /// `check()` (mp3dec.c:536-559): header at `pos` → (header, frame size),
@@ -343,6 +509,26 @@ mod tests {
         v
     }
 
+    /// A 128 kbps MPEG-1 L3 mono frame (417 bytes) whose main data is a
+    /// full LAME `Info` tag — the metadata frame LAME writes as frame 0.
+    /// `mp3_parse_info_tag`'s walk, byte for byte (mono ⇒ tag at 4+17).
+    fn tag_frame(frames_field: u32, start_pad: u32, end_pad: u32) -> Vec<u8> {
+        let mut f = vec![0u8; 417];
+        f[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0xC0]); // MPEG1 L3 128k 44.1k mono
+        let put32 = |f: &mut Vec<u8>, o: usize, v: u32| {
+            f[o..o + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        f[21..25].copy_from_slice(b"Info"); // xing_off = 4+17
+        put32(&mut f, 25, 0xF); // frames | bytes | TOC | quality
+        put32(&mut f, 29, frames_field);
+        put32(&mut f, 33, 417 * (frames_field + 1)); // bytes
+        f[141..150].copy_from_slice(b"LAME99999"); // encoder version (9 bytes)
+        // rev(150) lowpass(151) peak(152) rgains(156..160) flags(160) abr(161)
+        let v = (start_pad << 12) | end_pad;
+        f[162..165].copy_from_slice(&[(v >> 16) as u8, (v >> 8) as u8, v as u8]);
+        f
+    }
+
     #[test]
     fn probe_scores_multi_frame_buffer() {
         assert!(probe(&file()) >= 50, "8 clean frames ⇒ extension score");
@@ -421,6 +607,65 @@ mod tests {
         let mut d = Mp3Demuxer::new();
         let err = d.read_header(&mut io).unwrap_err();
         assert!(err.to_string().contains("two consecutive"));
+    }
+
+    /// `mp3_parse_vbr_tags` + `mp3_parse_info_tag` (mp3dec.c:383-441): the
+    /// tag frame is skipped, gapless lands on the stream, duration and
+    /// start_time reflect the trimmed audio.
+    #[test]
+    fn vbr_tag_frame_skipped_and_gapless_exported() {
+        let mut data = tag_frame(8, 576, 756);
+        for _ in 0..8 {
+            data.extend_from_slice(&frame());
+        }
+        let mut io = MemHandler::io(&data);
+        let mut d = Mp3Demuxer::new();
+        let st = d.read_header(&mut io).unwrap();
+        assert_eq!(st.start_skip_samples, 576 + 528 + 1);
+        assert_eq!(st.first_discard_sample, -756 + 528 + 1 + 8 * 1152);
+        assert_eq!(st.last_discard_sample, 8 * 1152);
+        assert_eq!(st.duration, 8 * 1152 - 576 - 756);
+        assert_eq!(st.start_time, 576 + 528 + 1, "timeline shifted by the skip");
+        assert_eq!(io.tell(), 417, "tag frame skipped past");
+        let p0 = d.read_packet(&mut io).unwrap();
+        assert_eq!(p0.pts, 0, "first audio frame restarts the timeline");
+    }
+
+    /// The demux.c gapless application (read_frame_internal 1536-1557):
+    /// the stream fields become packet `skip_samples` (first packet) and
+    /// `discard_padding` (the packet that crosses `first_discard_sample`).
+    #[test]
+    fn read_frame_injects_skip_and_discard() {
+        let mut data = tag_frame(8, 576, 756);
+        for _ in 0..8 {
+            data.extend_from_slice(&frame());
+        }
+        let path = std::env::temp_dir().join("ffmpeg_rs_mp3_gapless_test.mp3");
+        std::fs::write(&path, &data).unwrap();
+        let mut ictx = crate::format::InputFormatContext::open(
+            path.to_str().unwrap(),
+            None,
+            &DemuxOptions::default(),
+        )
+        .unwrap();
+        ictx.find_stream_info().unwrap();
+
+        let mut n = 0usize;
+        let mut first_skip = None;
+        let mut discards = Vec::new();
+        while let Ok(p) = ictx.read_frame() {
+            if n == 0 {
+                first_skip = Some(p.skip_samples);
+            }
+            discards.push(p.discard_padding);
+            n += 1;
+        }
+        assert_eq!(n, 8, "the tag frame itself never becomes a packet");
+        assert_eq!(first_skip, Some(576 + 528 + 1));
+        // Only the last packet crosses first_discard_sample
+        // (-end_pad + 529 + 8·1152); it loses end_pad - 529 samples.
+        assert_eq!(&discards[..7], &[0u32; 7]);
+        assert_eq!(discards[7], 756 - 528 - 1);
     }
 
     /// End-to-end: packets through Mp3Decoder produce FLTP frames.

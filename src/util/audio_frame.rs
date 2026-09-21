@@ -176,6 +176,23 @@ impl AudioFrame {
         // ch_layout/format describe the buffer shape — NOT copied (C's
         // copy_props skips every format-describing field).
     }
+
+    /// The frame side of `AV_PKT_DATA_SKIP_SAMPLES` as libavcodec's
+    /// decode path applies it (decode.c): drop `start` leading and `end`
+    /// trailing samples in place — planes shift left, `nb_samples`
+    /// shrinks, `pts`/`duration` follow (timestamps in tb = 1/rate are
+    /// sample counts, so the shift is one sample per unit).
+    pub fn crop(&mut self, start: usize, end: usize) {
+        let keep = self.nb_samples.saturating_sub(start + end);
+        let bps = self.format.bytes_per_sample();
+        for p in 0..self.nb_planes() {
+            let plane = self.plane_mut(p);
+            plane.copy_within(start * bps..(start + keep) * bps, 0);
+        }
+        self.pts += start as i64;
+        self.duration = self.duration.saturating_sub((start + end) as i64);
+        self.nb_samples = keep;
+    }
 }
 
 #[cfg(test)]

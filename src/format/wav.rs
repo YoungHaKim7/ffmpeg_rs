@@ -667,6 +667,9 @@ impl Demuxer for WavDemuxer {
             start_time: NOPTS,
             duration: NOPTS,
             nb_frames: 0,
+            start_skip_samples: 0,
+            first_discard_sample: 0,
+            last_discard_sample: 0,
         };
         // sample_fmt from the codec id (C fills codecpar->format at
         // find_stream_info via the decoder; the port has no probing layer,
