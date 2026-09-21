@@ -41,6 +41,7 @@ use crate::{
 use super::{
     Stream,
     demux::{DemuxOptions, Demuxer, InputFormat},
+    id3,
     io::IoContext,
 };
 
@@ -215,8 +216,8 @@ impl Demuxer for Mp3Demuxer {
     /// two consecutive matching frames, codecpar from the first header.
     fn read_header(&mut self, io: &mut IoContext) -> Result<Stream> {
         let head = io.peek(10)?;
-        if head.len() >= 10 && id3v2_match(&head) {
-            skip_id3v2(io)?;
+        if head.len() >= 10 && id3::id3v2_match(&head) {
+            id3::skip_id3v2(io)?;
         }
 
         let mut st = Stream::new_audio(0);
@@ -294,7 +295,7 @@ impl Demuxer for Mp3Demuxer {
         loop {
             let pos = io.tell();
             let mut hb = [0u8; 4];
-            if read_full(io, &mut hb).is_err() {
+            if id3::read_full(io, &mut hb).is_err() {
                 return Err(Error::Eof);
             }
             let header = u32::from_be_bytes(hb);
@@ -310,7 +311,7 @@ impl Demuxer for Mp3Demuxer {
             let fs = (h.frame_size as usize).min(MPA_MAX_CODED_FRAME_SIZE + 512);
             let mut data = vec![0u8; fs];
             data[..4].copy_from_slice(&hb);
-            if read_full(io, &mut data[4..]).is_err() {
+            if id3::read_full(io, &mut data[4..]).is_err() {
                 return Err(Error::Eof);
             }
             let mut pkt = Packet::from_vec(data);
@@ -324,47 +325,8 @@ impl Demuxer for Mp3Demuxer {
     }
 }
 
-/// ID3v2 magic `ff_id3v2_match` (id3v2.h/c): "ID3" + version ≠ 0xff.
-fn id3v2_match(buf: &[u8]) -> bool {
-    buf.len() >= 10
-        && buf[0] == b'I'
-        && buf[1] == b'D'
-        && buf[2] == b'3'
-        && buf[3] != 0xff
-        && buf[4] != 0xff
-}
-
-/// `get_size` (id3v2.c:210-217): 7-bit-per-byte syncsafe size.
-fn id3v2_tag_len(buf: &[u8]) -> usize {
-    ((buf[6] as usize & 0x7f) << 21)
-        | ((buf[7] as usize & 0x7f) << 14)
-        | ((buf[8] as usize & 0x7f) << 7)
-        | (buf[9] as usize & 0x7f) + 10
-}
-
-/// `ff_id3v2_skip` shape: consume the whole tag (header + body + footer).
-/// Returns the total tag length.
-fn skip_id3v2(io: &mut IoContext) -> Result<usize> {
-    let mut head = [0u8; 10];
-    read_full(io, &mut head)?;
-    let len = id3v2_tag_len(&head);
-    let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
-    io.seek(io.tell() + (len - 10 + footer) as u64)?;
-    Ok(len + footer)
-}
-
-/// `io.read` until the buffer is full; Err(Eof) if it runs dry mid-way
-/// (C's avio_read + short-check).
-fn read_full(io: &mut IoContext, buf: &mut [u8]) -> Result<()> {
-    let mut got = 0;
-    while got < buf.len() {
-        match io.read(&mut buf[got..])? {
-            0 => return Err(Error::Eof),
-            n => got += n,
-        }
-    }
-    Ok(())
-}
+// ID3v2 helpers moved to the shared `super::id3` module (id3v2.c is
+// shared by every raw-audio demuxer in C too).
 
 /// Read what `io` will give without failing at EOF — the tag-frame
 /// buffer's short-read shape (a truncated frame parses as zeros, as it
@@ -411,7 +373,7 @@ fn be16(b: &[u8], o: usize) -> u16 {
 fn check_at(io: &mut IoContext, pos: u64) -> Result<(u32, usize)> {
     io.seek(pos)?;
     let mut hb = [0u8; 4];
-    read_full(io, &mut hb)?;
+    id3::read_full(io, &mut hb)?;
     let header = u32::from_be_bytes(hb);
     ff_mpa_check_header(header)?;
     let mut h = MpaDecodeHeader::default();
@@ -471,7 +433,7 @@ pub fn probe(buf: &[u8]) -> u32 {
         50
     } else if max_frames >= 4 && buf.len() < 2 * max_framesizes {
         25
-    } else if id3v2_match(&buf[buf0.min(buf.len() - 10)..]) {
+    } else if id3::id3v2_match(&buf[buf0.min(buf.len() - 10)..]) {
         13
     } else if max_frames >= 1 && buf.len() < 10 * max_framesizes {
         1
@@ -538,7 +500,7 @@ mod tests {
     #[test]
     fn id3v2_length_syncsafe() {
         let tag = vec![b'I', b'D', b'3', 4, 0, 0, 0, 0, 0, 5];
-        assert_eq!(id3v2_tag_len(&tag), 15);
+        assert_eq!(id3::id3v2_tag_len(&tag), 15);
     }
 
     #[test]

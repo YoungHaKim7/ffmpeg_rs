@@ -639,31 +639,36 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
     let in_st = ictx.streams[0].clone();
 
     // ---- decoder ----------------------------------------------------------
-    // Codec dispatch: PCM family direct, MP3 through Mp3Decoder (FLTP
-    // out, resampled to the output format below like every source).
+    // Codec dispatch: PCM family direct, MP3/AAC through their decoders
+    // (FLTP out, resampled to the output format below like every source).
     let mut pcm_decoder;
     let mut mp3_decoder;
+    let mut aac_decoder;
     enum AnyDecoder<'a> {
         Pcm(&'a mut PcmDecoder),
         Mp3(&'a mut crate::codec::audio::mp3::Mp3Decoder),
+        Aac(&'a mut crate::codec::audio::aac::AacDecoder),
     }
     impl AnyDecoder<'_> {
         fn init(&mut self, p: &CodecParameters) -> Result<()> {
             match self {
                 AnyDecoder::Pcm(d) => AudioDecoder::init(*d, p),
                 AnyDecoder::Mp3(d) => AudioDecoder::init(*d, p),
+                AnyDecoder::Aac(d) => AudioDecoder::init(*d, p),
             }
         }
         fn send_packet(&mut self, p: Option<&Packet>) -> Result<()> {
             match self {
                 AnyDecoder::Pcm(d) => AudioDecoder::send_packet(*d, p),
                 AnyDecoder::Mp3(d) => AudioDecoder::send_packet(*d, p),
+                AnyDecoder::Aac(d) => AudioDecoder::send_packet(*d, p),
             }
         }
         fn receive_frame(&mut self) -> Result<crate::util::audio_frame::AudioFrame> {
             match self {
                 AnyDecoder::Pcm(d) => AudioDecoder::receive_frame(*d),
                 AnyDecoder::Mp3(d) => AudioDecoder::receive_frame(*d),
+                AnyDecoder::Aac(d) => AudioDecoder::receive_frame(*d),
             }
         }
     }
@@ -672,6 +677,11 @@ fn transcode_audio(cli: &Cli) -> Result<Stats> {
             mp3_decoder = crate::codec::audio::mp3::Mp3Decoder::new();
             AudioDecoder::init(&mut mp3_decoder, &in_st.codecpar)?;
             AnyDecoder::Mp3(&mut mp3_decoder)
+        }
+        CodecId::Aac => {
+            aac_decoder = crate::codec::audio::aac::AacDecoder::new();
+            AudioDecoder::init(&mut aac_decoder, &in_st.codecpar)?;
+            AnyDecoder::Aac(&mut aac_decoder)
         }
         id if crate::codec::audio::pcm::sample_fmt(id).is_some() => {
             pcm_decoder = PcmDecoder::new();

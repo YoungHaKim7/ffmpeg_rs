@@ -24,7 +24,9 @@
 //! interleaving (single stream), seeking, metadata, chapters, multiple
 //! streams, `pipe:` URLs.
 
+pub mod aac;
 pub mod demux;
+pub mod id3;
 pub mod io;
 pub mod mp3;
 pub mod mux;

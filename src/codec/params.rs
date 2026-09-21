@@ -59,6 +59,9 @@ pub enum CodecId {
     Mp2,
     /// `AV_CODEC_ID_MP3` — MPEG audio layer 3.
     Mp3,
+    /// `AV_CODEC_ID_AAC` — MPEG-2/4 AAC (ADTS-framed; the port decodes
+    /// the AAC-LC object type).
+    Aac,
 }
 
 impl CodecId {
@@ -84,6 +87,7 @@ impl CodecId {
             CodecId::Mp1 => "mp1",
             CodecId::Mp2 => "mp2",
             CodecId::Mp3 => "mp3",
+            CodecId::Aac => "aac",
         }
     }
 }

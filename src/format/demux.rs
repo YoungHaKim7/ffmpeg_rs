@@ -49,6 +49,13 @@ pub static INPUT_FORMATS: &[InputFormat] = &[
         make: |_| Box::new(super::mp3::Mp3Demuxer::new()),
     },
     InputFormat {
+        name: "aac",
+        long_name: "raw ADTS AAC (Advanced Audio Coding)",
+        extensions: &["aac"],
+        probe: Some(super::aac::probe),
+        make: |_| Box::new(super::aac::AdtsDemuxer::new()),
+    },
+    InputFormat {
         name: "nut",
         long_name: "NUT",
         extensions: &["nut"],
