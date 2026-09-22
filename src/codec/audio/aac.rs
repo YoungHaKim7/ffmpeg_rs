@@ -96,6 +96,13 @@ mod pos {
     pub const LFE2: u8 = 6;
 }
 
+// The swb_offset lookups during the apply stage need the sampling index
+// outside the element tree; stash it in a thread-local like C's m4ac.
+use std::cell::Cell;
+thread_local! {
+    static SRATE_IDX: Cell<usize> = const { Cell::new(4) };
+}
+
 /// `SCALE_DIFF_ZERO` (aac.h:80): scalefactor VLC zero-difference code.
 const SCALE_DIFF_ZERO: i32 = 60;
 /// `NOISE_PRE` / `NOISE_PRE_BITS` / `NOISE_OFFSET` (aac.h:84-86).
@@ -112,8 +119,8 @@ const MAX_ELEM_ID: usize = 16;
 
 /// `ff_mpeg4audio_sample_rates` (mpeg4audio_sample_rates.h:30).
 const M4_SAMPLE_RATES: [i32; 16] = [
-    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350, 0,
-    0, 0,
+    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350, 0, 0,
+    0,
 ];
 
 /// `ff_mpeg4audio_channels` (mpeg4audio.c) — chan_config per count.
@@ -401,11 +408,7 @@ impl<'a> Gb<'a> {
     /// The next n bits LEFT-aligned in a u32 (C's `GET_CACHE` /
     /// `SHOW_UBITS(v) << (32-v)` shapes the sign/escape paths rely on).
     fn peek_left(&self, n: u32) -> u32 {
-        if n == 0 {
-            0
-        } else {
-            self.peek(n) << (32 - n)
-        }
+        if n == 0 { 0 } else { self.peek(n) << (32 - n) }
     }
 
     /// `skip_bits` (index saturates; `left()` never lies below 0 the way
@@ -725,15 +728,20 @@ fn count_channels(layout: &[[u8; 3]]) -> usize {
     layout
         .iter()
         .map(|row| {
-            (1 + (row[0] == ty::CPE) as usize)
-                * (row[2] != pos::OFF && row[2] != pos::CC) as usize
+            (1 + (row[0] == ty::CPE) as usize) * (row[2] != pos::OFF && row[2] != pos::CC) as usize
         })
         .sum()
 }
 
 /// `che_configure` (aacdec.c:142): allocate the element and append its
 /// channels to the output order.
-fn che_configure(ctx: &mut AacContext, position: u8, ty: u8, id: usize, channels: &mut usize) -> Result<()> {
+fn che_configure(
+    ctx: &mut AacContext,
+    position: u8,
+    ty: u8,
+    id: usize,
+    channels: &mut usize,
+) -> Result<()> {
     if position != pos::OFF {
         if ctx.che[ty as usize][id].is_none() {
             ctx.che[ty as usize][id] = Some(Che::new());
@@ -1014,7 +1022,12 @@ fn pop_output_configuration(ctx: &mut AacContext) {
 /// `ff_aac_output_configure` (aacdec.c:487) — with `sniff_channel_order`
 /// folded in: the map is reordered to output order, elements allocated,
 /// and the channel layout derived from the sniffed mask.
-fn output_configure(ctx: &mut AacContext, layout_map: &[[u8; 3]], oc_type: OcStatus, get_new_frame: bool) -> Result<()> {
+fn output_configure(
+    ctx: &mut AacContext,
+    layout_map: &[[u8; 3]],
+    oc_type: OcStatus,
+    get_new_frame: bool,
+) -> Result<()> {
     let _ = get_new_frame; // frame buffers are built per-packet here
     let mut map = layout_map.to_vec();
     let mut id_map = [[[0u8; MAX_ELEM_ID]; 8]; 1];
@@ -1234,7 +1247,11 @@ fn decode_ics_info(ctx: &AacContext, ics: &mut Ics, gb: &mut Gb) -> Result<()> {
 
 /// `decode_band_types` (aacdec.c:1545) — section_data.
 fn decode_band_types(ics: &Ics, band_type: &mut [u8; 128], gb: &mut Gb) -> Result<()> {
-    let bits = if ics.window_sequence[0] == win::EIGHT_SHORT { 3 } else { 5 };
+    let bits = if ics.window_sequence[0] == win::EIGHT_SHORT {
+        3
+    } else {
+        5
+    };
     for g in 0..ics.num_window_groups {
         let mut k = 0usize;
         while k < ics.max_sfb as usize {
@@ -1281,11 +1298,7 @@ fn decode_scalefactors(
     gb: &mut Gb,
     global_gain: u32,
 ) -> Result<()> {
-    let mut offset = [
-        global_gain as i32,
-        global_gain as i32 - NOISE_OFFSET,
-        0i32,
-    ];
+    let mut offset = [global_gain as i32, global_gain as i32 - NOISE_OFFSET, 0i32];
     let mut noise_flag = true;
     let mut idx = 0usize;
     for g in 0..ics.num_window_groups {
@@ -1434,7 +1447,12 @@ fn decode_channel_map(map: &mut [[u8; 3]], p: u8, gb: &mut Gb, n: usize) {
 
 /// `decode_pce` (aacdec.c:820) — height extension parsed and applied.
 /// Returns the tag count.
-fn decode_pce(ctx: &mut AacContext, map: &mut Vec<[u8; 3]>, gb: &mut Gb, byte_align_ref: usize) -> Result<usize> {
+fn decode_pce(
+    ctx: &mut AacContext,
+    map: &mut Vec<[u8; 3]>,
+    gb: &mut Gb,
+    byte_align_ref: usize,
+) -> Result<usize> {
     gb.skip(2); // object_type
     let sampling_index = gb.read(4) as usize;
     if ctx.oc[1].m4ac.sampling_index != sampling_index as i32 {
@@ -1742,7 +1760,11 @@ fn decode_spectrum_and_dequant(
                             loop {
                                 let cb_idx = vlc.get(gb)? as usize;
                                 let nnz = (cb_idx >> 8) & 15;
-                                let mut sign = if nnz != 0 { gb.peek_left(nnz as u32) } else { 0 };
+                                let mut sign = if nnz != 0 {
+                                    gb.peek_left(nnz as u32)
+                                } else {
+                                    0
+                                };
                                 gb.skip(nnz as u32);
                                 let mut nz = (cb_idx >> 12) as u32;
                                 let sbits = sf.to_bits();
@@ -1889,8 +1911,7 @@ fn decode_spectrum_and_dequant(
                     co /= sce.sf[idx];
                     ico = co / (co.abs().sqrt().sqrt()) + if co > 0.0 { -ico } else { ico };
                 }
-                sce.coeffs[pulse.pos[i].min(1023)] =
-                    ico.abs().cbrt() * ico * sce.sf[idx];
+                sce.coeffs[pulse.pos[i].min(1023)] = ico.abs().cbrt() * ico * sce.sf[idx];
             }
         }
     }
@@ -1902,7 +1923,13 @@ fn decode_spectrum_and_dequant(
 // ---------------------------------------------------------------------
 
 /// `ff_aac_decode_ics` (aacdec.c:1785) — non-ER LC syntax.
-fn decode_ics(ctx: &mut AacContext, t: &Tables, sce: &mut Sce, gb: &mut Gb, common_window: bool) -> Result<()> {
+fn decode_ics(
+    ctx: &mut AacContext,
+    t: &Tables,
+    sce: &mut Sce,
+    gb: &mut Gb,
+    common_window: bool,
+) -> Result<()> {
     let mut pulse = Pulse::default();
     let global_gain = gb.read(8);
 
@@ -1927,7 +1954,8 @@ fn decode_ics(ctx: &mut AacContext, t: &Tables, sce: &mut Sce, gb: &mut Gb, comm
         decode_pulses(
             &mut pulse,
             gb,
-            sce.ics.swb_offset(ctx.oc[1].m4ac.sampling_index.clamp(0, 12) as usize),
+            sce.ics
+                .swb_offset(ctx.oc[1].m4ac.sampling_index.clamp(0, 12) as usize),
             sce.ics.num_swb,
         )?;
     }
@@ -1970,7 +1998,10 @@ fn decode_cpe(ctx: &mut AacContext, t: &Tables, che: &mut Che, gb: &mut Gb) -> R
             decode_mid_side_stereo(che, gb, ms_present);
         }
     }
-    let (mut ch0, mut ch1) = (std::mem::take(&mut che.ch[0]), std::mem::take(&mut che.ch[1]));
+    let (mut ch0, mut ch1) = (
+        std::mem::take(&mut che.ch[0]),
+        std::mem::take(&mut che.ch[1]),
+    );
     let r0 = decode_ics(ctx, t, &mut ch0, gb, common_window);
     che.ch[0] = ch0;
     r0?;
@@ -2274,8 +2305,10 @@ fn imdct_and_windowing(t: &Tables, sce: &mut Sce) {
     let coeffs: Vec<f32> = sce.coeffs.to_vec();
     if seq[0] == win::EIGHT_SHORT {
         for i in 0..8 {
-            t.mdct_128
-                .run(&coeffs[i * 128..i * 128 + 128], &mut buf[i * 128..i * 128 + 128]);
+            t.mdct_128.run(
+                &coeffs[i * 128..i * 128 + 128],
+                &mut buf[i * 128..i * 128 + 128],
+            );
         }
     } else {
         t.mdct_1024.run(&coeffs, &mut buf[..1024]);
@@ -2357,12 +2390,7 @@ fn apply_independent_coupling(target: &mut Che, cce: &Che, index: usize) {
 }
 
 /// `apply_channel_coupling` (aacdec.c:2090) — one coupling point.
-fn apply_channel_coupling(
-    ctx: &mut AacContext,
-    ty: u8,
-    id: usize,
-    coupling_point: u8,
-) {
+fn apply_channel_coupling(ctx: &mut AacContext, ty: u8, id: usize, coupling_point: u8) {
     for cce_id in 0..MAX_ELEM_ID {
         let Some(cce) = ctx.che[ty::CCE as usize][cce_id].clone() else {
             continue;
@@ -2466,7 +2494,11 @@ fn spectral_to_sample(ctx: &mut AacContext, t: &Tables) {
                     let mut ch0 = std::mem::take(&mut che.ch[0]);
                     imdct_and_windowing(t, &mut ch0);
                     let second = ty == ty::CPE;
-                    let mut ch1 = if second { Some(std::mem::take(&mut che.ch[1])) } else { None };
+                    let mut ch1 = if second {
+                        Some(std::mem::take(&mut che.ch[1]))
+                    } else {
+                        None
+                    };
                     if let Some(ch1) = ch1.as_mut() {
                         imdct_and_windowing(t, ch1);
                     }
@@ -2484,13 +2516,6 @@ fn spectral_to_sample(ctx: &mut AacContext, t: &Tables) {
             }
         }
     }
-}
-
-// The swb_offset lookups during the apply stage need the sampling index
-// outside the element tree; stash it in a thread-local like C's m4ac.
-use std::cell::Cell;
-thread_local! {
-    static SRATE_IDX: Cell<usize> = const { Cell::new(4) };
 }
 
 // ---------------------------------------------------------------------
@@ -2690,7 +2715,7 @@ impl AudioDecoder for AacDecoder {
                 return Err(Error::Unsupported(format!(
                     "codec '{}' is not the AAC decoder",
                     other.name()
-                )))
+                )));
             }
         }
         self.params = params.clone();
@@ -2789,7 +2814,6 @@ impl AudioDecoder for AacDecoder {
             None => Err(Error::Again),
         }
     }
-
 }
 
 // AacContext::fill_skip — declared here to keep the struct literal simple.
@@ -2831,7 +2855,10 @@ mod tests {
     }
     impl BitWriter {
         fn new() -> Self {
-            BitWriter { bytes: Vec::new(), bit: 0 }
+            BitWriter {
+                bytes: Vec::new(),
+                bit: 0,
+            }
         }
         fn put(&mut self, val: u32, n: u32) {
             for i in (0..n).rev() {
@@ -2864,7 +2891,10 @@ mod tests {
         let mut w = BitWriter::new();
         let mut syms = Vec::new();
         for i in [0usize, 1, 60, 61, 119, 120, 5, 40] {
-            w.put(tables::AAC_SCALEFACTOR_CODE[i], tables::AAC_SCALEFACTOR_BITS[i] as u32);
+            w.put(
+                tables::AAC_SCALEFACTOR_CODE[i],
+                tables::AAC_SCALEFACTOR_BITS[i] as u32,
+            );
             syms.push(i as u16);
         }
         let mut gb = Gb::new(&w.bytes);
@@ -2875,7 +2905,10 @@ mod tests {
         let mut w = BitWriter::new();
         let mut syms = Vec::new();
         for i in [0usize, 1, 40, 80] {
-            w.put(tables::SPECTRAL_CODES[0][i], tables::SPECTRAL_BITS[0][i] as u32);
+            w.put(
+                tables::SPECTRAL_CODES[0][i],
+                tables::SPECTRAL_BITS[0][i] as u32,
+            );
             syms.push(tables::CODEBOOK_VECTOR_IDX[0][i]);
         }
         let mut gb = Gb::new(&w.bytes);
@@ -2886,7 +2919,10 @@ mod tests {
         let mut w = BitWriter::new();
         let mut syms = Vec::new();
         for i in [0usize, 1, 100, 288] {
-            w.put(tables::SPECTRAL_CODES[10][i], tables::SPECTRAL_BITS[10][i] as u32);
+            w.put(
+                tables::SPECTRAL_CODES[10][i],
+                tables::SPECTRAL_BITS[10][i] as u32,
+            );
             syms.push(tables::CODEBOOK_VECTOR_IDX[10][i]);
         }
         let mut gb = Gb::new(&w.bytes);
@@ -2915,10 +2951,7 @@ mod tests {
             let len = int_of(toks[i + 3]);
             let n = 2 * len;
             let mut inputs = vec![0f32; len];
-            let mut x = (tv as u64)
-                .wrapping_mul(2654435761)
-                .wrapping_add(12345)
-                & 0xFFFF_FFFF;
+            let mut x = (tv as u64).wrapping_mul(2654435761).wrapping_add(12345) & 0xFFFF_FFFF;
             for v in inputs.iter_mut() {
                 x = x
                     .wrapping_mul(6364136223846793005)
@@ -2951,7 +2984,11 @@ mod tests {
 
     /// Parse C `%a` hex floats: 0x1.abcdp+12 / -0x1.fp-9.
     fn hexfloat(s: &str) -> f64 {
-        let (neg, s) = if let Some(r) = s.strip_prefix('-') { (true, r) } else { (false, s) };
+        let (neg, s) = if let Some(r) = s.strip_prefix('-') {
+            (true, r)
+        } else {
+            (false, s)
+        };
         let s = s.strip_prefix("0x").unwrap();
         let (mant, exp) = s.split_once('p').unwrap();
         let exp: i32 = exp.parse().unwrap();
@@ -3026,7 +3063,8 @@ mod tests {
                 p.data[off + 4],
                 p.data[off + 5],
                 p.data[off + 6],
-            ]) >> 13) & 0x1fff) as usize;
+            ]) >> 13)
+                & 0x1fff) as usize;
             let mut pkt = Packet::from_vec(p.data[off..off + fsize].to_vec());
             pkt.pts = (got * 1024) as i64;
             pkt.duration = 1024;
@@ -3043,7 +3081,10 @@ mod tests {
             off += fsize;
         }
         assert_eq!(got, 2, "one frame per packet");
-        assert!(max_abs < 1e-6, "silent frame decodes to zero, got {max_abs}");
+        assert!(
+            max_abs < 1e-6,
+            "silent frame decodes to zero, got {max_abs}"
+        );
     }
 
     /// REAL-file smoke: the whole pipeline (ADTS demux → decode) vs the
@@ -3089,16 +3130,22 @@ mod tests {
             }
         }
         assert!(frames > 100, "decoded only {frames} frames");
+        let mut dump = Vec::with_capacity(out.len() * 4);
+        for v in &out {
+            dump.extend_from_slice(&v.to_le_bytes());
+        }
+        let _ = std::fs::write("/tmp/aac_our.pcm", dump);
 
         // Both decoders include the encoder priming (ADTS carries no
         // gapless signal), so the streams align without any trimming.
         let n_ref = ref_pcm.len() / 2; // total s16 samples (both channels)
         assert_eq!(out.len(), n_ref, "sample count must match ffmpeg exactly");
 
-        let skip = n_ref / 40;
+        let pairs = n_ref / 2;
+        let skip = pairs / 40;
         let mut max_diff = 0f32;
         let mut over = 0usize;
-        for k in skip..n_ref - skip {
+        for k in skip..pairs - skip {
             let rb = &ref_pcm[4 * k..4 * k + 4];
             let r = i16::from_le_bytes([rb[2], rb[3]]) as f32 / 32768.0; // right ch
             let o = out[2 * k + 1];
@@ -3110,9 +3157,9 @@ mod tests {
         }
         eprintln!("SMOKE: frames={frames} samples={n_ref} max_diff={max_diff:.4} over=/{over}");
         assert!(
-            over * 1000 < (n_ref - 2 * skip),
+            over * 1000 < (pairs - 2 * skip),
             "{over} samples (of {}) differ by >0.02, max {max_diff:.4}",
-            n_ref - 2 * skip
+            pairs - 2 * skip
         );
     }
 }
