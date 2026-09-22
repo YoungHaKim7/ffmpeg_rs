@@ -98,49 +98,6 @@ struct VfGraph {
     sink: NodeId,
 }
 
-/// `av_buffersrc_parameters_set` via the option string (the port's only
-/// parameter path) — video fields only, colorspace/range when declared.
-fn buffersrc_args(in_st: &Stream) -> String {
-    use std::fmt::Write;
-    let par = &in_st.codecpar;
-    let mut s = format!(
-        "video_size={}x{}:pix_fmt={}:time_base={}/{}:frame_rate={}/{}",
-        par.width,
-        par.height,
-        par.format.name(),
-        in_st.time_base.num,
-        in_st.time_base.den,
-        in_st.avg_frame_rate.num,
-        in_st.avg_frame_rate.den,
-    );
-    if in_st.sample_aspect_ratio.num != 0 || in_st.sample_aspect_ratio.den != 0 {
-        let _ = write!(
-            s,
-            ":sar={}/{}",
-            in_st.sample_aspect_ratio.num, in_st.sample_aspect_ratio.den
-        );
-    }
-    let csp_name = |c: ColorSpace| match c {
-        ColorSpace::Rgb => "gbr", // av_color_space_name(AVCOL_SPC_RGB)
-        ColorSpace::Bt709 => "bt709",
-        ColorSpace::Fcc => "fcc",
-        ColorSpace::Bt470bg => "bt470bg",
-        ColorSpace::Smpte170m => "smpte170m",
-        ColorSpace::Smpte240m => "smpte240m",
-        ColorSpace::Bt2020Ncl => "bt2020nc",
-        _ => "",
-    };
-    if !csp_name(par.color_space).is_empty() {
-        let _ = write!(s, ":colorspace={}", csp_name(par.color_space));
-    }
-    match par.color_range {
-        ColorRange::Mpeg => s.push_str(":range=tv"),
-        ColorRange::Jpeg => s.push_str(":range=pc"),
-        _ => {}
-    }
-    s
-}
-
 impl VfGraph {
     /// `configure_filtergraph` (ffmpeg_filter.c): create the endpoints,
     /// parse the description, attach the open pads, negotiate formats.
@@ -222,6 +179,49 @@ impl VfGraph {
         buffersink::buffersink_get_color_range(&self.g, self.sink)
             .unwrap_or(ColorRange::Unspecified)
     }
+}
+
+/// `av_buffersrc_parameters_set` via the option string (the port's only
+/// parameter path) — video fields only, colorspace/range when declared.
+fn buffersrc_args(in_st: &Stream) -> String {
+    use std::fmt::Write;
+    let par = &in_st.codecpar;
+    let mut s = format!(
+        "video_size={}x{}:pix_fmt={}:time_base={}/{}:frame_rate={}/{}",
+        par.width,
+        par.height,
+        par.format.name(),
+        in_st.time_base.num,
+        in_st.time_base.den,
+        in_st.avg_frame_rate.num,
+        in_st.avg_frame_rate.den,
+    );
+    if in_st.sample_aspect_ratio.num != 0 || in_st.sample_aspect_ratio.den != 0 {
+        let _ = write!(
+            s,
+            ":sar={}/{}",
+            in_st.sample_aspect_ratio.num, in_st.sample_aspect_ratio.den
+        );
+    }
+    let csp_name = |c: ColorSpace| match c {
+        ColorSpace::Rgb => "gbr", // av_color_space_name(AVCOL_SPC_RGB)
+        ColorSpace::Bt709 => "bt709",
+        ColorSpace::Fcc => "fcc",
+        ColorSpace::Bt470bg => "bt470bg",
+        ColorSpace::Smpte170m => "smpte170m",
+        ColorSpace::Smpte240m => "smpte240m",
+        ColorSpace::Bt2020Ncl => "bt2020nc",
+        _ => "",
+    };
+    if !csp_name(par.color_space).is_empty() {
+        let _ = write!(s, ":colorspace={}", csp_name(par.color_space));
+    }
+    match par.color_range {
+        ColorRange::Mpeg => s.push_str(":range=tv"),
+        ColorRange::Jpeg => s.push_str(":range=pc"),
+        _ => {}
+    }
+    s
 }
 
 /// The whole pipeline, `transcode()` in fftools/ffmpeg.c.
