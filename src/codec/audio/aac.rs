@@ -101,6 +101,7 @@ mod pos {
 use std::cell::Cell;
 thread_local! {
     static SRATE_IDX: Cell<usize> = const { Cell::new(4) };
+    static DUMP_FRAME: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
 /// `SCALE_DIFF_ZERO` (aac.h:80): scalefactor VLC zero-difference code.
@@ -1972,6 +1973,70 @@ fn decode_ics(
     }
 
     decode_spectrum_and_dequant(ctx, t, gb, pulse_present.then_some(&pulse), sce)?;
+
+    // AAC_DUMP (the MP3_DUMP pattern): per-frame spectral sanity lines.
+    DUMP_FRAME.with(|c| c.set(c.get().wrapping_add(1)));
+    if std::env::var_os("AAC_DUMP").is_some() {
+        use std::fmt::Write as _;
+        let ics = &sce.ics;
+        let mut line = String::new();
+        let _ = write!(
+            &mut line,
+            "ICS wseq={}/{} kb={}/{} groups={} max_sfb={} | bt[0..12]=",
+            ics.window_sequence[0], ics.window_sequence[1], ics.use_kb_window[0] as u8, ics.use_kb_window[1] as u8, ics.num_window_groups,
+            ics.max_sfb
+        );
+        for i in 0..ics.max_sfb.min(12) as usize {
+            let _ = write!(&mut line, "{:02x}", sce.band_type[i]);
+        }
+        let _ = write!(&mut line, " | sf[0..12]=");
+        for i in 0..ics.max_sfb.min(12) as usize {
+            let _ = write!(&mut line, "{:+.3} ", sce.sf[i]);
+        }
+        let _ = write!(&mut line, "| sfb E[0..16]=");
+        let offs: Vec<usize> = ics
+            .swb_offset(ctx.oc[1].m4ac.sampling_index.clamp(0, 12) as usize)
+            .iter()
+            .map(|&o| o as usize)
+            .collect();
+        for i in 0..(ics.max_sfb as usize).min(16) {
+            let e: f32 = sce.coeffs[offs[i]..offs[i + 1]]
+                .iter()
+                .map(|v| v * v)
+                .sum();
+            let _ = write!(&mut line, "{:1.0} ", e.log10().max(-9.0));
+        }
+        let tns = &sce.tns;
+        let mut t = String::new();
+        let _ = write!(
+            &mut t,
+            " | tns={} nfilt={:?} len={:?} dir={:?} ord={:?} coef0={:?}",
+            tns.present,
+            &tns.n_filt[..ics.num_windows.min(2)],
+            &tns.length[..ics.num_windows.min(2)],
+            &tns.direction[..4.min(4 * ics.num_windows)],
+            &tns.order[..ics.num_windows.min(2)],
+            &tns.coef[0][0][..3]
+        );
+        let noise_bands = (0..ics.max_sfb as usize)
+            .filter(|&i| sce.band_type[i] == bt::NOISE)
+            .count();
+        let _ = write!(&mut t, " | pns_bands={noise_bands}");
+        if let Ok(fr) = std::env::var("AAC_DUMP_FRAME") {
+            if fr == format!("{}", DUMP_FRAME.with(|c| c.get())) {
+                let mut c = String::new();
+                for k in 0..1024usize {
+                    let _ = write!(&mut c, "{:08x} ", sce.coeffs[k].to_bits());
+                }
+                let _ = write!(&mut c, "| SAVED ");
+                for k in 0..1024usize {
+                    let _ = write!(&mut c, "{:08x} ", sce.saved[k].to_bits());
+                }
+                eprintln!("COEFFS {c}");
+            }
+        }
+        eprintln!("{line}{t}");
+    }
     Ok(())
 }
 
@@ -2250,14 +2315,15 @@ fn apply_tns(sce: &mut Sce) {
                 (1i64, start as i64)
             };
             pos += (w * 128) as i64;
-            for _ in 0..size {
+            for m in 0..size {
                 let p = pos as usize;
-                let mut acc = sce.coeffs[p];
-                for i in 1..=order.min(p.min(1023)) {
+                // C: for (i = 1; i <= FFMIN(m, order); i++) — the filter
+                // ramps up within THIS filter's run, not from the
+                // absolute spectrum position.
+                for i in 1..=m.min(order) {
                     let q = (pos - i as i64 * inc) as usize; // coef[start − i·inc]
-                    acc -= sce.coeffs[q] * lpc[i - 1];
+                    sce.coeffs[p] -= sce.coeffs[q] * lpc[i - 1];
                 }
-                sce.coeffs[p] = acc;
                 pos += inc;
             }
         }
@@ -2267,13 +2333,16 @@ fn apply_tns(sce: &mut Sce) {
 /// `vector_fmul_window` (float_dsp.c): `dst[k] = s0[k]·win[n−1−k] −
 /// s1[n−1−k]·win[k]`, `dst[n−1−k] = s0[k]·win[k] + s1[n−1−k]·win[n−1−k]`.
 fn vector_fmul_window(dst: &mut [f32], src0: &[f32], src1: &[f32], win: &[f32], n: usize) {
+    // float_dsp.c's pointer dance: `dst += len` up front, so `dst[i]`
+    // (i negative) lands at dst[0..n) and `dst[j]` at dst[n..2n) — the
+    // call writes 2n outputs, not n.
     for k in 0..n {
         let s0 = src0[k];
         let s1 = src1[n - 1 - k];
-        let wi = win[k];
-        let wj = win[n - 1 - k];
-        dst[k] = s0 * wj - s1 * wi;
-        dst[n - 1 - k] = s0 * wi + s1 * wj;
+        // dst[i] = s0·win[i] − s1·win[j]; dst[j] = s0·win[j] + s1·win[i]
+        // with i = k−n, j = n−1−k.
+        dst[k] = s0 * win[k] - s1 * win[n - 1 - k];
+        dst[2 * n - 1 - k] = s0 * win[n - 1 - k] + s1 * win[k];
     }
 }
 
@@ -2314,6 +2383,16 @@ fn imdct_and_windowing(t: &Tables, sce: &mut Sce) {
         t.mdct_1024.run(&coeffs, &mut buf[..1024]);
     }
 
+    if std::env::var_os("AAC_DUMP").is_some()
+        && DUMP_FRAME.with(|c| c.get()) == 6
+    {
+        use std::fmt::Write as _;
+        let mut c = String::new();
+        for k in 0..1024usize {
+            let _ = write!(&mut c, "{:08x} ", buf[k].to_bits());
+        }
+        eprintln!("BUF {c}");
+    }
     let out = &mut sce.ret_buf[..];
     let saved = &mut sce.saved[..];
 
@@ -2493,6 +2572,16 @@ fn spectral_to_sample(ctx: &mut AacContext, t: &Tables) {
                 if let Some(che) = ctx.che_mut(ty, id) {
                     let mut ch0 = std::mem::take(&mut che.ch[0]);
                     imdct_and_windowing(t, &mut ch0);
+                    if std::env::var_os("AAC_DUMP").is_some()
+                        && DUMP_FRAME.with(|c| c.get()) == 6
+                    {
+                        let mut c = String::new();
+                        for k in 0..1024usize {
+                            use std::fmt::Write as _;
+                            let _ = write!(&mut c, "{:08x} ", ch0.ret_buf[k].to_bits());
+                        }
+                        eprintln!("RETBUF {c}");
+                    }
                     let second = ty == ty::CPE;
                     let mut ch1 = if second {
                         Some(std::mem::take(&mut che.ch[1]))

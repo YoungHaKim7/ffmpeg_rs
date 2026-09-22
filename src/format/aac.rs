@@ -33,10 +33,10 @@ use crate::{
 };
 
 use super::{
-    id3,
-    demux::{DemuxOptions, Demuxer, InputFormat},
-    io::IoContext,
     Stream,
+    demux::{DemuxOptions, Demuxer, InputFormat},
+    id3,
+    io::IoContext,
 };
 
 /// `ADTS_HEADER_SIZE` (aacdec.c:33).
@@ -89,8 +89,8 @@ fn parse_adts(data: &[u8]) -> Result<AdtsHeaderInfo> {
     if (u16::from_be_bytes([data[0], data[1]]) >> 4) != 0xfff {
         return Err(Error::InvalidData("ADTS syncword missing".into()));
     }
-    let frame_length = ((u32::from_be_bytes([data[3], data[4], data[5], data[6]]) >> 13)
-        & 0x1fff) as usize;
+    let frame_length =
+        ((u32::from_be_bytes([data[3], data[4], data[5], data[6]]) >> 13) & 0x1fff) as usize;
     if frame_length < ADTS_HEADER_SIZE {
         return Err(Error::InvalidData("ADTS frame too short".into()));
     }
@@ -164,6 +164,10 @@ impl Demuxer for AdtsDemuxer {
         let mut st = Stream::new_audio(0);
         st.codecpar.codec_id = CodecId::Aac;
         st.codecpar.sample_rate = info.sample_rate;
+        // The port's AAC decoder emits FLTP (aacdec_float.c:157
+        // avctx->sample_fmt = AV_SAMPLE_FMT_FLTP); the transcode path
+        // resamples off this field.
+        st.codecpar.sample_fmt = crate::util::samplefmt::SampleFormat::Fltp;
         st.codecpar.ch_layout = match info.chan_config {
             1 => ChannelLayout::MONO,
             2 => ChannelLayout::STEREO,
@@ -242,12 +246,9 @@ pub fn probe(buf: &[u8]) -> u32 {
                 }
                 break;
             }
-            let fsize = ((u32::from_be_bytes([
-                buf[b2 + 3],
-                buf[b2 + 4],
-                buf[b2 + 5],
-                buf[b2 + 6],
-            ]) >> 13) & 0x1fff) as usize;
+            let fsize = ((u32::from_be_bytes([buf[b2 + 3], buf[b2 + 4], buf[b2 + 5], buf[b2 + 6]])
+                >> 13)
+                & 0x1fff) as usize;
             if fsize < ADTS_HEADER_SIZE {
                 break;
             }

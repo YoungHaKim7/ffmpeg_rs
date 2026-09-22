@@ -155,36 +155,6 @@ impl Y4mDemuxer {
     }
 }
 
-/// Leading decimal integer of a string, `sscanf("%d")` style (0 when absent).
-fn leading_int(s: &str) -> i32 {
-    let digits: String = s
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-')
-        .collect();
-    digits.parse().unwrap_or(0)
-}
-
-/// Parse `"%d:%d"` — the `F`/`A` header values. Like `sscanf`, parsing stops
-/// at the first non-numeric character ("1 Ip A1:1" → denominator 1).
-fn parse_ratio(tok: &[u8]) -> (i32, i32) {
-    let s = std::str::from_utf8(tok).unwrap_or("");
-    let mut parts = s.splitn(2, ':');
-    let n = parts.next().map(leading_int).unwrap_or(0);
-    let d = parts.next().map(leading_int).unwrap_or(0);
-    (n, d)
-}
-
-/// `strtol`-style leading integer of a byte token (None when no digits —
-/// the caller keeps its -1 sentinel, like an untouched C out-param).
-fn parse_i32(tok: &[u8]) -> Option<i32> {
-    let s = std::str::from_utf8(tok).ok()?;
-    let digits: String = s
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-')
-        .collect();
-    digits.parse().ok()
-}
-
 impl Demuxer for Y4mDemuxer {
     /// `yuv4_read_header` (yuv4mpegdec.c:34).
     fn read_header(&mut self, io: &mut IoContext) -> Result<Stream> {
@@ -450,15 +420,6 @@ impl Demuxer for Y4mDemuxer {
     }
 }
 
-/// `yuv4_probe` — magic match.
-pub fn probe(buf: &[u8]) -> u32 {
-    if buf.starts_with(Y4M_MAGIC) {
-        PROBE_SCORE_MAX
-    } else {
-        0
-    }
-}
-
 /// `ff_yuv4mpegpipe_muxer`'s private state (none — kept for symmetry).
 pub struct Y4mMuxer;
 
@@ -556,6 +517,45 @@ impl Muxer for Y4mMuxer {
         io.write_all(b"FRAME\n")?;
         io.write_all(pkt.as_slice())?;
         Ok(())
+    }
+}
+
+/// Leading decimal integer of a string, `sscanf("%d")` style (0 when absent).
+fn leading_int(s: &str) -> i32 {
+    let digits: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    digits.parse().unwrap_or(0)
+}
+
+/// Parse `"%d:%d"` — the `F`/`A` header values. Like `sscanf`, parsing stops
+/// at the first non-numeric character ("1 Ip A1:1" → denominator 1).
+fn parse_ratio(tok: &[u8]) -> (i32, i32) {
+    let s = std::str::from_utf8(tok).unwrap_or("");
+    let mut parts = s.splitn(2, ':');
+    let n = parts.next().map(leading_int).unwrap_or(0);
+    let d = parts.next().map(leading_int).unwrap_or(0);
+    (n, d)
+}
+
+/// `strtol`-style leading integer of a byte token (None when no digits —
+/// the caller keeps its -1 sentinel, like an untouched C out-param).
+fn parse_i32(tok: &[u8]) -> Option<i32> {
+    let s = std::str::from_utf8(tok).ok()?;
+    let digits: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    digits.parse().ok()
+}
+
+/// `yuv4_probe` — magic match.
+pub fn probe(buf: &[u8]) -> u32 {
+    if buf.starts_with(Y4M_MAGIC) {
+        PROBE_SCORE_MAX
+    } else {
+        0
     }
 }
 

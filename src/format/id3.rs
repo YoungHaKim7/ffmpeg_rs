@@ -5,8 +5,9 @@
 //! `ff_id3v2_read`-with-no-callbacks shape. `libavformat/aacdec.c` also
 //! meets ID3v2 tags *between* frames and re-syncs past them.
 
-use super::io::IoContext;
 use crate::util::error::{Error, Result};
+
+use super::io::IoContext;
 
 /// `ff_id3v2_match` (id3v2.c): "ID3" + version bytes ≠ 0xff.
 pub fn id3v2_match(buf: &[u8]) -> bool {
@@ -23,8 +24,7 @@ pub fn id3v2_tag_len(buf: &[u8]) -> usize {
     (((buf[6] as usize) & 0x7f) << 21)
         | (((buf[7] as usize) & 0x7f) << 14)
         | (((buf[8] as usize) & 0x7f) << 7)
-        | ((buf[9] as usize) & 0x7f)
-        + 10
+        | ((buf[9] as usize) & 0x7f) + 10
 }
 
 /// `ff_id3v2_skip` shape: consume the whole tag (header + body + footer).

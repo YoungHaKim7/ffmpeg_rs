@@ -50,6 +50,7 @@ use crate::{
 };
 
 pub use demux::{DemuxOptions, Demuxer, InputFormat, PROBE_SCORE_MAX};
+
 pub use mux::{Muxer, OutputFormat};
 
 /// `AVStream` subset (`avformat.h:768`) — one (video) stream of a file.
