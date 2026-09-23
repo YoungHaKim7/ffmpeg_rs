@@ -108,6 +108,15 @@ const DC_128_PRED: i8 = 3;
 
 const LEVEL_TAB_BITS: u32 = 8;
 
+/// MB partition shape (`ff_h264_p_mb_type_info` + the intra path).
+enum Part {
+    Intra(usize),
+    P16x16,
+    P16x8,
+    P8x16,
+    P8x8,
+}
+
 // ---------------------------------------------------------------------
 // Picture
 // ---------------------------------------------------------------------
@@ -162,7 +171,6 @@ impl Picture {
             y.clamp(0, self.h as i32 / 2 - 1) as usize * (self.w / 2)
                 + x.clamp(0, self.w as i32 / 2 - 1) as usize,
         )
-        // FIXME
         .unwrap_or(&0)
     }
 }
@@ -3440,15 +3448,6 @@ fn pred8x8_avail(
 
 fn type_mask_nnz(t: u32) -> bool {
     t != MB_UNAVAIL
-}
-
-/// MB partition shape (`ff_h264_p_mb_type_info` + the intra path).
-enum Part {
-    Intra(usize),
-    P16x16,
-    P16x8,
-    P8x16,
-    P8x8,
 }
 
 #[cfg(test)]
