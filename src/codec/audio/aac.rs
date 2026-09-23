@@ -559,6 +559,24 @@ impl Imdct {
     }
 }
 
+/// Every table the decoder builds at first use (C's static inits).
+struct Tables {
+    /// `ff_aac_pow2sf_tab` (aactab.c:47-95): pow(2, (i−POW_SF2_ZERO)/4),
+    /// computed with C's exact exp2_lut ladder.
+    pow2sf: Vec<f32>,
+    /// `ff_cbrt_tab` (cbrt_tablegen.h): IEEE bits of i^(4/3) — the
+    /// escape-value dequant table OR-ed with sign bits.
+    cbrt: Vec<u32>,
+    sine_1024: Vec<f32>,
+    sine_128: Vec<f32>,
+    kbd_1024: Vec<f32>,
+    kbd_128: Vec<f32>,
+    vlc_scalefactors: Vlc,
+    vlc_spectral: [Vlc; 11],
+    mdct_1024: Imdct,
+    mdct_128: Imdct,
+}
+
 /// `av_bessel_i0` (libavutil/mathematics.c:257) — minimax rational
 /// approximations (Blair & Edwards, AECL-4928); needed by the KBD window.
 fn bessel_i0(x: f64) -> f64 {
@@ -652,24 +670,6 @@ fn sine_window_init(n: usize) -> Vec<f32> {
     (0..n)
         .map(|i| ((i as f32 + 0.5) * (std::f32::consts::PI / (2.0 * n as f32))).sin())
         .collect()
-}
-
-/// Every table the decoder builds at first use (C's static inits).
-struct Tables {
-    /// `ff_aac_pow2sf_tab` (aactab.c:47-95): pow(2, (i−POW_SF2_ZERO)/4),
-    /// computed with C's exact exp2_lut ladder.
-    pow2sf: Vec<f32>,
-    /// `ff_cbrt_tab` (cbrt_tablegen.h): IEEE bits of i^(4/3) — the
-    /// escape-value dequant table OR-ed with sign bits.
-    cbrt: Vec<u32>,
-    sine_1024: Vec<f32>,
-    sine_128: Vec<f32>,
-    kbd_1024: Vec<f32>,
-    kbd_128: Vec<f32>,
-    vlc_scalefactors: Vlc,
-    vlc_spectral: [Vlc; 11],
-    mdct_1024: Imdct,
-    mdct_128: Imdct,
 }
 
 fn tables() -> &'static Tables {
