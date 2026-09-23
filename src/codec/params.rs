@@ -62,6 +62,9 @@ pub enum CodecId {
     /// `AV_CODEC_ID_AAC` — MPEG-2/4 AAC (ADTS-framed; the port decodes
     /// the AAC-LC object type).
     Aac,
+    /// `AV_CODEC_ID_H264` — H.264/AVC (Annex-B; the port decodes the
+    /// Constrained-Baseline subset: CAVLC, I/P slices).
+    H264,
 }
 
 impl CodecId {
@@ -88,6 +91,7 @@ impl CodecId {
             CodecId::Mp2 => "mp2",
             CodecId::Mp3 => "mp3",
             CodecId::Aac => "aac",
+            CodecId::H264 => "h264",
         }
     }
 }
