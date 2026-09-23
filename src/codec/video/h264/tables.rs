@@ -226,7 +226,7 @@ pub static RUN_BITS_5: [u8; 16] = [3, 0, 1, 3, 2, 5, 4, 0, 0, 0, 0, 0, 0, 0, 0, 
 pub static RUN_BITS_6: [u8; 16] = [7, 6, 5, 4, 3, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0];
 
 /// `ff_h264_golomb_to_pict_type[5]` (h264data.c:37).
-pub static GOLOMB_TO_PICT_TYPE: [u8; 5] = [0, 0, 0, 0, 0];
+pub static GOLOMB_TO_PICT_TYPE: [u8; 5] = [2, 3, 1, 4, 5];
 
 /// `ff_h264_i_mb_type_info` (h264data.c:66) as numeric triplets {type, cbp, pred_mode}; type codes are port-internal (0=4x4, 1=16x16, 25=PCM), 255 encodes C's -1.
 pub static I_MB_TYPE_INFO: [u8; 78] = [

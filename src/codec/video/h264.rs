@@ -105,6 +105,68 @@ const HOR_UP_PRED: i8 = 8;
 const LEFT_DC_PRED: i8 = 2; // subset of DC for 16x16/chroma
 const TOP_DC_PRED: i8 = 1;
 const DC_128_PRED: i8 = 3;
+
+const LEVEL_TAB_BITS: u32 = 8;
+
+// ---------------------------------------------------------------------
+// Picture
+// ---------------------------------------------------------------------
+
+struct Picture {
+    w: usize,
+    h: usize,
+    y: Vec<u8>,
+    cb: Vec<u8>,
+    cr: Vec<u8>,
+    mb_type: Vec<u32>,
+    nnz: Vec<[u8; 48]>,
+    mv: Vec<[i16; 2]>,  // b_stride = mb_w*4 (+1 padding row)
+    ref_index: Vec<i8>, // 4 per MB
+    qscale: Vec<u8>,
+    /// intra4x4 modes: bottom row (4) + right column (4) per MB — C's
+    /// `mb2br`-indexed `intra4x4_pred_mode` slots the caches read.
+    mb_i4x4: Vec<[i8; 8]>,
+}
+
+impl Picture {
+    fn new(mb_w: usize, mb_h: usize) -> Picture {
+        let w = mb_w * 16;
+        let h = mb_h * 16;
+        let b_stride = mb_w * 4 + 1;
+        Picture {
+            w,
+            h,
+            y: vec![0u8; w * h],
+            cb: vec![0u8; (w / 2) * (h / 2)],
+            cr: vec![0u8; (w / 2) * (h / 2)],
+            mb_type: vec![0; mb_w * mb_h + 1],
+            nnz: vec![[0; 48]; mb_w * mb_h + 1],
+            mv: vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
+            ref_index: vec![-1; (mb_w * 4 + 1) * (mb_h * 4 + 1)],
+            qscale: vec![0; mb_w * mb_h + 1],
+            mb_i4x4: vec![[-1; 8]; mb_w * mb_h + 1],
+        }
+    }
+    fn sample_y(&self, x: i32, y: i32) -> u8 {
+        *self
+            .y
+            .get(
+                y.clamp(0, self.h as i32 - 1) as usize * self.w
+                    + x.clamp(0, self.w as i32 - 1) as usize,
+            )
+            .unwrap_or(&0)
+    }
+
+    fn sample_c(&self, p: &[u8], x: i32, y: i32) -> u8 {
+        *p.get(
+            y.clamp(0, self.h as i32 / 2 - 1) as usize * (self.w / 2)
+                + x.clamp(0, self.w as i32 / 2 - 1) as usize,
+        )
+        // FIXME
+        .unwrap_or(&0)
+    }
+}
+
 // 16x16/chroma mode space: 0=DC,1=plane? — chroma: 0=DC,1=H,2=V,3=plane;
 // luma16: 0=V,1=H,2=DC,3=plane. The check tables map through; see
 // check_intra_pred_mode.
@@ -155,8 +217,6 @@ struct Cavlc {
     /// `cavlc_level_tab` (h264_cavlc.c:289): [suffix][peek8] = (code, len).
     level_tab: Vec<[[i16; 2]; 256]>,
 }
-
-const LEVEL_TAB_BITS: u32 = 8;
 
 fn cavlc() -> &'static Cavlc {
     static T: OnceLock<Cavlc> = OnceLock::new();
@@ -609,63 +669,6 @@ fn parse_pps(rbsp: &[u8], sps_ok: bool) -> Result<Pps> {
     };
     pps.build_dequant();
     Ok(pps)
-}
-
-// ---------------------------------------------------------------------
-// Picture
-// ---------------------------------------------------------------------
-
-struct Picture {
-    w: usize,
-    h: usize,
-    y: Vec<u8>,
-    cb: Vec<u8>,
-    cr: Vec<u8>,
-    mb_type: Vec<u32>,
-    nnz: Vec<[u8; 48]>,
-    mv: Vec<[i16; 2]>,  // b_stride = mb_w*4 (+1 padding row)
-    ref_index: Vec<i8>, // 4 per MB
-    qscale: Vec<u8>,
-    /// intra4x4 modes: bottom row (4) + right column (4) per MB — C's
-    /// `mb2br`-indexed `intra4x4_pred_mode` slots the caches read.
-    mb_i4x4: Vec<[i8; 8]>,
-}
-
-impl Picture {
-    fn new(mb_w: usize, mb_h: usize) -> Picture {
-        let w = mb_w * 16;
-        let h = mb_h * 16;
-        let b_stride = mb_w * 4 + 1;
-        Picture {
-            w,
-            h,
-            y: vec![0u8; w * h],
-            cb: vec![0u8; (w / 2) * (h / 2)],
-            cr: vec![0u8; (w / 2) * (h / 2)],
-            mb_type: vec![0; mb_w * mb_h + 1],
-            nnz: vec![[0; 48]; mb_w * mb_h + 1],
-            mv: vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
-            ref_index: vec![-1; (mb_w * 4 + 1) * (mb_h * 4 + 1)],
-            qscale: vec![0; mb_w * mb_h + 1],
-            mb_i4x4: vec![[-1; 8]; mb_w * mb_h + 1],
-        }
-    }
-    fn sample_y(&self, x: i32, y: i32) -> u8 {
-        *self
-            .y
-            .get(
-                y.clamp(0, self.h as i32 - 1) as usize * self.w
-                    + x.clamp(0, self.w as i32 - 1) as usize,
-            )
-            .unwrap_or(&0)
-    }
-    fn sample_c(&self, p: &[u8], x: i32, y: i32) -> u8 {
-        *p.get(
-            y.clamp(0, self.h as i32 / 2 - 1) as usize * (self.w / 2)
-                + x.clamp(0, self.w as i32 / 2 - 1) as usize,
-        )
-        .unwrap_or(&0)
-    }
 }
 
 // ---------------------------------------------------------------------
@@ -1253,7 +1256,7 @@ pub struct H264Decoder {
     sps: Option<Sps>,
     pps: Option<Pps>,
     params: CodecParameters,
-    pending: Option<Frame>,
+    pending: std::collections::VecDeque<Frame>,
     eof: bool,
     // picture state
     cur: Option<Picture>,
@@ -1275,10 +1278,10 @@ pub struct H264Decoder {
     // per-MB scratch
     mb: [i16; 24 * 16],
     mb_luma_dc: [i16; 16],
-    intra4x4_pred_mode_cache: [i8; 6 * 8],
-    nnz_cache: [u8; 6 * 8],
-    mv_cache: [[i16; 2]; 6 * 8],
-    ref_cache: [i8; 6 * 8],
+    intra4x4_pred_mode_cache: [i8; 15 * 8],
+    nnz_cache: [u8; 15 * 8],
+    mv_cache: [[i16; 2]; 15 * 8],
+    ref_cache: [i8; 15 * 8],
     top_samples_available: u16,
     left_samples_available: u16,
     topright_samples_available: u16,
@@ -1313,7 +1316,7 @@ impl H264Decoder {
             sps: None,
             pps: None,
             params: CodecParameters::default(),
-            pending: None,
+            pending: std::collections::VecDeque::new(),
             eof: false,
             cur: None,
             prev: None,
@@ -1332,10 +1335,10 @@ impl H264Decoder {
             prev_mb_skipped: false,
             mb: [0; 24 * 16],
             mb_luma_dc: [0; 16],
-            intra4x4_pred_mode_cache: [-1; 48],
-            nnz_cache: [0; 48],
-            mv_cache: [[0, 0]; 48],
-            ref_cache: [-2; 48],
+            intra4x4_pred_mode_cache: [-1; 120],
+            nnz_cache: [0; 120],
+            mv_cache: [[0, 0]; 120],
+            ref_cache: [-2; 120],
             top_samples_available: 0,
             left_samples_available: 0,
             topright_samples_available: 0,
@@ -1358,7 +1361,7 @@ impl H264Decoder {
         self.cur = None;
         self.prev = None;
         self.slice_table.clear();
-        self.pending = None;
+        self.pending.clear();
         self.got_mb = false;
     }
 
@@ -1382,17 +1385,18 @@ impl H264Decoder {
         if slice_type > 4 {
             slice_type -= 5;
         }
-        let st = GOLOMB_TO_PICT_TYPE[slice_type as usize];
+        // C's AV_PICTURE_TYPE codes: I=1, P=2, B=3, SP=4, SI=5 — remapped
+        // here to 2=I / 0=P (the port's slice_type_nos).
+        let st = match GOLOMB_TO_PICT_TYPE[slice_type as usize] {
+            1 => 2u8, // I
+            2 => 0u8, // P
+            3 => return Err(Error::Unsupported("B slices".into())),
+            _ => return Err(Error::Unsupported("SP/SI slices".into())),
+        };
         if nal.kind == 5 && st != 2 {
             return Err(Error::InvalidData("non-intra slice in IDR NAL".into()));
         }
-        if st == 1 {
-            return Err(Error::Unsupported("B slices".into()));
-        }
-        if st == 3 || st == 4 {
-            return Err(Error::Unsupported("SP/SI slices".into()));
-        }
-        self.slice_type_nos = st & 3;
+        self.slice_type_nos = st;
 
         let pps_id = gb.ue()?;
         if pps_id != 0 {
@@ -1563,8 +1567,11 @@ impl H264Decoder {
                 "out of range intra chroma pred mode".into(),
             ));
         }
-        static TOP: [i32; 4] = [1, 1, -1, -1];
-        static LEFT: [i32; 5] = [-1, 2, 2, -1, -1];
+        // Port space (0=V,1=H,2=DC,3=plane): top unavailable →
+        // V becomes DC (plane is illegal there per C's table); left
+        // unavailable → H becomes DC.
+        static TOP: [i32; 4] = [2, 1, 2, -1];
+        static LEFT: [i32; 5] = [0, 2, 2, -1, -1];
         // C table indices (luma16 space): top[] = {LEFT_DC_PRED8x8,1,-1,-1}
         // left[] = {TOP_DC_PRED8x8,-1,2,-1,DC_128_PRED8x8}; in V/H/DC
         // coding: DC from left only = 1 (H? no...). Ported by value:
@@ -1582,18 +1589,14 @@ impl H264Decoder {
             if t < 0 {
                 return Err(Error::InvalidData("top unavailable".into()));
             }
-            if mm == 0 {
-                mm = 2; // V → DC when no top
-            }
+            mm = t;
         }
         if self.left_samples_available & 0x8080 != 0x8080 {
             let l = LEFT[mm as usize];
             if l < 0 {
                 return Err(Error::InvalidData("left unavailable".into()));
             }
-            if mm == 1 {
-                mm = 2; // H → DC when no left
-            }
+            mm = l;
         }
         Ok(mm)
     }
@@ -2024,7 +2027,7 @@ impl H264Decoder {
         let mb_xy = self.mb_x + self.mb_y * self.mb_width;
 
         // mb_skip_run (P slices; C: `if (sl->mb_skip_run--)`)
-        if self.slice_type_nos != 2 {
+        if self.slice_type_nos == 0 {
             if self.mb_skip_run == -1 {
                 self.mb_skip_run = gb.ue()? as i64;
             }
@@ -2064,13 +2067,25 @@ impl H264Decoder {
             Part::Intra(row) => {
                 let row = row as usize;
                 let (mbt, cbp, pred) = (
-                    I_MB_TYPE_INFO[row * 3] as u32,
+                    I_MB_TYPE_INFO[row * 3],
                     I_MB_TYPE_INFO[row * 3 + 1],
                     I_MB_TYPE_INFO[row * 3 + 2] as i32,
                 );
+                // C type codes → port-internal (0=4x4→1, 1=16x16→2,
+                // 25=PCM→3); cbp 255 = C's -1 (only 16x16 cbp implied).
+                let mbt = match mbt {
+                    0 => MB_INTRA4X4,
+                    25 => MB_PCM,
+                    _ => MB_INTRA16X16,
+                };
                 self.mb_type = mbt as u32;
                 self.cbp = if cbp == 255 { u32::MAX } else { cbp as u32 }; // 255 = -1 (none)
-                self.intra16x16_pred_mode = pred;
+                self.intra16x16_pred_mode = match pred {
+                    0 => 2, // C DC
+                    1 => 1, // C H
+                    2 => 0, // C V
+                    _ => 3, // plane
+                };
                 self.decode_mb_intra(gb, mb_xy)?;
             }
             Part::P16x16 | Part::P16x8 | Part::P8x16 | Part::P8x8 => {
@@ -2128,6 +2143,17 @@ impl H264Decoder {
         let cmode = gb.ue()? as i32;
         self.chroma_pred_mode = self.check_intra_pred_mode(cmode, true)?;
 
+        // cbp: the I-table's -1 (255) means "read from bitstream" for
+        // non-16x16 intra (cavlc.c:1053-1064).
+        if self.cbp == u32::MAX {
+            let mut cbp = gb.ue()?;
+            if cbp > 47 {
+                return Err(Error::InvalidData("cbp too large".into()));
+            }
+            cbp = GOLOMB_TO_INTRA4X4_CBP[cbp as usize] as u32;
+            self.cbp = cbp;
+        }
+
         // residual
         self.decode_mb_residual(gb, mb_xy)?;
         let pic = self.cur.as_mut().unwrap();
@@ -2170,7 +2196,7 @@ impl H264Decoder {
                     self.fill_mv_rect(2 * n, 0, 2, 4, mx, my);
                 }
             }
-            Part::P8x8 => {
+            Part::P8x8 | Part::Intra(_) => {
                 for i in 0..4usize {
                     let sub = gb.ue()?;
                     if sub > 3 {
@@ -2827,10 +2853,9 @@ impl H264Decoder {
     // ---------------- Picture / slice driver ----------------
 
     fn start_new_picture(&mut self, is_idr: bool) {
-        // finish the old picture into `prev` (single-ref DPB)
-        if let Some(pic) = self.cur.take() {
-            self.prev = Some(pic);
-        }
+        // (the caller emitted the old picture via finish_picture, which
+        // also moved it into `prev` — the single-ref DPB)
+        self.cur = None;
         self.cur = Some(Picture::new(self.mb_width, self.mb_height));
         self.slice_num += 1;
         self.slice_table = vec![0; self.mb_width * self.mb_height];
@@ -2842,11 +2867,11 @@ impl H264Decoder {
     }
 
     fn decode_slice(&mut self, nal: &Nal) -> Result<bool> {
-        let mut gb = Gb::new(&nal.rbsp[1.min(nal.rbsp.len())..]);
+        let mut gb = Gb::new(&nal.rbsp);
         let (first_mb, new_pic) = self.parse_slice_header(nal, &mut gb)?;
         if new_pic {
+            self.finish_picture()?; // emit the finished picture first
             self.start_new_picture(nal.kind == 5);
-            self.frame_num = u32::MAX; // set below after read
         }
         // (frame_num kept from header for next comparison)
         self.got_mb = true;
@@ -2899,7 +2924,7 @@ impl H264Decoder {
         self.frame_count += 1;
         self.cur = None; // picture moved to prev above
         // keep prev = this picture (reference for the next P slice)
-        self.pending = Some(frame);
+        self.pending.push_back(frame);
         self.got_mb = false;
         Ok(())
     }
@@ -2933,19 +2958,19 @@ impl Decoder for H264Decoder {
         if self.eof {
             return Err(Error::Eof);
         }
-        self.pending = None;
+        self.pending.clear();
 
         for nal in split_nals(pkt.as_slice()) {
             match nal.kind {
                 7 => {
-                    self.sps = Some(parse_sps(&nal.rbsp[1..])?);
+                    self.sps = Some(parse_sps(&nal.rbsp)?);
                     if self.mb_width == 0 {
                         self.mb_width = self.sps.as_ref().unwrap().mb_width;
                         self.mb_height = self.sps.as_ref().unwrap().mb_height;
                     }
                 }
                 8 => {
-                    self.pps = Some(parse_pps(&nal.rbsp[1..], self.sps.is_some())?);
+                    self.pps = Some(parse_pps(&nal.rbsp, self.sps.is_some())?);
                 }
                 5 | 1 => {
                     self.decode_slice(&nal)?;
@@ -2962,7 +2987,7 @@ impl Decoder for H264Decoder {
     }
 
     fn receive_frame(&mut self) -> Result<Frame> {
-        match self.pending.take() {
+        match self.pending.pop_front() {
             Some(frame) => Ok(frame),
             None if self.eof => Err(Error::Eof),
             None => Err(Error::Again),
@@ -3123,7 +3148,7 @@ fn decode_residual(
             break;
         }
         let run = if zi < 7 {
-            cv.run[zi as usize].get(gb)? as usize
+            cv.run[(zi - 1) as usize].get(gb)? as usize
         } else {
             cv.run7.get(gb)? as usize
         };
@@ -3143,6 +3168,13 @@ fn decode_residual(
                 block[s] = ((level[k] as i64 * qmul as i64 + 32) >> 6) as i16;
             } else {
                 block[s] = level[k] as i16;
+            }
+            if pos == 0 {
+                // C's second loop would walk below the block only on
+                // desync; clamp instead of panicking to keep the stage
+                // bisect going.
+                pos = pos.saturating_sub(1);
+                break;
             }
             pos -= 1;
         }
@@ -3417,4 +3449,37 @@ enum Part {
     P16x8,
     P8x16,
     P8x8,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode_file(path: &str) -> Vec<Frame> {
+        let data = std::fs::read(path).expect("fixture");
+        let mut dec = H264Decoder::new();
+        let mut p = CodecParameters::default();
+        p.codec_id = CodecId::H264;
+        Decoder::init(&mut dec, &p).unwrap();
+        let mut pkt = Packet::from_vec(data);
+        pkt.pts = 0;
+        Decoder::send_packet(&mut dec, Some(&pkt)).unwrap();
+        Decoder::send_packet(&mut dec, None).unwrap();
+        let mut out = Vec::new();
+        while let Ok(f) = Decoder::receive_frame(&mut dec) {
+            out.push(f);
+        }
+        out
+    }
+
+    #[test]
+    fn decodes_all_intra_fixture() {
+        let Ok(_data) = std::fs::read("/tmp/h264_alli.h264") else {
+            eprintln!("skip: no /tmp/h264_alli.h264 fixture");
+            return;
+        };
+        let frames = decode_file("/tmp/h264_alli.h264");
+        eprintln!("H264 SMOKE: decoded {} frames", frames.len());
+        assert!(frames.len() >= 20, "got {} frames", frames.len());
+    }
 }
