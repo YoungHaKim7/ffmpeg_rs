@@ -248,7 +248,8 @@ fn cavlc() -> &'static Cavlc {
 
         let tz_rows = table_rows("TOTAL_ZEROS", 16, 16);
         let total_zeros: Vec<Vlc> = (1..16)
-            .map(|tc| Vlc::new(&tz_rows[tc].0, &tz_rows[tc].1))
+            // C: total_zeros_vlc[i + 1] built from row i ⇒ tc uses row tc−1.
+            .map(|tc| Vlc::new(&tz_rows[tc - 1].0, &tz_rows[tc - 1].1))
             .collect();
 
         let chroma_dc_tz: Vec<Vlc> = (1..4)
@@ -263,15 +264,17 @@ fn cavlc() -> &'static Cavlc {
             })
             .collect();
 
-        let run: Vec<Vlc> = (1..7)
-            .map(|z| {
-                let (l, b): (Vec<u8>, Vec<u8>) = match z {
+        // C: run_vlc[i + 1] from row i ⇒ indexed by zeros_left directly
+        // (run[z] decodes zeros_left = z + 1's runs; see the use site).
+        let run: Vec<Vlc> = (0..6)
+            .map(|r| {
+                let (l, b): (Vec<u8>, Vec<u8>) = match r {
+                    0 => (RUN_LEN_0.to_vec(), RUN_BITS_0.to_vec()),
                     1 => (RUN_LEN_1.to_vec(), RUN_BITS_1.to_vec()),
                     2 => (RUN_LEN_2.to_vec(), RUN_BITS_2.to_vec()),
                     3 => (RUN_LEN_3.to_vec(), RUN_BITS_3.to_vec()),
                     4 => (RUN_LEN_4.to_vec(), RUN_BITS_4.to_vec()),
-                    5 => (RUN_LEN_5.to_vec(), RUN_BITS_5.to_vec()),
-                    _ => (RUN_LEN_5.to_vec(), RUN_BITS_5.to_vec()).clone(),
+                    _ => (RUN_LEN_5.to_vec(), RUN_BITS_5.to_vec()),
                 };
                 Vlc::new(&l, &b)
             })
@@ -286,8 +289,14 @@ fn cavlc() -> &'static Cavlc {
                 // undefined in C but i>=1 semantics: av_log2(2*i) with
                 // i=0 → log2(0) → -inf; C's av_log2(0) returns 0. Then
                 // prefix = 8. Use the same convention.
-                let lz = (2 * i as u32).leading_zeros() as i32; // 32-log2(2i)
-                let prefix = if i == 0 { LEVEL_TAB_BITS as i32 } else { lz };
+                // C: prefix = LEVEL_TAB_BITS - av_log2(2*i); ff's
+                // av_log2(0) = 0 ⇒ i=0 → prefix 8.
+                let av_log2_2i = if i == 0 {
+                    0
+                } else {
+                    31 - ((2 * i as u32).leading_zeros() as i32)
+                };
+                let prefix = LEVEL_TAB_BITS as i32 - av_log2_2i;
                 let (mut code, len) = if prefix + 1 + sl as i32 <= LEVEL_TAB_BITS as i32 {
                     let log2i = if i == 0 {
                         0
@@ -1284,7 +1293,7 @@ pub struct H264Decoder {
     slice_table: Vec<usize>,
     prev_mb_skipped: bool,
     // per-MB scratch
-    mb: [i16; 24 * 16],
+    mb: [i16; 48 * 16],
     mb_luma_dc: [i16; 16],
     intra4x4_pred_mode_cache: [i8; 15 * 8],
     nnz_cache: [u8; 15 * 8],
@@ -1341,7 +1350,7 @@ impl H264Decoder {
             slice_num: 0,
             slice_table: Vec::new(),
             prev_mb_skipped: false,
-            mb: [0; 24 * 16],
+            mb: [0; 48 * 16],
             mb_luma_dc: [0; 16],
             intra4x4_pred_mode_cache: [-1; 120],
             nnz_cache: [0; 120],
@@ -2311,7 +2320,7 @@ impl H264Decoder {
             self.chroma_qp[0] = CHROMA_QP8[self.qscale as usize] as i32;
             self.chroma_qp[1] = self.chroma_qp[0];
         }
-        self.mb = [0; 24 * 16];
+        self.mb = [0; 48 * 16];
 
         let scan: [u8; 16] = ZIGZAG;
         // Luma DC (intra16x16)
@@ -2379,31 +2388,37 @@ impl H264Decoder {
                 for ch in 0..2usize {
                     let mut dc = [0i16; 16];
                     decode_residual_chroma_dc(self, &cv, gb, &mut dc, ch)?;
-                    // place at the 2x2 DC slots of the 4 chroma blocks
+                    // C stores the chroma DC block at mb + 256*(1+ch)
+                    // (the DC-only 2x2, scattered later by
+                    // chroma_dc_dequant_idct).
+                    let base = 16 * (16 + 16 * ch);
                     for b in 0..4usize {
-                        let at = (16 + 16 * ch + 16 * b) as usize;
-                        self.mb[at] = dc[b];
+                        self.mb[base + b] = dc[b];
                     }
                 }
             }
             if self.cbp & 0x20 != 0 {
                 for ch in 0..2usize {
-                    for i8 in 0..4usize {
+                    // 4:2:0: one 8x8 per component (num_c8x8 = 1)
+                    for i8 in 0..1usize {
                         for i4 in 0..4usize {
-                            let index = 16 + 16 * ch + 8 * i8 + i4;
+                            // Block index for nnz/SCAN8 (0..47); the mb
+                            // offset C uses is 16*(16+16*ch) + 16*block.
+                            let block_idx = 16 + 16 * ch + i4;
+                            let index = 16 * (16 + 16 * ch) + i4;
                             let mut blk = [0i16; 16];
                             decode_residual(
                                 self,
                                 &cv,
                                 gb,
                                 &mut blk,
-                                index,
+                                block_idx,
                                 &scan_shift1(),
                                 qmul_c(self.chroma_qp[ch] as usize, ch + 1),
                                 15,
                                 false,
                             )?;
-                            self.mb[index * 16..(index + 1) * 16].copy_from_slice(&blk);
+                            self.mb[index..index + 16].copy_from_slice(&blk);
                         }
                     }
                 }
@@ -2780,37 +2795,27 @@ impl H264Decoder {
             dc4[1] = blk[1];
             dc4[16 / 2 + 0] = blk[2];
             dc4[16 / 2 + 1] = blk[3];
-            let mut block32 = [0i16; 32];
-            block32[0] = dc4[0];
-            block32[1] = dc4[1];
-            block32[16] = dc4[8];
-            block32[17] = dc4[9];
-            chroma_dc_dequant_idct(&mut block32, qmul);
+            // The 2x2 DCs at stride-32 positions {0,16,32,48} (C's
+            // block[stride*y + xstride*x] layout).
+            let mut block64 = [0i16; 64];
+            block64[0] = blk[0];
+            block64[16] = blk[1];
+            block64[32] = blk[2];
+            block64[48] = blk[3];
+            chroma_dc_dequant_idct(&mut block64, qmul);
+            // The dequant-idct wrote ((v*qmul + 128) >> 8); C adds
+            // these into the pixel via idct_dc_add ((v + 32) >> 6) on the
+            // DC slot of each 4x4 chroma block.
+            let dcs = [block64[0], block64[16], block64[32], block64[48]];
             let pic = self.cur.as_mut().unwrap();
-            let plane = if ch == 0 { &pic.cb } else { &pic.cr };
-            let _ = plane;
-            for (i, v) in [(0usize, block32[0]), (1usize, block32[1])] {
+            for (i, v) in dcs.iter().enumerate() {
                 let at = c0 + (i / 2) * cw + (i % 2);
-                let val = if ch == 0 {
+                let base = if ch == 0 {
                     pic.cb[at] as i32
                 } else {
                     pic.cr[at] as i32
                 };
-                let nv = clip8(val + ((v as i32) + 32 >> 6));
-                if ch == 0 {
-                    pic.cb[at] = nv;
-                } else {
-                    pic.cr[at] = nv;
-                }
-            }
-            for (i, v) in [(2usize, block32[16]), (3usize, block32[17])] {
-                let at = c0 + (i / 2) * cw + (i % 2);
-                let val = if ch == 0 {
-                    pic.cb[at] as i32
-                } else {
-                    pic.cr[at] as i32
-                };
-                let nv = clip8(val + ((v as i32) + 32 >> 6));
+                let nv = clip8(base + ((*v as i32) + 32 >> 6));
                 if ch == 0 {
                     pic.cb[at] = nv;
                 } else {
@@ -3039,6 +3044,9 @@ fn decode_residual(
     is_luma_dc: bool,
 ) -> Result<()> {
     let mut level = [0i32; 16];
+    if std::env::var_os("H264_DUMP").is_some() {
+        eprintln!("ENTR n={n} pos={}", gb.index);
+    }
 
     let coeff_token = if max_coeff == 4 {
         cv.chroma_dc_coeff_token.get(gb)? as usize
@@ -3130,11 +3138,23 @@ fn decode_residual(
                 cv.level_tab[suffix_length][bitsi][0] as i32,
                 cv.level_tab[suffix_length][bitsi][1] as u32,
             );
+            if std::env::var_os("H264_DUMP").is_some() && n == 0 {
+                eprintln!(
+                    "  RLOOK i={i} sl={suffix_length} bitsi={bitsi} c={level_code} l={consumed} pre={}",
+                    gb.index
+                );
+            }
             gb.skip(consumed);
             if level_code >= 100 {
                 let mut prefix = level_code - 100;
                 if prefix == LEVEL_TAB_BITS as i32 {
                     prefix += gb.level_prefix()? as i32;
+                }
+                if std::env::var_os("H264_DUMP").is_some() && n == 0 {
+                    eprintln!(
+                        "  RESC i={i} prefix={prefix} sl={suffix_length} pos={}",
+                        gb.index
+                    );
                 }
                 if prefix < 15 {
                     level_code = (prefix << suffix_length) + gb.read(suffix_length as u32) as i32;
@@ -3152,9 +3172,12 @@ fn decode_residual(
                 level_code = (((2 + level_code) >> 1) ^ mask) - mask;
             }
             level[i] = level_code;
+            // C's unsigned compare: suffix_limit[sl] + level_code >
+            // 2U*suffix_limit[sl] — a negative level wraps huge and bumps.
             const SUFFIX_LIMIT: [u32; 7] = [0, 3, 6, 12, 24, 48, u32::MAX];
-            suffix_length += (SUFFIX_LIMIT[suffix_length] as i32 + level_code
-                > 2 * SUFFIX_LIMIT[suffix_length] as i32) as usize;
+            suffix_length += ((SUFFIX_LIMIT[suffix_length].wrapping_add(level_code as u32))
+                > SUFFIX_LIMIT[suffix_length].wrapping_mul(2))
+                as usize;
         }
     }
 
@@ -3170,12 +3193,19 @@ fn decode_residual(
         cv.total_zeros[total_coeff - 1].get(gb)? as usize
     };
 
-    // run_before + store (STORE_BLOCK)
-    let mut pos = zeros_left + total_coeff - 1;
+    // run_before + store (STORE_BLOCK). C walks the scantable pointer
+    // with plain int arithmetic — it may go below the block start
+    // without storing there, so pos is signed here.
+    let mut pos = (zeros_left + total_coeff - 1) as i32;
     let mut zi = zeros_left as i32;
     let mut i = 0usize;
     loop {
-        let s = scan[pos.min(15)] as usize;
+        if !(0..16).contains(&pos) {
+            return Err(Error::InvalidData(
+                "run_before position out of block".into(),
+            ));
+        }
+        let s = scan[pos as usize] as usize;
         if !is_luma_dc {
             block[s] = ((level[i] as i64 * qmul as i64 + 32) >> 6) as i16;
         } else {
@@ -3191,28 +3221,18 @@ fn decode_residual(
             cv.run7.get(gb)? as usize
         };
         zi -= run as i32;
-        pos -= 1 + run;
-        if pos > 15 + 1 {
-            return Err(Error::InvalidData("run_before overflow".into()));
-        }
+        pos -= 1 + run as i32;
     }
     if i < total_coeff {
         for k in i..total_coeff {
-            if pos > 15 {
+            if !(0..16).contains(&pos) {
                 return Err(Error::InvalidData("coeff overrun".into()));
             }
-            let s = scan[pos] as usize;
+            let s = scan[pos as usize] as usize;
             if !is_luma_dc {
                 block[s] = ((level[k] as i64 * qmul as i64 + 32) >> 6) as i16;
             } else {
                 block[s] = level[k] as i16;
-            }
-            if pos == 0 {
-                // C's second loop would walk below the block only on
-                // desync; clamp instead of panicking to keep the stage
-                // bisect going.
-                pos = pos.saturating_sub(1);
-                break;
             }
             pos -= 1;
         }
@@ -3498,7 +3518,9 @@ mod tests {
         Decoder::init(&mut dec, &p).unwrap();
         let mut pkt = Packet::from_vec(data);
         pkt.pts = 0;
-        let _ = Decoder::send_packet(&mut dec, Some(&pkt));
+        if let Err(e) = Decoder::send_packet(&mut dec, Some(&pkt)) {
+            eprintln!("H264 WIP: decode error: {e}");
+        }
         let _ = Decoder::send_packet(&mut dec, None);
         let mut out = Vec::new();
         while let Ok(f) = Decoder::receive_frame(&mut dec) {
