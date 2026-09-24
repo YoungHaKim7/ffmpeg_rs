@@ -3070,6 +3070,12 @@ fn decode_residual(
         // first non-trailing level
         {
             let bitsi = gb.peek(LEVEL_TAB_BITS) as usize;
+            if std::env::var_os("H264_DUMP").is_some() && n == 0 {
+                eprintln!(
+                    "  FIRST sl={suffix_length} bitsi={bitsi} e0={} e1={}",
+                    cv.level_tab[suffix_length][bitsi][0], cv.level_tab[suffix_length][bitsi][1]
+                );
+            }
             let (mut level_code, consumed) = (
                 cv.level_tab[suffix_length][bitsi][0] as i32,
                 cv.level_tab[suffix_length][bitsi][1] as u32,
@@ -3117,6 +3123,9 @@ fn decode_residual(
         // remaining levels
         for i in (trailing_ones + 1)..total_coeff {
             let bitsi = gb.peek(LEVEL_TAB_BITS) as usize;
+            if std::env::var_os("H264_DUMP").is_some() && n == 0 {
+                eprintln!("  LVL i={i} sl={suffix_length} bitsi={bitsi}");
+            }
             let (mut level_code, consumed) = (
                 cv.level_tab[suffix_length][bitsi][0] as i32,
                 cv.level_tab[suffix_length][bitsi][1] as u32,
@@ -3150,6 +3159,9 @@ fn decode_residual(
     }
 
     // total_zeros
+    if std::env::var_os("H264_DUMP").is_some() {
+        eprintln!("  LVL n={n} pos={}", gb.index);
+    }
     let zeros_left = if total_coeff == max_coeff {
         0usize
     } else if max_coeff == 4 {
