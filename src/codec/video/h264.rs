@@ -1133,6 +1133,12 @@ impl H264Decoder {
 
         let raw = gb.ue()?;
         let is_i = self.slice_type_nos == 2;
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!(
+                "MBT mb={}:{} raw={raw} pos={}",
+                self.mb_x, self.mb_y, gb.index
+            );
+        }
         let part = if is_i {
             if raw > 25 {
                 return Err(Error::InvalidData(format!("mb_type {raw} too large")));
@@ -3089,7 +3095,7 @@ fn decode_residual(
         // first non-trailing level
         {
             let bitsi = gb.peek(LEVEL_TAB_BITS) as usize;
-            if std::env::var_os("H264_DUMP").is_some() && (n == 0 || n == 11) {
+            if std::env::var_os("H264_DUMP").is_some() && (n < 2 || n == 11) {
                 eprintln!(
                     "  FIRST sl={suffix_length} bitsi={bitsi} e0={} e1={}",
                     cv.level_tab[suffix_length][bitsi][0], cv.level_tab[suffix_length][bitsi][1]
@@ -3144,14 +3150,14 @@ fn decode_residual(
         // remaining levels
         for i in (trailing_ones + 1)..total_coeff {
             let bitsi = gb.peek(LEVEL_TAB_BITS) as usize;
-            if std::env::var_os("H264_DUMP").is_some() && (n == 0 || n == 11) {
+            if std::env::var_os("H264_DUMP").is_some() && (n < 2 || n == 11) {
                 eprintln!("  LVL i={i} sl={suffix_length} bitsi={bitsi}");
             }
             let (mut level_code, consumed) = (
                 cv.level_tab[suffix_length][bitsi][0] as i32,
                 cv.level_tab[suffix_length][bitsi][1] as u32,
             );
-            if std::env::var_os("H264_DUMP").is_some() && (n == 0 || n == 11) {
+            if std::env::var_os("H264_DUMP").is_some() && (n < 2 || n == 11) {
                 eprintln!(
                     "  RLOOK i={i} sl={suffix_length} bitsi={bitsi} c={level_code} l={consumed} pre={}",
                     gb.index
@@ -3163,7 +3169,7 @@ fn decode_residual(
                 if prefix == LEVEL_TAB_BITS as i32 {
                     prefix += gb.level_prefix()? as i32;
                 }
-                if std::env::var_os("H264_DUMP").is_some() && (n == 0 || n == 11) {
+                if std::env::var_os("H264_DUMP").is_some() && (n < 2 || n == 11) {
                     eprintln!(
                         "  RESC i={i} prefix={prefix} sl={suffix_length} pos={}",
                         gb.index
@@ -3233,6 +3239,9 @@ fn decode_residual(
         } else {
             cv.run7.get(gb)? as usize
         };
+        if std::env::var_os("H264_DUMP").is_some() && (n < 2) {
+            eprintln!("  RUN i={i} zi={zi} run={run} pos={}", gb.index);
+        }
         zi -= run as i32;
         pos -= 1 + run as i32;
     }
