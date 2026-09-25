@@ -505,14 +505,30 @@ impl H264Decoder {
         }
 
         if self.slice_type_nos != 2 {
-            // num_ref_idx_active_override_flag
+            // ff_h264_parse_ref_count (h264_parse.c:237): the l1 count
+            // is only read for B slices.
             if gb.read_bit() == 1 {
                 let _l0 = gb.ue()?;
-                let _l1 = gb.ue()?;
+                if self.slice_type_nos == 1 {
+                    let _l1 = gb.ue()?;
+                }
             }
-            // ref_pic_list_modification_flag_l0
+            // ff_h264_decode_ref_pic_list_reordering (h264_refs.c:431):
+            // op/value pairs until op == 3. Single-ref DPB ⇒ reordering
+            // is a parse-only no-op (it cannot move the only picture).
             if gb.read_bit() == 1 {
-                return Err(Error::Unsupported("ref list reordering".into()));
+                loop {
+                    let op = gb.ue()?;
+                    if op == 3 {
+                        break;
+                    }
+                    if op > 2 {
+                        return Err(Error::InvalidData(format!(
+                            "illegal modification_of_pic_nums_idc {op}"
+                        )));
+                    }
+                    let _val = gb.ue()?;
+                }
             }
         }
 
@@ -1613,6 +1629,8 @@ impl H264Decoder {
             let cw = w / 2;
             let mut top = [0u8; 8];
             let mut left = [0u8; 8];
+            let mut lt_cb = 128u8;
+            let mut lt_cr = 128u8;
             if top_ok {
                 for i in 0..8 {
                     top[i] = pic.cb[c0 - cw + i];
@@ -1623,9 +1641,13 @@ impl H264Decoder {
                     left[i] = pic.cb[c0 + i * cw - 1];
                 }
             }
+            if top_ok && left_ok {
+                lt_cb = pic.cb[c0 - cw - 1];
+            }
             let mode = self.chroma_pred_mode;
             let pic = self.cur.as_mut().unwrap();
-            pred8x8_avail(mode, &mut pic.cb[c0..], cw, &top, &left, top_ok, left_ok);
+            let lb_cb = if left_ok && self.mb_y + 1 <= self.mb_height { pic.cb[c0 + cw - 1] } else { lt_cb };
+            pred8x8_avail(mode, &mut pic.cb[c0..], cw, &top, &left, top_ok, left_ok, lt_cb, lb_cb);
             if top_ok {
                 for i in 0..8 {
                     top[i] = pic.cr[c0 - cw + i];
@@ -1636,7 +1658,11 @@ impl H264Decoder {
                     left[i] = pic.cr[c0 + i * cw - 1];
                 }
             }
-            pred8x8_avail(mode, &mut pic.cr[c0..], cw, &top, &left, top_ok, left_ok);
+            if top_ok && left_ok {
+                lt_cr = pic.cr[c0 - cw - 1];
+            }
+            let lb_cr = if left_ok && self.mb_y + 1 <= self.mb_height { pic.cr[c0 + cw - 1] } else { lt_cr };
+            pred8x8_avail(mode, &mut pic.cr[c0..], cw, &top, &left, top_ok, left_ok, lt_cr, lb_cr);
         }
 
         if self.mb_type == MB_INTRA16X16 {
@@ -2780,7 +2806,7 @@ fn pred16x16(mode: i32, dst: &mut [u8], top: &[u8; 16], left: &[u8; 16]) {
 }
 
 /// 8x8 chroma intra prediction (mode 0=DC,1=H,2=V,3=plane).
-fn pred8x8(mode: i32, dst: &mut [u8], top: &[u8; 8], left: &[u8; 8]) {
+fn pred8x8(mode: i32, dst: &mut [u8], top: &[u8; 8], left: &[u8; 8], lt: u8, lb: u8) {
     match mode {
         0 => {
             let s: u32 = top.iter().map(|&v| v as u32).sum::<u32>()
@@ -2800,26 +2826,48 @@ fn pred8x8(mode: i32, dst: &mut [u8], top: &[u8; 8], left: &[u8; 8]) {
                 dst[r * 8..r * 8 + 8].copy_from_slice(top);
             }
         }
-        3 => {
-            let mut h = 0i32;
-            for i in 0..4 {
-                h += (i as i32 + 1) * (top[4 + i] as i32 - top[2 - i] as i32);
-            }
-            let mut v = 0i32;
-            for i in 0..4 {
-                v += (i as i32 + 1) * (left[4 + i] as i32 - left[2 - i] as i32);
-            }
-            let a = 16 * (top[7] as i32 + left[7] as i32);
-            let b = (17 * h + 16) >> 5;
-            let c = (17 * v + 16) >> 5;
-            for y in 0..8i32 {
-                for x in 0..8i32 {
-                    dst[(y as usize) * 8 + x as usize] =
-                        clip8((a + b * (x - 3) + c * (y - 3) + 16) >> 5);
-                }
-            }
-        }
+        3 => pred8x8_plane(dst, top, left, lt, lb),
         _ => unreachable!(),
+    }
+}
+
+/// `pred8x8_plane` (h264pred_template.c:746): src0 walks the top row
+/// extended by the top-LEFT sample at src0[-1]; V the left column plus
+/// two rows below the last (clamped to left[7] — C reads the MB below,
+/// which for edge MBs the border-fill already replicated).
+fn pred8x8_plane(dst: &mut [u8], top: &[u8; 8], left: &[u8; 8], lt: u8, lb: u8) {
+    let t = |i: i32| -> i32 {
+        if i < 0 {
+            lt as i32 // border fill replicates the top-left leftward
+        } else {
+            top[i as usize] as i32
+        }
+    };
+    let l7 = left[7] as i32;
+    let l = |i: i32| -> i32 {
+        if i > 7 {
+            l7
+        } else if i < 0 {
+            lb as i32 // left[-1]: one row below the top-left sample
+        } else {
+            left[i as usize] as i32
+        }
+    };
+    let mut h = t(1) - t(-1);
+    let mut v = l(4) - l(2);
+    let mut k = 2i32;
+    while k <= 4 {
+        h += k * (t(k) - t(-k));
+        v += k * (l(4 + k - 1) - l(4 - k - 1));
+        k += 1;
+    }
+    let h = (17 * h + 16) >> 5;
+    let v = (17 * v + 16) >> 5;
+    let a = 16 * (l(7) + t(7) + 1) - 3 * (v + h);
+    for y in 0..8i32 {
+        for x in 0..8i32 {
+            dst[(y * 8 + x) as usize] = clip8((a + y * v + x * h) >> 5);
+        }
     }
 }
 
@@ -3496,6 +3544,8 @@ fn pred8x8_avail(
     left: &[u8; 8],
     t_ok: bool,
     l_ok: bool,
+    lt: u8,
+    lb: u8,
 ) {
     match mode {
         0 | 2 => {
@@ -3522,7 +3572,7 @@ fn pred8x8_avail(
                 }
             }
         }
-        3 => pred8x8(3, dst, top, left),
+        3 => pred8x8_plane(dst, top, left, lt, lb),
         _ => {
             for r in 0..8 {
                 for c in 0..8 {
