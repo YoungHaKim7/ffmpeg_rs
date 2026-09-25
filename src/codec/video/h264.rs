@@ -1166,6 +1166,13 @@ impl H264Decoder {
                     I_MB_TYPE_INFO[row * 3 + 1],
                     I_MB_TYPE_INFO[row * 3 + 2] as i32,
                 );
+                if std::env::var_os("H264_DUMP").is_some() {
+                    eprintln!(
+                        "  TBL row={row} t={} cbp={} pred={pred}",
+                        I_MB_TYPE_INFO[row * 3],
+                        I_MB_TYPE_INFO[row * 3 + 1],
+                    );
+                }
                 // C type codes → port-internal (0=4x4→1, 1=16x16→2,
                 // 25=PCM→3); cbp 255 = C's -1 (only 16x16 cbp implied).
                 let mbt = match mbt {
