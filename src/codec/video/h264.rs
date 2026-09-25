@@ -1579,6 +1579,12 @@ impl H264Decoder {
         } else {
             mode
         };
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!(
+                "CHK mb={}:{} m={m} is_chroma={is_chroma} top={:#06x} left={:#06x}",
+                self.mb_x, self.mb_y, self.top_samples_available, self.left_samples_available
+            );
+        }
         if m > 3 {
             return Err(Error::InvalidData(
                 "out of range intra chroma pred mode".into(),
@@ -2825,56 +2831,43 @@ impl H264Decoder {
         }
     }
 
-    /// Chroma AC residual idct_add over the 4+4 blocks.
+    /// Chroma AC residual: the 4x4 idct over each coded chroma block
+    /// (C's idct_add8 path — 4:2:0 has one 8x8 per component = 4 blocks).
     fn apply_chroma_ac(&mut self, c0: usize, w: usize) {
         let cw = w / 2;
         for ch in 0..2usize {
             for b in 0..4usize {
-                let nnz: usize = (0..16)
-                    .map(|k| self.nnz_cache[SCAN8[16 + 16 * ch + 8 * b + k / 4]])
-                    .sum::<u8>() as usize;
-                let _ = nnz;
-                let index = 16 + 16 * ch + 8 * (b / 2) + (b % 2) * 4; // adjust below
-                let _ = index;
-            }
-        }
-        // Simpler direct form: iterate the 8 chroma blocks as decoded.
-        for ch in 0..2usize {
-            for i8 in 0..4usize {
-                for i4 in 0..4usize {
-                    let index = 16 + 16 * ch + 8 * i8 + i4;
-                    let nnz = self.nnz_cache[SCAN8[index]] as usize;
-                    if nnz == 0 {
-                        continue;
+                let block_idx = 16 + 16 * ch + b;
+                let nnz = self.nnz_cache[SCAN8[block_idx]] as usize;
+                if nnz == 0 {
+                    continue;
+                }
+                let mb_off = 16 * (16 + 16 * ch) + 16 * b;
+                let mut blk = [0i16; 16];
+                blk.copy_from_slice(&self.mb[mb_off..mb_off + 16]);
+                blk[0] = 0; // DC handled by apply_chroma_dc
+                if blk == [0i16; 16] {
+                    continue;
+                }
+                let bx = (b % 2) * 4;
+                let by = (b / 2) * 4;
+                let pic = self.cur.as_mut().unwrap();
+                let base = c0 + by * cw + bx;
+                let plane: &mut [u8] = if ch == 0 { &mut pic.cb } else { &mut pic.cr };
+                let mut d = [0u8; 16];
+                for r in 0..4 {
+                    for c in 0..4 {
+                        d[r * 4 + c] = plane[base + r * cw + c];
                     }
-                    let mut blk = [0i16; 16];
-                    blk.copy_from_slice(&self.mb[index * 16..(index + 1) * 16]);
-                    let bx = (i8 % 2) * 4 + (i4 % 2) * 2;
-                    let by = (i8 / 2) * 4 + (i4 / 2) * 2;
-                    let pic = self.cur.as_mut().unwrap();
-                    let base = c0 + by * cw + bx;
-                    let plane: &mut [u8] = if ch == 0 { &mut pic.cb } else { &mut pic.cr };
-                    let mut d = [0u8; 4];
-                    for r in 0..2 {
-                        for c in 0..2 {
-                            d[r * 2 + c] = plane[base + r * cw + c];
-                        }
-                    }
-                    // 2x2 "IDCT" for chroma AC after DC removal: the AC
-                    // part of a chroma block is its 15 coeffs through
-                    // the 4x4 idct with DC zeroed.
-                    let mut blk4 = blk;
-                    if nnz == 1 && blk4[0] != 0 {
-                        blk4[0] = 0; // DC handled separately
-                        idct_dc_add(&mut d, 2, &mut blk4);
-                    } else {
-                        blk4[0] = 0;
-                        idct_add(&mut d, 2, &mut blk4);
-                    }
-                    for r in 0..2 {
-                        for c in 0..2 {
-                            plane[base + r * cw + c] = d[r * 2 + c];
-                        }
+                }
+                if nnz == 1 {
+                    idct_dc_add(&mut d, 4, &mut blk);
+                } else {
+                    idct_add(&mut d, 4, &mut blk);
+                }
+                for r in 0..4 {
+                    for c in 0..4 {
+                        plane[base + r * cw + c] = d[r * 4 + c];
                     }
                 }
             }
@@ -3051,7 +3044,7 @@ fn decode_residual(
     let coeff_token = if max_coeff == 4 {
         cv.chroma_dc_coeff_token.get(gb)? as usize
     } else {
-        let nnz_pred = h.pred_nnz(n) as usize;
+        let nnz_pred = h.pred_nnz(if n >= LUMA_DC { (n - LUMA_DC) * 16 } else { n }) as usize;
         let bucket = coeff_token_bucket(nnz_pred);
         cv.coeff_token[bucket].get(gb)? as usize
     };
