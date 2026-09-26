@@ -490,15 +490,14 @@ impl H264Decoder {
         // frame pictures; no field flags.
         let _idr_pic_id = if nal.kind == 5 { gb.ue()? } else { 0 };
 
-        match sps.poc_type {
+        let poc_lsb_dbg = match sps.poc_type {
             0 => {
-                let _poc_lsb = gb.read(sps.log2_max_poc_lsb);
-                if pps.pic_order_present {
-                    let _dpb = gb.se()?;
-                }
+                let v = gb.read(sps.log2_max_poc_lsb);
+                let _dpb = gb.se()?;
+                v
             }
-            _ => {}
-        }
+            _ => 0,
+        };
 
         if pps.redundant_pic_cnt_present {
             let _rpc = gb.ue()?;
@@ -542,6 +541,12 @@ impl H264Decoder {
         }
 
         let qp = pps.init_qp + gb.se()?;
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!(
+                "HDR fm={first_mb} st_nos={} pps={pps_id} fn={frame_num} poc={poc_lsb_dbg} pos={}",
+                self.slice_type_nos, gb.index
+            );
+        }
         if !(0..=51).contains(&qp) {
             return Err(Error::InvalidData(format!("QP {qp} out of range")));
         }
@@ -3661,7 +3666,7 @@ mod tests {
             eprintln!("skip: no /tmp/h264_alli.h264 fixture");
             return;
         };
-        let frames = decode_file("/tmp/h264_alli.h264");
+        let frames = decode_file("/tmp/h264_black.h264");
         eprintln!("H264 WIP: decoded {} frames", frames.len());
         if let Ok(_ref) = std::fs::read("/tmp/h264_ref_alli_nolf.yuv") {
             // frame-planar YUV420 vs our Frame (planar)
