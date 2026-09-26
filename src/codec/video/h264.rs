@@ -3661,12 +3661,40 @@ mod tests {
             eprintln!("skip: no /tmp/h264_alli.h264 fixture");
             return;
         };
-        // WIP acceptance probe: the CAVLC layer is bit-verified up to
-        // residuals against an independent python decode of the same
-        // fixture; reconstruction is still being brought up. Decode as
-        // far as the stream allows and report the count (the assertion
-        // turns on when the pipeline is complete).
         let frames = decode_file("/tmp/h264_alli.h264");
         eprintln!("H264 WIP: decoded {} frames", frames.len());
+        if let Ok(_ref) = std::fs::read("/tmp/h264_ref_alli_nolf.yuv") {
+            // frame-planar YUV420 vs our Frame (planar)
+            let (w, h) = (128usize, 96usize);
+            let plane = |fr: &Frame, p: usize| fr.plane(p).to_vec();
+            for (idx, fr) in frames.iter().enumerate() {
+                let y = plane(fr, 0);
+                let u = plane(fr, 1);
+                let v = plane(fr, 2);
+                let off = idx * (w * h * 3 / 2);
+                if off + w * h * 3 / 2 > _ref.len() {
+                    break;
+                }
+                let mut maxd = 0i32;
+                let mut cmp = |ours: &[u8], rp: usize| {
+                    for k in 0..ours.len() {
+                        let r = _ref[rp + k] as i32;
+                        maxd = maxd.max((ours[k] as i32 - r).abs());
+                    }
+                };
+                cmp(&y, off);
+                cmp(&u, off + w * h);
+                cmp(&v, off + w * h + w * h / 4);
+                eprintln!("H264 FRAME {idx}: max pixel diff = {maxd}");
+                if std::env::var_os("H264_DUMP").is_some() && idx == 0 {
+                    let mut out = Vec::new();
+                    out.extend_from_slice(&y);
+                    out.extend_from_slice(&u);
+                    out.extend_from_slice(&v);
+                    let _ = std::fs::write("/tmp/h264_ours.yuv", out);
+                }
+                eprintln!("H264 FRAME {idx}: (reconstruction WIP — assert turns on at <= 8)");
+            }
+        }
     }
 }
