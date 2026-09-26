@@ -1144,6 +1144,10 @@ impl H264Decoder {
             self.mb_skip_run -= 1;
             if run > 0 {
                 self.decode_mb_skip(mb_xy);
+                // P_Skip still reconstructs (MC from the reference with
+                // the predicted skip MV — cavlc path returns early but
+                // hl_decode_mb runs for every MB, C: h264dec.c:101).
+                self.hl_decode_mb(mb_xy)?;
                 return Ok(());
             }
             // run == 0: falls through with the counter at -1 so the next
@@ -1178,6 +1182,12 @@ impl H264Decoder {
             Part::Intra((raw - 5) as usize)
         };
 
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!(
+                "PMB {}:{} skip_run={} pos={}",
+                self.mb_x, self.mb_y, self.mb_skip_run, gb.index
+            );
+        }
         match part {
             Part::Intra(row) => {
                 let row = row as usize;
