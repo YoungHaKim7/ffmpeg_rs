@@ -812,7 +812,8 @@ impl H264Decoder {
             }
             for i in 0..2usize {
                 if type_mask_nnz(self.n_left) {
-                    let nnz = &pic.nnz[(self.mb_x - 1 + self.mb_y * self.mb_width).max(0)];
+                    let nnz =
+                        &pic.nnz[(self.mb_x.saturating_sub(1) + self.mb_y * self.mb_width).max(0)];
                     self.nnz_cache[3 + 8 * 1 + 2 * 8 * i] = nnz[[3usize, 11][i]];
                     self.nnz_cache[3 + 8 * 2 + 2 * 8 * i] = nnz[[7usize, 15][i]];
                     self.nnz_cache[3 + 8 * 6 + 8 * i] = nnz[[17usize, 21][i]];
@@ -833,10 +834,10 @@ impl H264Decoder {
             let pic = self.cur.as_ref().unwrap();
             let b_stride = self.mb_width * 4 + 1;
             let top_xy = self.mb_x + self.mb_y.saturating_sub(1) * self.mb_width;
-            let left_xy = self.mb_x - 1 + self.mb_y * self.mb_width;
+            let left_xy = self.mb_x.saturating_sub(1) + self.mb_y * self.mb_width;
             let uses = |t: u32| -> bool { t == MB_INTER };
             if uses(self.n_top) {
-                let bxy = 4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride;
+                let bxy = 4 * self.mb_x + 4 * self.mb_y.saturating_sub(1) * b_stride;
                 for c in 0..4 {
                     self.mv_cache[4 + c] = pic.mv[bxy + c];
                     self.ref_cache[4 + c] = pic.ref_index[4 * top_xy + (c >> 1)];
@@ -853,7 +854,7 @@ impl H264Decoder {
                 }
             }
             if uses(self.n_topright) {
-                let bxy = 4 * (self.mb_x + 1) + 4 * (self.mb_y - 1) * b_stride;
+                let bxy = 4 * (self.mb_x + 1) + 4 * self.mb_y.saturating_sub(1) * b_stride;
                 self.mv_cache[5 * 8 - 8 + 4 + 0] = pic.mv[bxy];
                 self.ref_cache[5 * 8 - 8 + 4 + 0] = pic.ref_index[4 * (top_xy + 1)];
             } else if self.n_topright != MB_UNAVAIL {
@@ -865,7 +866,10 @@ impl H264Decoder {
             }
             for i in 0..4 {
                 if uses(self.n_left) {
-                    let bxy = 4 * (self.mb_x - 1) + 4 * self.mb_y * b_stride + 3 + i * b_stride;
+                    let bxy = 4 * self.mb_x.saturating_sub(1)
+                        + 4 * self.mb_y * b_stride
+                        + 3
+                        + i * b_stride;
                     self.mv_cache[3 + 8 * (1 + i)] = pic.mv[bxy];
                     self.ref_cache[3 + 8 * (1 + i)] = pic.ref_index[4 * left_xy + 1 + 2 * (i >> 1)];
                 } else if self.n_left != MB_UNAVAIL {
@@ -908,7 +912,7 @@ impl H264Decoder {
         }
         for i in 0..2usize {
             if self.n_left == MB_INTRA4X4 {
-                let modes = &pic.mb_i4x4[self.mb_x - 1 + self.mb_y * self.mb_width];
+                let modes = &pic.mb_i4x4[self.mb_x.saturating_sub(1) + self.mb_y * self.mb_width];
                 self.intra4x4_pred_mode_cache[3 + 8 * (1 + 2 * i)] = modes[[4, 5][i]];
                 self.intra4x4_pred_mode_cache[3 + 8 * (2 + 2 * i)] = modes[[6, 7][i]];
             } else {
@@ -1646,8 +1650,22 @@ impl H264Decoder {
             }
             let mode = self.chroma_pred_mode;
             let pic = self.cur.as_mut().unwrap();
-            let lb_cb = if left_ok && self.mb_y + 1 <= self.mb_height { pic.cb[c0 + cw - 1] } else { lt_cb };
-            pred8x8_avail(mode, &mut pic.cb[c0..], cw, &top, &left, top_ok, left_ok, lt_cb, lb_cb);
+            let lb_cb = if left_ok && self.mb_y + 1 <= self.mb_height {
+                pic.cb[c0 + cw - 1]
+            } else {
+                lt_cb
+            };
+            pred8x8_avail(
+                mode,
+                &mut pic.cb[c0..],
+                cw,
+                &top,
+                &left,
+                top_ok,
+                left_ok,
+                lt_cb,
+                lb_cb,
+            );
             if top_ok {
                 for i in 0..8 {
                     top[i] = pic.cr[c0 - cw + i];
@@ -1661,8 +1679,22 @@ impl H264Decoder {
             if top_ok && left_ok {
                 lt_cr = pic.cr[c0 - cw - 1];
             }
-            let lb_cr = if left_ok && self.mb_y + 1 <= self.mb_height { pic.cr[c0 + cw - 1] } else { lt_cr };
-            pred8x8_avail(mode, &mut pic.cr[c0..], cw, &top, &left, top_ok, left_ok, lt_cr, lb_cr);
+            let lb_cr = if left_ok && self.mb_y + 1 <= self.mb_height {
+                pic.cr[c0 + cw - 1]
+            } else {
+                lt_cr
+            };
+            pred8x8_avail(
+                mode,
+                &mut pic.cr[c0..],
+                cw,
+                &top,
+                &left,
+                top_ok,
+                left_ok,
+                lt_cr,
+                lb_cr,
+            );
         }
 
         if self.mb_type == MB_INTRA16X16 {
