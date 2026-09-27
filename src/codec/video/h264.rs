@@ -489,10 +489,22 @@ impl H264Decoder {
         let frame_num = gb.read(sps.log2_max_frame_num);
         // frame pictures; no field flags.
         let _idr_pic_id = if nal.kind == 5 { gb.ue()? } else { 0 };
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!(
+                "  H1 idr={} pos={} log2poc={} log2fn={}",
+                _idr_pic_id, gb.index, sps.log2_max_poc_lsb, sps.log2_max_frame_num
+            );
+        }
 
         let poc_lsb_dbg = match sps.poc_type {
             0 => {
                 let v = gb.read(sps.log2_max_poc_lsb);
+                if std::env::var_os("H264_DUMP").is_some() {
+                    eprintln!(
+                        "  H2 poc={v} pop={} pos={}",
+                        pps.pic_order_present, gb.index
+                    );
+                }
                 let _dpb = gb.se()?;
                 v
             }
@@ -1217,12 +1229,10 @@ impl H264Decoder {
                 };
                 self.mb_type = mbt as u32;
                 self.cbp = if cbp == 255 { u32::MAX } else { cbp as u32 }; // 255 = -1 (none)
-                self.intra16x16_pred_mode = match pred {
-                    0 => 2, // C DC
-                    1 => 1, // C H
-                    2 => 0, // C V
-                    _ => 3, // plane
-                };
+                // The table's pred column already uses this port's mode
+                // space (C's INTRA16x16 codes: 0=V, 1=H, 2=DC, 3=plane
+                // — identical layout; no remap).
+                self.intra16x16_pred_mode = pred;
                 self.decode_mb_intra(gb, mb_xy)?;
             }
             Part::P16x16 | Part::P16x8 | Part::P8x16 | Part::P8x8 => {
@@ -1449,6 +1459,9 @@ impl H264Decoder {
             let qmul = self.pps.as_ref().unwrap().dequant(0, self.qscale as usize)[0];
             let mut dc = self.mb_luma_dc;
             decode_residual(self, &cv, gb, &mut dc, LUMA_DC, &scan, qmul, 16, true)?;
+            if std::env::var_os("H264_DUMP").is_some() {
+                eprintln!("  LUMADC {:?}", &dc[..8]);
+            }
             self.mb_luma_dc = dc;
             if self.cbp & 15 != 0 {
                 for i in 0..16usize {
@@ -1738,24 +1751,46 @@ impl H264Decoder {
                 }
             }
             // luma DC hadamard scatter into self.mb, then IDCT each block
+            if std::env::var_os("H264_DUMP").is_some() && self.mb_x == 0 && self.mb_y == 0 {
+                eprintln!(
+                    "  PRE-SCATTER nnzDC={} qmul={} scattered0..1 will follow",
+                    self.nnz_cache[SCAN8[LUMA_DC]],
+                    self.pps.as_ref().unwrap().dequant(0, self.qscale as usize)[0]
+                );
+            }
             if self.nnz_cache[SCAN8[LUMA_DC]] != 0 {
                 let qmul = self.pps.as_ref().unwrap().dequant(0, self.qscale as usize)[0];
+                // luma_dc_dequant_idct's output layout: the DC of block
+                // (r, c) of the 4x4 block grid lands at
+                // 16·row[r] + x_off[c] with row = {0,1,4,5}, x_off = {0,32,128,160}.
                 let mut scattered = [0i16; 256];
                 let dc = self.mb_luma_dc;
                 luma_dc_dequant_idct(&mut scattered, &dc, qmul);
-                for b in 0..16usize {
-                    self.mb[b * 16] = scattered[b * 16]; // DC slot (raster 0)
-                    let _ = b;
+                const ROW: [usize; 4] = [0, 1, 4, 5];
+                const XOFF: [usize; 4] = [0, 32, 128, 160];
+                for r in 0..4usize {
+                    for c in 0..4usize {
+                        self.mb[(4 * r + c) * 16] = scattered[16 * ROW[r] + XOFF[c]];
+                    }
                 }
-                // (the idct scatter writes DC into each block's [0]; the
-                // helper's stride-16 layout maps directly)
-                for b in 0..16usize {
-                    self.mb[b * 16] += scattered[b * 16] - self.mb[b * 16];
+                if std::env::var_os("H264_DUMP").is_some() && self.mb_x == 0 && self.mb_y == 0 {
+                    eprintln!(
+                        "  POST-SCATTER mbDC0={} mbDC5={}",
+                        self.mb[0],
+                        self.mb[5 * 16]
+                    );
                 }
-                // zero out luma_dc flag semantics: handled by nnz below
             }
             // residual AC: idct_add16intra semantics
             self.add_residual_intra16(y0, w);
+            if std::env::var_os("H264_DUMP").is_some() && self.mb_x == 0 && self.mb_y == 0 {
+                let pic = self.cur.as_ref().unwrap();
+                eprintln!(
+                    "  RECON16 y00={} y15,15={}",
+                    pic.y[y0],
+                    pic.y[y0 + 15 * w + 15]
+                );
+            }
             // chroma DC dequant scatter
             self.apply_chroma_dc(c0, w);
             return Ok(());
@@ -3197,6 +3232,12 @@ fn decode_residual(
         // first non-trailing level
         {
             let bitsi = gb.peek(LEVEL_TAB_BITS) as usize;
+            if std::env::var_os("H264_DUMP").is_some() && n == LUMA_DC {
+                eprintln!(
+                    "  FIRSTDC tc={total_coeff} to={trailing_ones} sl={suffix_length} bitsi={bitsi} e0={} e1={}",
+                    cv.level_tab[suffix_length][bitsi][0], cv.level_tab[suffix_length][bitsi][1]
+                );
+            }
             if std::env::var_os("H264_DUMP").is_some() && (n < 2 || n == 11) {
                 eprintln!(
                     "  FIRST sl={suffix_length} bitsi={bitsi} e0={} e1={}",
