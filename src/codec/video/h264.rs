@@ -1422,6 +1422,10 @@ impl H264Decoder {
     /// `decode_mb_skip` (h264_mvpred.h:950): P_Skip = zero-out + pskip mv.
     fn decode_mb_skip(&mut self, mb_xy: usize) {
         self.fill_decode_caches(MB_INTER);
+        // hl_decode_mb reads self.mb_type (C reads
+        // cur_pic.mb_type[mb_xy]); set it or the stale intra type from
+        // the previous MB leaks into the skip reconstruction.
+        self.mb_type = MB_INTER;
         self.pred_pskip_motion();
         for i in 0..16usize {
             self.ref_cache[SCAN8[i]] = 0;
@@ -1637,8 +1641,8 @@ impl H264Decoder {
                     let by = self.mb_y as i32 * 16 + 4 * r as i32;
                     let mut cb = [0u8; 16];
                     let mut cr = [0u8; 16];
-                    mc_chroma(&mut cb, 4, 2, 2, prev, &PlaneSel::Cb, bx, by, mv[0], mv[1]);
-                    mc_chroma(&mut cr, 4, 2, 2, prev, &PlaneSel::Cr, bx, by, mv[0], mv[1]);
+                    mc_chroma(&mut cb, 2, 2, 2, prev, &PlaneSel::Cb, bx, by, mv[0], mv[1]);
+                    mc_chroma(&mut cr, 2, 2, 2, prev, &PlaneSel::Cr, bx, by, mv[0], mv[1]);
                     let cur = self.cur.as_mut().unwrap();
                     for dr in 0..2 {
                         for dc in 0..2 {
@@ -2086,17 +2090,24 @@ impl H264Decoder {
 
         let mb_num = self.mb_width * self.mb_height;
         let mut mb_abs = first_mb;
-        while mb_abs < mb_num {
+        // C's CAVLC slice loop (h264_slice.c:2784): decode MB, advance,
+        // finish at end-of-picture; stop on exhausted bits ONLY when no
+        // skip run is pending — an all-skip slice has zero bits left for
+        // the remaining MBs (skip MBs consume no bits), so more_rbsp_data
+        // must NOT gate the loop.
+        loop {
             self.mb_x = mb_abs % self.mb_width;
             self.mb_y = mb_abs / self.mb_width;
-            let before = gb.index;
             self.decode_mb_cavlc(&mut gb)?;
-            if gb.index == before {
-                return Err(Error::InvalidData("no progress".into()));
-            }
             mb_abs += 1;
-            if !gb.more_rbsp_data() {
+            if mb_abs >= mb_num {
                 break;
+            }
+            if gb.left() <= 0 && self.mb_skip_run <= 0 {
+                if gb.left() == 0 {
+                    break;
+                }
+                return Err(Error::InvalidData("slice overread".into()));
             }
         }
         Ok(true)
@@ -2293,7 +2304,9 @@ impl<'a> Gb<'a> {
         Ok(log)
     }
     /// `more_rbsp_data` (golomb.h): bits left besides the trailing
-    /// one-bit-and-zeros tail.
+    /// one-bit-and-zeros tail. NOTE: not a slice-loop condition — C's MB
+    /// loop is gated on get_bits_left + pending skip run instead.
+    #[allow(dead_code)]
     fn more_rbsp_data(&self) -> bool {
         if self.left() <= 0 {
             return false;
@@ -3519,10 +3532,6 @@ fn scan_shift1() -> [u8; 16] {
     s.rotate_left(1);
     s
 }
-fn qmul_scan1(_q: usize) -> u32 {
-    0
-}
-
 // pred16x16/pred8x8 with availability-aware DC (C's *_DC_* variants).
 fn pred16x16_avail(
     mode: i32,
@@ -3693,12 +3702,22 @@ mod tests {
             cmp(&u, off + w * h);
             cmp(&v, off + w * h + w * h / 4);
             eprintln!("H264 FRAME {idx}: max pixel diff = {maxd}");
-            if std::env::var_os("H264_DUMP").is_some() && idx == 0 {
+            if std::env::var_os("H264_DUMP").is_some() {
                 let mut out = Vec::new();
                 out.extend_from_slice(&y);
                 out.extend_from_slice(&u);
                 out.extend_from_slice(&v);
-                let _ = std::fs::write("/tmp/h264_ours.yuv", out);
+                let _ = std::fs::write("/tmp/h264_ours.yuv", &out);
+                // all-decode dump (append): lets a python pass compare any
+                // P frame against the reference stream.
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/h264_ours_all.yuv")
+                {
+                    let _ = f.write_all(&out);
+                }
             }
             eprintln!("H264 FRAME {idx}: (reconstruction WIP — assert turns on at <= 8)");
         }
