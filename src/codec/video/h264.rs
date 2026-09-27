@@ -551,6 +551,9 @@ impl H264Decoder {
                 return Err(Error::Unsupported("MMCO".into()));
             }
         }
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!("  H3 post-marking pos={}", gb.index);
+        }
 
         let qp = pps.init_qp + gb.se()?;
         if std::env::var_os("H264_DUMP").is_some() {
