@@ -2111,8 +2111,8 @@ fn get_mix_any_func(
     out_ch_layout: &ChannelLayout,
 ) -> Option<AnyFastPath> {
     if *out_ch_layout == ChannelLayout::STEREO
-        && (*in_ch_layout == ChannelLayout::FivePointOne
-            || *in_ch_layout == ChannelLayout::FivePointOneBack)
+        && (*in_ch_layout == ChannelLayout::FIVE_POINT_ONE
+            || *in_ch_layout == ChannelLayout::FIVE_POINT_ONE_BACK)
         && matrix[0][2] == matrix[1][2]
         && matrix[0][3] == matrix[1][3]
         && matrix[0][1] == 0.0
@@ -2124,7 +2124,7 @@ fn get_mix_any_func(
     }
 
     if *out_ch_layout == ChannelLayout::STEREO
-        && *in_ch_layout == ChannelLayout::SevenPointOne
+        && *in_ch_layout == ChannelLayout::SEVEN_POINT_ONE
         && matrix[0][2] == matrix[1][2]
         && matrix[0][3] == matrix[1][3]
         && matrix[0][1] == 0.0
@@ -2346,7 +2346,7 @@ mod tests {
 
     #[test]
     fn five_point_one_to_stereo_exact() {
-        for in_l in [&CL::FivePointOne, &CL::FivePointOneBack] {
+        for in_l in [&CL::FIVE_POINT_ONE, &CL::FIVE_POINT_ONE_BACK] {
             let m = build(in_l, &CL::STEREO, 1.0);
             // L row = [1, 0, clev, 0, slev, 0] / (1 + 2*sqrt(1/2)).
             assert_eq!(b(m[0]), 0x3FDA827999FCEF33, "{:?}", in_l.describe());
@@ -2375,11 +2375,11 @@ mod tests {
             ..RematrixOptions::default()
         };
         // Unnormalized: LFE coefficient sqrt(1/2) on both outputs.
-        let m = build_opts(&CL::FivePointOne, &CL::STEREO, INT_MAX_F64, 1.0, &opts);
+        let m = build_opts(&CL::FIVE_POINT_ONE, &CL::STEREO, INT_MAX_F64, 1.0, &opts);
         assert_eq!(b(m[3]), 0x3FE6A09E667F3BCD);
         assert_eq!(b(m[SWR_CH_MAX + 3]), 0x3FE6A09E667F3BCD);
         // Normalized: maxcoef = 1 + 3*sqrt(1/2) (FC + LFE + SL all sqrt(1/2)).
-        let m = build_opts(&CL::FivePointOne, &CL::STEREO, 1.0, 1.0, &opts);
+        let m = build_opts(&CL::FIVE_POINT_ONE, &CL::STEREO, 1.0, 1.0, &opts);
         assert_eq!(b(m[0]), b(1.0 / 3.121_320_343_559_642_4));
         assert_eq!(b(m[3]), b(M_SQRT1_2 / 3.121_320_343_559_642_4));
         assert_eq!(b(m[3]), 0x3FCCFF4AF8932960);
@@ -2427,7 +2427,13 @@ mod tests {
             matrix_encoding: MatrixEncoding::Dolby,
             ..RematrixOptions::default()
         };
-        let m = build_opts(&CL::FivePointOneBack, &CL::STEREO, INT_MAX_F64, 1.0, &dolby);
+        let m = build_opts(
+            &CL::FIVE_POINT_ONE_BACK,
+            &CL::STEREO,
+            INT_MAX_F64,
+            1.0,
+            &dolby,
+        );
         assert_eq!(b(m[4]), b(-M_SQRT1_2 * M_SQRT1_2)); // FL <- BL negative
         assert_eq!(b(m[SWR_CH_MAX + 4]), b(M_SQRT1_2 * M_SQRT1_2)); // FR <- BL
         assert_eq!(b(m[5]), b(-M_SQRT1_2 * M_SQRT1_2));
@@ -2440,7 +2446,13 @@ mod tests {
             matrix_encoding: MatrixEncoding::Dplii,
             ..RematrixOptions::default()
         };
-        let m = build_opts(&CL::FivePointOneBack, &CL::STEREO, INT_MAX_F64, 1.0, &dplii);
+        let m = build_opts(
+            &CL::FIVE_POINT_ONE_BACK,
+            &CL::STEREO,
+            INT_MAX_F64,
+            1.0,
+            &dplii,
+        );
         assert_eq!(b(m[4]), b(-M_SQRT1_2 * SQRT3_2)); // FL,BL = -slev*sqrt(3/2)
         assert_eq!(b(m[5]), b(-M_SQRT1_2 * M_SQRT1_2)); // FL,BR = -slev*sqrt(1/2)
         assert_eq!(b(m[SWR_CH_MAX + 4]), b(M_SQRT1_2 * M_SQRT1_2)); // FR,BL
@@ -2718,11 +2730,11 @@ mod tests {
         assert!(sane_layout(&CL::MONO));
         assert!(sane_layout(&CL::STEREO));
         assert!(sane_layout(&CL::SURROUND));
-        assert!(sane_layout(&CL::FivePointOne));
-        assert!(sane_layout(&CL::FivePointOneBack));
-        assert!(sane_layout(&CL::SevenPointOne));
+        assert!(sane_layout(&CL::FIVE_POINT_ONE));
+        assert!(sane_layout(&CL::FIVE_POINT_ONE_BACK));
+        assert!(sane_layout(&CL::SEVEN_POINT_ONE));
         assert!(sane_layout(&CL::QUAD));
-        assert!(sane_layout(&CL::TwentyTwoTwo)); // 24 channels, all pairs even
+        assert!(sane_layout(&CL::TWENTY_TWO_TWO)); // 24 channels, all pairs even
         // No front speaker (DL/DR only), asymmetric side, too many channels,
         // and UNSPEC all fail (a lone FL also fails — but clean_layout
         // coerces it to mono before sane_layout ever sees it).
@@ -2797,7 +2809,7 @@ mod tests {
     #[test]
     fn native_s16_error_diffusion() {
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::STEREO,
             SampleFormat::S16,
             SampleFormat::S16p,
@@ -2818,7 +2830,7 @@ mod tests {
     #[test]
     fn matrix32_no_diffusion_and_sparsity() {
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::STEREO,
             SampleFormat::S16,
             SampleFormat::S16p,
@@ -2943,7 +2955,7 @@ mod tests {
         // 7.1 -> stereo: L row = [1, 0, clev, 0, slev, 0, slev, 0]
         // (SL and BL both fold in), maxcoef = 1 + 3*sqrt(1/2).
         let ctx = init_ctx(
-            &CL::SevenPointOne,
+            &CL::SEVEN_POINT_ONE,
             &CL::STEREO,
             SampleFormat::S16,
             SampleFormat::S16p,
@@ -2980,7 +2992,7 @@ mod tests {
         // All-float path (maxval = INT_MAX): native = f32 of the doubles,
         // one = 1.0, and matrix_flt carries the same values.
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::STEREO,
             SampleFormat::Flt,
             SampleFormat::Fltp,
@@ -3001,7 +3013,7 @@ mod tests {
     #[test]
     fn apply_s16_mix6to2_clip_matches_ffmpeg() {
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::STEREO,
             SampleFormat::S16,
             SampleFormat::S16p,
@@ -3028,7 +3040,7 @@ mod tests {
     #[test]
     fn apply_fltp_mix6to2() {
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::STEREO,
             SampleFormat::Flt,
             SampleFormat::Fltp,
@@ -3061,7 +3073,7 @@ mod tests {
         // clev*sqrt(2), 0, slev*sqrt(1/2), slev*sqrt(1/2)] / 3.4142...,
         // matrix32 = [6786, 6786, 9598, 0, 4799, 4799].
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::MONO,
             SampleFormat::S16,
             SampleFormat::S16p,
@@ -3091,7 +3103,7 @@ mod tests {
         // Same layout on the float path: matrix_flt = f32 of the
         // UNNORMALIZED row (maxval INT_MAX), f32 accumulation.
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::MONO,
             SampleFormat::Flt,
             SampleFormat::Fltp,
@@ -3122,7 +3134,7 @@ mod tests {
         // int16_t samples — the LOW 16 bits of each i32 — and stores the
         // shifted result sign-extended (C leaves the upper half stale).
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::MONO,
             SampleFormat::S32,
             SampleFormat::S32p,
@@ -3152,7 +3164,7 @@ mod tests {
         // 5.1(side) -> quad: FL/FR rows have 2 taps (sum2 path, no
         // diffusion: [19195, 0, 13573, ...]), BL/BR one tap of 19195.
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::QUAD,
             SampleFormat::S16,
             SampleFormat::S16p,
@@ -3230,8 +3242,8 @@ mod tests {
         // backing Arc is stolen (C rematrix.c:834 per-channel steal;
         // divergence documented in the module doc).
         let ctx = init_ctx(
-            &CL::FivePointOne,
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
+            &CL::FIVE_POINT_ONE,
             SampleFormat::S16,
             SampleFormat::S16p,
             &RematrixOptions::default(),
@@ -3299,7 +3311,7 @@ mod tests {
     #[test]
     fn apply_buffer_too_small() {
         let ctx = init_ctx(
-            &CL::FivePointOne,
+            &CL::FIVE_POINT_ONE,
             &CL::STEREO,
             SampleFormat::S16,
             SampleFormat::S16p,

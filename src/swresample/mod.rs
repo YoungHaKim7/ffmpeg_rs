@@ -2716,12 +2716,24 @@ mod tests {
         let stereo = ChannelLayout::STEREO;
         let cases = vec![
             // (in, out, in_rate, out_rate, want)
-            (stereo, ChannelLayout::FivePointOneBack, 48000, 48000, false), // 6/2-1 = 2 < 0? no
-            (ChannelLayout::FivePointOneBack, stereo, 48000, 48000, true),  // 2/6 = 0; -1 < 0
-            (stereo, stereo, 24000, 48000, true),                           // 2x rate: 0 < 1.0
             (
                 stereo,
-                ChannelLayout::FivePointZeroBack,
+                ChannelLayout::FIVE_POINT_ONE_BACK,
+                48000,
+                48000,
+                false,
+            ), // 6/2-1 = 2 < 0? no
+            (
+                ChannelLayout::FIVE_POINT_ONE_BACK,
+                stereo,
+                48000,
+                48000,
+                true,
+            ), // 2/6 = 0; -1 < 0
+            (stereo, stereo, 24000, 48000, true), // 2x rate: 0 < 1.0
+            (
+                stereo,
+                ChannelLayout::FIVE_POINT_ZERO_BACK,
                 48000,
                 48000,
                 false,
@@ -2767,7 +2779,7 @@ mod tests {
             &ChannelLayout::STEREO,
             SampleFormat::S16,
             44100,
-            &ChannelLayout::FivePointOneBack,
+            &ChannelLayout::FIVE_POINT_ONE_BACK,
             SampleFormat::Fltp,
             48000,
         )
@@ -2775,7 +2787,7 @@ mod tests {
         assert_eq!(s.options.out_chlayout, ChannelLayout::STEREO);
         assert_eq!(s.options.out_sample_fmt, Some(SampleFormat::S16));
         assert_eq!(s.options.out_sample_rate, 44100);
-        assert_eq!(s.options.in_chlayout, ChannelLayout::FivePointOneBack);
+        assert_eq!(s.options.in_chlayout, ChannelLayout::FIVE_POINT_ONE_BACK);
         assert_eq!(s.options.in_sample_fmt, Some(SampleFormat::Fltp));
         assert_eq!(s.options.in_sample_rate, 48000);
         // The fail path: over-wide out layout -> the check_chlayout text
@@ -2980,7 +2992,7 @@ mod tests {
             44100,
             SampleFormat::S16,
             SampleFormat::S16,
-            ChannelLayout::FivePointOneBack,
+            ChannelLayout::FIVE_POINT_ONE_BACK,
             ChannelLayout::STEREO,
         );
         s.init().unwrap();
@@ -3458,7 +3470,7 @@ mod tests {
 
         // A mismatched input frame after init: configuration changed.
         let other =
-            AudioFrame::alloc(SampleFormat::Fltp, ChannelLayout::FivePointOneBack, 100).unwrap();
+            AudioFrame::alloc(SampleFormat::Fltp, ChannelLayout::FIVE_POINT_ONE_BACK, 100).unwrap();
         let e = s.convert_frame(None, Some(&other)).unwrap_err();
         assert_eq!(err_str(e), "input configuration changed");
 

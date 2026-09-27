@@ -79,62 +79,65 @@ fn const_masks_match_header() {
     let layouts: &[(&str, ChannelLayout)] = &[
         ("MONO", ChannelLayout::MONO),
         ("STEREO", ChannelLayout::STEREO),
-        ("TwoPointOne", ChannelLayout::TwoPointOne),
+        ("TwoPointOne", ChannelLayout::TWO_POINT_ONE),
         ("2_1", ChannelLayout::A2_1),
         ("SURROUND", ChannelLayout::SURROUND),
-        ("ThreePointOne", ChannelLayout::ThreePointOne),
-        ("FourPointZero", ChannelLayout::FourPointZero),
-        ("FourPointOne", ChannelLayout::FourPointOne),
+        ("ThreePointOne", ChannelLayout::THREE_POINT_ONE),
+        ("FourPointZero", ChannelLayout::FOUR_POINT_ZERO),
+        ("FourPointOne", ChannelLayout::FOUR_POINT_ONE),
         ("2_2", ChannelLayout::A2_2),
         ("QUAD", ChannelLayout::QUAD),
-        ("FivePointZero", ChannelLayout::FivePointZero),
-        ("FivePointOne", ChannelLayout::FivePointOne),
-        ("FivePointZeroBack", ChannelLayout::FivePointZeroBack),
-        ("FivePointOneBack", ChannelLayout::FivePointOneBack),
-        ("SixPointZero", ChannelLayout::SixPointZero),
-        ("SixPointZeroFront", ChannelLayout::SixPointZeroFront),
+        ("FivePointZero", ChannelLayout::FIVE_POINT_ZERO),
+        ("FivePointOne", ChannelLayout::FIVE_POINT_ONE),
+        ("FivePointZeroBack", ChannelLayout::FIVE_POINT_ZERO_BACK),
+        ("FivePointOneBack", ChannelLayout::FIVE_POINT_ONE_BACK),
+        ("SixPointZero", ChannelLayout::SIX_POINT_ZERO),
+        ("SixPointZeroFront", ChannelLayout::SIX_POINT_ZERO_FRONT),
         (
             "ThreePointOnePointTwo",
-            ChannelLayout::ThreePointOnePointTwo,
+            ChannelLayout::THREE_POINT_ONE_POINT_TWO,
         ),
         ("HEXAGONAL", ChannelLayout::HEXAGONAL),
-        ("SixPointOne", ChannelLayout::SixPointOne),
-        ("SixPointOneBack", ChannelLayout::SixPointOneBack),
-        ("SixPointOneFront", ChannelLayout::SixPointOneFront),
-        ("SevenPointZero", ChannelLayout::SevenPointZero),
-        ("SevenPointZeroFront", ChannelLayout::SevenPointZeroFront),
-        ("SevenPointOne", ChannelLayout::SevenPointOne),
-        ("SevenPointOneWide", ChannelLayout::SevenPointOneWide),
+        ("SixPointOne", ChannelLayout::SIX_POINT_ONE),
+        ("SixPointOneBack", ChannelLayout::SIX_POINT_ONE_BACK),
+        ("SixPointOneFront", ChannelLayout::SIX_POINT_ONE_FRONT),
+        ("SevenPointZero", ChannelLayout::SEVEN_POINT_ZERO),
+        ("SevenPointZeroFront", ChannelLayout::SEVEN_POINT_ZERO_FRONT),
+        ("SevenPointOne", ChannelLayout::SEVEN_POINT_ONE),
+        ("SevenPointOneWide", ChannelLayout::SEVEN_POINT_ONE_WIDE),
         (
             "SevenPointOneWideBack",
-            ChannelLayout::SevenPointOneWideBack,
+            ChannelLayout::SEVEN_POINT_ONE_WIDE_BACK,
         ),
-        ("FivePointOnePointTwo", ChannelLayout::FivePointOnePointTwo),
+        (
+            "FivePointOnePointTwo",
+            ChannelLayout::FIVE_POINT_ONE_POINT_TWO,
+        ),
         (
             "FivePointOnePointTwoBack",
-            ChannelLayout::FivePointOnePointTwoBack,
+            ChannelLayout::FIVE_POINT_ONE_POINT_TWO_BACK,
         ),
         ("OCTAGONAL", ChannelLayout::OCTAGONAL),
         ("CUBE", ChannelLayout::CUBE),
         (
             "FivePointOnePointFour",
-            ChannelLayout::FivePointOnePointFour,
+            ChannelLayout::FIVE_POINT_ONE_POINT_FOUR,
         ),
         (
             "SevenPointOnePointTwo",
-            ChannelLayout::SevenPointOnePointTwo,
+            ChannelLayout::SEVEN_POINT_ONE_POINT_TWO,
         ),
         (
             "SevenPointOnePointFour",
-            ChannelLayout::SevenPointOnePointFour,
+            ChannelLayout::SEVEN_POINT_ONE_POINT_FOUR,
         ),
-        ("SevenTwoThree", ChannelLayout::SevenTwoThree),
-        ("NineOneFour", ChannelLayout::NineOneFour),
-        ("NineOneSix", ChannelLayout::NineOneSix),
+        ("SevenTwoThree", ChannelLayout::SEVEN_TWO_THREE),
+        ("NineOneFour", ChannelLayout::NINE_ONE_FOUR),
+        ("NineOneSix", ChannelLayout::NINE_ONE_SIX),
         ("HEXADECAGONAL", ChannelLayout::HEXADECAGONAL),
         ("BINAURAL", ChannelLayout::BINAURAL),
         ("STEREO_DOWNMIX", ChannelLayout::STEREO_DOWNMIX),
-        ("TwentyTwoTwo", ChannelLayout::TwentyTwoTwo),
+        ("TwentyTwoTwo", ChannelLayout::TWENTY_TWO_TWO),
     ];
     assert_eq!(expected.len(), 40);
     assert_eq!(layouts.len(), 40);
@@ -165,13 +168,13 @@ fn const_masks_match_header() {
     // Spec anchors.
     assert_eq!(ChannelLayout::MONO.mask, 0x4);
     assert_eq!(ChannelLayout::STEREO.mask, 0x3);
-    assert_eq!(ChannelLayout::FivePointZeroBack.mask, 0x37);
-    assert_eq!(ChannelLayout::FivePointOneBack.mask, 0x3F);
-    assert_eq!(ChannelLayout::SixPointOne.mask, 0x70F);
-    assert_eq!(ChannelLayout::SixPointOneBack.mask, 0x13F);
-    assert_eq!(ChannelLayout::SevenPointOne.mask, 0x63F);
+    assert_eq!(ChannelLayout::FIVE_POINT_ZERO_BACK.mask, 0x37);
+    assert_eq!(ChannelLayout::FIVE_POINT_ONE_BACK.mask, 0x3F);
+    assert_eq!(ChannelLayout::SIX_POINT_ONE.mask, 0x70F);
+    assert_eq!(ChannelLayout::SIX_POINT_ONE_BACK.mask, 0x13F);
+    assert_eq!(ChannelLayout::SEVEN_POINT_ONE.mask, 0x63F);
     assert_eq!(ChannelLayout::QUAD.mask, 0x33);
-    assert_eq!(ChannelLayout::TwentyTwoTwo.nb_channels, 24);
+    assert_eq!(ChannelLayout::TWENTY_TWO_TWO.nb_channels, 24);
 }
 
 // ---- STANDARD table order is the C channel_layout_map order ----
@@ -240,11 +243,11 @@ fn standard_table_order() {
 fn describe_native() {
     assert_eq!(ChannelLayout::MONO.describe(), "mono");
     assert_eq!(ChannelLayout::STEREO.describe(), "stereo");
-    assert_eq!(ChannelLayout::FivePointOneBack.describe(), "5.1");
-    assert_eq!(ChannelLayout::FivePointOne.describe(), "5.1(side)");
+    assert_eq!(ChannelLayout::FIVE_POINT_ONE_BACK.describe(), "5.1");
+    assert_eq!(ChannelLayout::FIVE_POINT_ONE.describe(), "5.1(side)");
     assert_eq!(ChannelLayout::QUAD.describe(), "quad");
     assert_eq!(ChannelLayout::A2_2.describe(), "quad(side)");
-    assert_eq!(ChannelLayout::TwentyTwoTwo.describe(), "22.2");
+    assert_eq!(ChannelLayout::TWENTY_TWO_TWO.describe(), "22.2");
     // Non-standard masks: "{nb} channels (A+B+…)", ascending bits.
     assert_eq!(
         ChannelLayout::from_mask(0x63).unwrap().describe(),
@@ -287,7 +290,7 @@ fn from_string_names() {
     );
     assert_eq!(
         ChannelLayout::from_string("5.1").unwrap(),
-        ChannelLayout::FivePointOneBack
+        ChannelLayout::FIVE_POINT_ONE_BACK
     );
     assert_eq!(
         ChannelLayout::from_string("quad(side)").unwrap(),
@@ -302,8 +305,8 @@ fn from_string_names() {
 #[test]
 fn from_string_channel_lists() {
     let l = ChannelLayout::from_string("FL+FR+LFE").unwrap();
-    assert_eq!(l.mask, 0xB); // == TwoPointOne
-    assert_eq!(l, ChannelLayout::TwoPointOne);
+    assert_eq!(l.mask, 0xB); // == TWO_POINT_ONE
+    assert_eq!(l, ChannelLayout::TWO_POINT_ONE);
     let l = ChannelLayout::from_string("FL+FC").unwrap();
     assert_eq!(l.mask, 0x5);
     assert_eq!(l.nb_channels, 2);
@@ -406,7 +409,7 @@ fn from_string_channel_counts() {
     // "{n}c": default layout, only when native (c:426-429).
     assert_eq!(
         ChannelLayout::from_string("6c").unwrap(),
-        ChannelLayout::FivePointOneBack
+        ChannelLayout::FIVE_POINT_ONE_BACK
     );
     assert_eq!(
         ChannelLayout::from_string("2c").unwrap(),
@@ -491,15 +494,18 @@ fn default_for_first_match() {
     assert_eq!(ChannelLayout::default_for(8).mask, 0x63F); // 7.1
     assert_eq!(
         ChannelLayout::default_for(10),
-        ChannelLayout::FivePointOnePointFour
+        ChannelLayout::FIVE_POINT_ONE_POINT_FOUR
     );
     assert_eq!(
         ChannelLayout::default_for(12),
-        ChannelLayout::SevenPointOnePointFour
+        ChannelLayout::SEVEN_POINT_ONE_POINT_FOUR
     );
-    assert_eq!(ChannelLayout::default_for(14), ChannelLayout::NineOneFour);
-    assert_eq!(ChannelLayout::default_for(16), ChannelLayout::NineOneSix);
-    assert_eq!(ChannelLayout::default_for(24), ChannelLayout::TwentyTwoTwo);
+    assert_eq!(ChannelLayout::default_for(14), ChannelLayout::NINE_ONE_FOUR);
+    assert_eq!(ChannelLayout::default_for(16), ChannelLayout::NINE_ONE_SIX);
+    assert_eq!(
+        ChannelLayout::default_for(24),
+        ChannelLayout::TWENTY_TWO_TWO
+    );
     // No standard layout: unspecified (c:850-851).
     assert_eq!(ChannelLayout::default_for(9), ChannelLayout::unspecified(9));
     assert_eq!(ChannelLayout::default_for(0), ChannelLayout::unspecified(0));
@@ -517,7 +523,7 @@ fn index_round_trip() {
     assert_eq!(stereo.channel_from_index(1), Some(Channel::FrontRight));
     assert_eq!(stereo.channel_from_index(2), None);
 
-    let five1 = ChannelLayout::FivePointOneBack;
+    let five1 = ChannelLayout::FIVE_POINT_ONE_BACK;
     assert_eq!(five1.index_from_channel(Channel::LowFrequency), Ok(3));
     assert!(five1.index_from_channel(Channel::SideLeft).is_err());
 
@@ -572,7 +578,7 @@ fn string_index_lookups() {
 
 #[test]
 fn subset_and_union() {
-    assert_eq!(ChannelLayout::FivePointOneBack.subset(0xF), 0xF);
+    assert_eq!(ChannelLayout::FIVE_POINT_ONE_BACK.subset(0xF), 0xF);
     assert_eq!(ChannelLayout::STEREO.subset(0xFFFFFFFFFFFFFFFF), 0x3);
     assert_eq!(ChannelLayout::unspecified(2).subset(0xF), 0);
     // Union (not a C API): mask OR, count = popcount.
@@ -597,8 +603,8 @@ fn compare_semantics() {
     );
     assert_ne!(ChannelLayout::STEREO, ChannelLayout::MONO);
     assert_ne!(
-        ChannelLayout::FivePointZero,
-        ChannelLayout::FivePointZeroBack
+        ChannelLayout::FIVE_POINT_ZERO,
+        ChannelLayout::FIVE_POINT_ZERO_BACK
     );
 }
 

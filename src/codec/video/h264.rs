@@ -3706,44 +3706,54 @@ mod tests {
 
     #[test]
     fn decodes_all_intra_fixture() {
-        let Ok(_data) = std::fs::read("/tmp/h264_alli.h264") else {
-            eprintln!("skip: no /tmp/h264_alli.h264 fixture");
+        // H264_TEST=/path.h264 to decode another fixture; the reference
+        // YUV is looked up as /tmp/h264_ref_*.yuv alongside a matching
+        // -skip_loop_filter all decode.
+        let path = std::env::var("H264_TEST").unwrap_or_else(|_| "/tmp/h264_alli.h264".into());
+        let Ok(_data) = std::fs::read(&path) else {
+            eprintln!("skip: no {path} fixture");
             return;
         };
-        let frames = decode_file("/tmp/h264_black.h264");
+        let frames = decode_file(&path);
         eprintln!("H264 WIP: decoded {} frames", frames.len());
-        if let Ok(_ref) = std::fs::read("/tmp/h264_ref_alli_nolf.yuv") {
-            // frame-planar YUV420 vs our Frame (planar)
-            let (w, h) = (128usize, 96usize);
-            let plane = |fr: &Frame, p: usize| fr.plane(p).to_vec();
-            for (idx, fr) in frames.iter().enumerate() {
-                let y = plane(fr, 0);
-                let u = plane(fr, 1);
-                let v = plane(fr, 2);
-                let off = idx * (w * h * 3 / 2);
-                if off + w * h * 3 / 2 > _ref.len() {
-                    break;
-                }
-                let mut maxd = 0i32;
-                let mut cmp = |ours: &[u8], rp: usize| {
-                    for k in 0..ours.len() {
-                        let r = _ref[rp + k] as i32;
-                        maxd = maxd.max((ours[k] as i32 - r).abs());
-                    }
-                };
-                cmp(&y, off);
-                cmp(&u, off + w * h);
-                cmp(&v, off + w * h + w * h / 4);
-                eprintln!("H264 FRAME {idx}: max pixel diff = {maxd}");
-                if std::env::var_os("H264_DUMP").is_some() && idx == 0 {
-                    let mut out = Vec::new();
-                    out.extend_from_slice(&y);
-                    out.extend_from_slice(&u);
-                    out.extend_from_slice(&v);
-                    let _ = std::fs::write("/tmp/h264_ours.yuv", out);
-                }
-                eprintln!("H264 FRAME {idx}: (reconstruction WIP — assert turns on at <= 8)");
+        let Some(fr0) = frames.first() else { return };
+        let (w, h) = (fr0.width as usize, fr0.height as usize);
+        let stem = path
+            .trim_start_matches("/tmp/h264_")
+            .trim_end_matches(".h264");
+        let ref_path = std::format!("/tmp/h264_ref_{stem}_nolf.yuv");
+        let Ok(_ref) = std::fs::read(&ref_path) else {
+            eprintln!("skip: no {ref_path} reference");
+            return;
+        };
+        let plane = |fr: &Frame, p: usize| fr.plane(p).to_vec();
+        for (idx, fr) in frames.iter().enumerate() {
+            let y = plane(fr, 0);
+            let u = plane(fr, 1);
+            let v = plane(fr, 2);
+            let off = idx * (w * h * 3 / 2);
+            if off + w * h * 3 / 2 > _ref.len() {
+                break;
             }
+            let mut maxd = 0i32;
+            let mut cmp = |ours: &[u8], rp: usize| {
+                for k in 0..ours.len() {
+                    let r = _ref[rp + k] as i32;
+                    maxd = maxd.max((ours[k] as i32 - r).abs());
+                }
+            };
+            cmp(&y, off);
+            cmp(&u, off + w * h);
+            cmp(&v, off + w * h + w * h / 4);
+            eprintln!("H264 FRAME {idx}: max pixel diff = {maxd}");
+            if std::env::var_os("H264_DUMP").is_some() && idx == 0 {
+                let mut out = Vec::new();
+                out.extend_from_slice(&y);
+                out.extend_from_slice(&u);
+                out.extend_from_slice(&v);
+                let _ = std::fs::write("/tmp/h264_ours.yuv", out);
+            }
+            eprintln!("H264 FRAME {idx}: (reconstruction WIP — assert turns on at <= 8)");
         }
     }
 }

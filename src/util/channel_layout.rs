@@ -72,87 +72,87 @@ use super::error::{Error, Result};
 pub const STANDARD: &[(&str, ChannelLayout)] = &[
     ("mono", ChannelLayout::MONO),
     ("stereo", ChannelLayout::STEREO),
-    ("2.1", ChannelLayout::TwoPointOne),
+    ("2.1", ChannelLayout::TWO_POINT_ONE),
     ("3.0", ChannelLayout::SURROUND),
     ("3.0(back)", ChannelLayout::A2_1),
-    ("4.0", ChannelLayout::FourPointZero),
+    ("4.0", ChannelLayout::FOUR_POINT_ZERO),
     ("quad", ChannelLayout::QUAD),
     ("quad(side)", ChannelLayout::A2_2),
-    ("3.1", ChannelLayout::ThreePointOne),
-    ("5.0", ChannelLayout::FivePointZeroBack),
-    ("5.0(side)", ChannelLayout::FivePointZero),
-    ("4.1", ChannelLayout::FourPointOne),
-    ("5.1", ChannelLayout::FivePointOneBack),
-    ("5.1(side)", ChannelLayout::FivePointOne),
-    ("6.0", ChannelLayout::SixPointZero),
-    ("6.0(front)", ChannelLayout::SixPointZeroFront),
-    ("3.1.2", ChannelLayout::ThreePointOnePointTwo),
+    ("3.1", ChannelLayout::THREE_POINT_ONE),
+    ("5.0", ChannelLayout::FIVE_POINT_ZERO_BACK),
+    ("5.0(side)", ChannelLayout::FIVE_POINT_ZERO),
+    ("4.1", ChannelLayout::FOUR_POINT_ONE),
+    ("5.1", ChannelLayout::FIVE_POINT_ONE_BACK),
+    ("5.1(side)", ChannelLayout::FIVE_POINT_ONE),
+    ("6.0", ChannelLayout::SIX_POINT_ZERO),
+    ("6.0(front)", ChannelLayout::SIX_POINT_ZERO_FRONT),
+    ("3.1.2", ChannelLayout::THREE_POINT_ONE_POINT_TWO),
     ("hexagonal", ChannelLayout::HEXAGONAL),
-    ("6.1", ChannelLayout::SixPointOne),
-    ("6.1(back)", ChannelLayout::SixPointOneBack),
-    ("6.1(front)", ChannelLayout::SixPointOneFront),
-    ("7.0", ChannelLayout::SevenPointZero),
-    ("7.0(front)", ChannelLayout::SevenPointZeroFront),
-    ("7.1", ChannelLayout::SevenPointOne),
-    ("7.1(wide)", ChannelLayout::SevenPointOneWideBack),
-    ("7.1(wide-side)", ChannelLayout::SevenPointOneWide),
-    ("5.1.2", ChannelLayout::FivePointOnePointTwo),
-    ("5.1.2(back)", ChannelLayout::FivePointOnePointTwoBack),
+    ("6.1", ChannelLayout::SIX_POINT_ONE),
+    ("6.1(back)", ChannelLayout::SIX_POINT_ONE_BACK),
+    ("6.1(front)", ChannelLayout::SIX_POINT_ONE_FRONT),
+    ("7.0", ChannelLayout::SEVEN_POINT_ZERO),
+    ("7.0(front)", ChannelLayout::SEVEN_POINT_ZERO_FRONT),
+    ("7.1", ChannelLayout::SEVEN_POINT_ONE),
+    ("7.1(wide)", ChannelLayout::SEVEN_POINT_ONE_WIDE_BACK),
+    ("7.1(wide-side)", ChannelLayout::SEVEN_POINT_ONE_WIDE),
+    ("5.1.2", ChannelLayout::FIVE_POINT_ONE_POINT_TWO),
+    ("5.1.2(back)", ChannelLayout::FIVE_POINT_ONE_POINT_TWO_BACK),
     ("octagonal", ChannelLayout::OCTAGONAL),
     ("cube", ChannelLayout::CUBE),
-    ("5.1.4", ChannelLayout::FivePointOnePointFour),
-    ("7.1.2", ChannelLayout::SevenPointOnePointTwo),
-    ("7.1.4", ChannelLayout::SevenPointOnePointFour),
-    ("7.2.3", ChannelLayout::SevenTwoThree),
-    ("9.1.4", ChannelLayout::NineOneFour),
-    ("9.1.6", ChannelLayout::NineOneSix),
+    ("5.1.4", ChannelLayout::FIVE_POINT_ONE_POINT_FOUR),
+    ("7.1.2", ChannelLayout::SEVEN_POINT_ONE_POINT_TWO),
+    ("7.1.4", ChannelLayout::SEVEN_POINT_ONE_POINT_FOUR),
+    ("7.2.3", ChannelLayout::SEVEN_TWO_THREE),
+    ("9.1.4", ChannelLayout::NINE_ONE_FOUR),
+    ("9.1.6", ChannelLayout::NINE_ONE_SIX),
     ("hexadecagonal", ChannelLayout::HEXADECAGONAL),
     ("binaural", ChannelLayout::BINAURAL),
     ("downmix", ChannelLayout::STEREO_DOWNMIX),
-    ("22.2", ChannelLayout::TwentyTwoTwo),
+    ("22.2", ChannelLayout::TWENTY_TWO_TWO),
 ];
 
 const STANDARD_LAYOUTS: &[ChannelLayout] = &[
     ChannelLayout::MONO,
     ChannelLayout::STEREO,
-    ChannelLayout::TwoPointOne,
+    ChannelLayout::TWO_POINT_ONE,
     ChannelLayout::SURROUND,
     ChannelLayout::A2_1,
-    ChannelLayout::FourPointZero,
+    ChannelLayout::FOUR_POINT_ZERO,
     ChannelLayout::QUAD,
     ChannelLayout::A2_2,
-    ChannelLayout::ThreePointOne,
-    ChannelLayout::FivePointZeroBack,
-    ChannelLayout::FivePointZero,
-    ChannelLayout::FourPointOne,
-    ChannelLayout::FivePointOneBack,
-    ChannelLayout::FivePointOne,
-    ChannelLayout::SixPointZero,
-    ChannelLayout::SixPointZeroFront,
-    ChannelLayout::ThreePointOnePointTwo,
+    ChannelLayout::THREE_POINT_ONE,
+    ChannelLayout::FIVE_POINT_ZERO_BACK,
+    ChannelLayout::FIVE_POINT_ZERO,
+    ChannelLayout::FOUR_POINT_ONE,
+    ChannelLayout::FIVE_POINT_ONE_BACK,
+    ChannelLayout::FIVE_POINT_ONE,
+    ChannelLayout::SIX_POINT_ZERO,
+    ChannelLayout::SIX_POINT_ZERO_FRONT,
+    ChannelLayout::THREE_POINT_ONE_POINT_TWO,
     ChannelLayout::HEXAGONAL,
-    ChannelLayout::SixPointOne,
-    ChannelLayout::SixPointOneBack,
-    ChannelLayout::SixPointOneFront,
-    ChannelLayout::SevenPointZero,
-    ChannelLayout::SevenPointZeroFront,
-    ChannelLayout::SevenPointOne,
-    ChannelLayout::SevenPointOneWideBack,
-    ChannelLayout::SevenPointOneWide,
-    ChannelLayout::FivePointOnePointTwo,
-    ChannelLayout::FivePointOnePointTwoBack,
+    ChannelLayout::SIX_POINT_ONE,
+    ChannelLayout::SIX_POINT_ONE_BACK,
+    ChannelLayout::SIX_POINT_ONE_FRONT,
+    ChannelLayout::SEVEN_POINT_ZERO,
+    ChannelLayout::SEVEN_POINT_ZERO_FRONT,
+    ChannelLayout::SEVEN_POINT_ONE,
+    ChannelLayout::SEVEN_POINT_ONE_WIDE_BACK,
+    ChannelLayout::SEVEN_POINT_ONE_WIDE,
+    ChannelLayout::FIVE_POINT_ONE_POINT_TWO,
+    ChannelLayout::FIVE_POINT_ONE_POINT_TWO_BACK,
     ChannelLayout::OCTAGONAL,
     ChannelLayout::CUBE,
-    ChannelLayout::FivePointOnePointFour,
-    ChannelLayout::SevenPointOnePointTwo,
-    ChannelLayout::SevenPointOnePointFour,
-    ChannelLayout::SevenTwoThree,
-    ChannelLayout::NineOneFour,
-    ChannelLayout::NineOneSix,
+    ChannelLayout::FIVE_POINT_ONE_POINT_FOUR,
+    ChannelLayout::SEVEN_POINT_ONE_POINT_TWO,
+    ChannelLayout::SEVEN_POINT_ONE_POINT_FOUR,
+    ChannelLayout::SEVEN_TWO_THREE,
+    ChannelLayout::NINE_ONE_FOUR,
+    ChannelLayout::NINE_ONE_SIX,
     ChannelLayout::HEXADECAGONAL,
     ChannelLayout::BINAURAL,
     ChannelLayout::STEREO_DOWNMIX,
-    ChannelLayout::TwentyTwoTwo,
+    ChannelLayout::TWENTY_TWO_TWO,
 ];
 
 /// `AVChannelLayout` (`channel_layout.h:328-386`) — native-order core.
@@ -204,7 +204,7 @@ impl ChannelLayout {
     /// `AV_CHANNEL_LAYOUT_STEREO` — `FL|FR`.
     pub const STEREO: ChannelLayout = native(2, bit(Channel::FrontLeft) | bit(Channel::FrontRight));
     /// `AV_CHANNEL_LAYOUT_2POINT1` — `STEREO|LFE`.
-    pub const TwoPointOne: ChannelLayout =
+    pub const TWO_POINT_ONE: ChannelLayout =
         native(3, ChannelLayout::STEREO.mask | bit(Channel::LowFrequency));
     /// `AV_CHANNEL_LAYOUT_2_1` — `STEREO|BC`.
     pub const A2_1: ChannelLayout =
@@ -213,15 +213,15 @@ impl ChannelLayout {
     pub const SURROUND: ChannelLayout =
         native(3, ChannelLayout::STEREO.mask | bit(Channel::FrontCenter));
     /// `AV_CHANNEL_LAYOUT_3POINT1` — `SURROUND|LFE`.
-    pub const ThreePointOne: ChannelLayout =
+    pub const THREE_POINT_ONE: ChannelLayout =
         native(4, ChannelLayout::SURROUND.mask | bit(Channel::LowFrequency));
     /// `AV_CHANNEL_LAYOUT_4POINT0` — `SURROUND|BC`.
-    pub const FourPointZero: ChannelLayout =
+    pub const FOUR_POINT_ZERO: ChannelLayout =
         native(4, ChannelLayout::SURROUND.mask | bit(Channel::BackCenter));
-    /// `AV_CHANNEL_LAYOUT_4POINT1` — `FourPointZero|LFE`.
-    pub const FourPointOne: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_4POINT1` — `FOUR_POINT_ZERO|LFE`.
+    pub const FOUR_POINT_ONE: ChannelLayout = native(
         5,
-        ChannelLayout::FourPointZero.mask | bit(Channel::LowFrequency),
+        ChannelLayout::FOUR_POINT_ZERO.mask | bit(Channel::LowFrequency),
     );
     /// `AV_CHANNEL_LAYOUT_2_2` — `STEREO|SL|SR`.
     pub const A2_2: ChannelLayout = native(
@@ -234,111 +234,113 @@ impl ChannelLayout {
         ChannelLayout::STEREO.mask | bit(Channel::BackLeft) | bit(Channel::BackRight),
     );
     /// `AV_CHANNEL_LAYOUT_5POINT0` — `SURROUND|SL|SR` (side surrounds).
-    pub const FivePointZero: ChannelLayout = native(
+    pub const FIVE_POINT_ZERO: ChannelLayout = native(
         5,
         ChannelLayout::SURROUND.mask | bit(Channel::SideLeft) | bit(Channel::SideRight),
     );
-    /// `AV_CHANNEL_LAYOUT_5POINT1` — `FivePointZero|LFE` (side surrounds).
-    pub const FivePointOne: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_5POINT1` — `FIVE_POINT_ZERO|LFE` (side surrounds).
+    pub const FIVE_POINT_ONE: ChannelLayout = native(
         6,
-        ChannelLayout::FivePointZero.mask | bit(Channel::LowFrequency),
+        ChannelLayout::FIVE_POINT_ZERO.mask | bit(Channel::LowFrequency),
     );
     /// `AV_CHANNEL_LAYOUT_5POINT0_BACK` — `SURROUND|BL|BR` (back surrounds).
-    pub const FivePointZeroBack: ChannelLayout = native(
+    pub const FIVE_POINT_ZERO_BACK: ChannelLayout = native(
         5,
         ChannelLayout::SURROUND.mask | bit(Channel::BackLeft) | bit(Channel::BackRight),
     );
-    /// `AV_CHANNEL_LAYOUT_5POINT1_BACK` — `FivePointZeroBack|LFE`.
-    pub const FivePointOneBack: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_5POINT1_BACK` — `FIVE_POINT_ZERO_BACK|LFE`.
+    pub const FIVE_POINT_ONE_BACK: ChannelLayout = native(
         6,
-        ChannelLayout::FivePointZeroBack.mask | bit(Channel::LowFrequency),
+        ChannelLayout::FIVE_POINT_ZERO_BACK.mask | bit(Channel::LowFrequency),
     );
-    /// `AV_CHANNEL_LAYOUT_6POINT0` — `FivePointZero|BC`.
-    pub const SixPointZero: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_6POINT0` — `FIVE_POINT_ZERO|BC`.
+    pub const SIX_POINT_ZERO: ChannelLayout = native(
         6,
-        ChannelLayout::FivePointZero.mask | bit(Channel::BackCenter),
+        ChannelLayout::FIVE_POINT_ZERO.mask | bit(Channel::BackCenter),
     );
     /// `AV_CHANNEL_LAYOUT_6POINT0_FRONT` — `2_2|FLC|FRC`.
-    pub const SixPointZeroFront: ChannelLayout = native(
+    pub const SIX_POINT_ZERO_FRONT: ChannelLayout = native(
         6,
         ChannelLayout::A2_2.mask
             | bit(Channel::FrontLeftOfCenter)
             | bit(Channel::FrontRightOfCenter),
     );
-    /// `AV_CHANNEL_LAYOUT_3POINT1POINT2` — `ThreePointOne|TFL|TFR`.
-    pub const ThreePointOnePointTwo: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_3POINT1POINT2` — `THREE_POINT_ONE|TFL|TFR`.
+    pub const THREE_POINT_ONE_POINT_TWO: ChannelLayout = native(
         6,
-        ChannelLayout::ThreePointOne.mask
+        ChannelLayout::THREE_POINT_ONE.mask
             | bit(Channel::TopFrontLeft)
             | bit(Channel::TopFrontRight),
     );
-    /// `AV_CHANNEL_LAYOUT_HEXAGONAL` — `FivePointZeroBack|BC`.
+    /// `AV_CHANNEL_LAYOUT_HEXAGONAL` — `FIVE_POINT_ZERO_BACK|BC`.
     pub const HEXAGONAL: ChannelLayout = native(
         6,
-        ChannelLayout::FivePointZeroBack.mask | bit(Channel::BackCenter),
+        ChannelLayout::FIVE_POINT_ZERO_BACK.mask | bit(Channel::BackCenter),
     );
-    /// `AV_CHANNEL_LAYOUT_6POINT1` — `FivePointOne|BC`.
-    pub const SixPointOne: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_6POINT1` — `FIVE_POINT_ONE|BC`.
+    pub const SIX_POINT_ONE: ChannelLayout = native(
         7,
-        ChannelLayout::FivePointOne.mask | bit(Channel::BackCenter),
+        ChannelLayout::FIVE_POINT_ONE.mask | bit(Channel::BackCenter),
     );
-    /// `AV_CHANNEL_LAYOUT_6POINT1_BACK` — `FivePointOneBack|BC`.
-    pub const SixPointOneBack: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_6POINT1_BACK` — `FIVE_POINT_ONE_BACK|BC`.
+    pub const SIX_POINT_ONE_BACK: ChannelLayout = native(
         7,
-        ChannelLayout::FivePointOneBack.mask | bit(Channel::BackCenter),
+        ChannelLayout::FIVE_POINT_ONE_BACK.mask | bit(Channel::BackCenter),
     );
-    /// `AV_CHANNEL_LAYOUT_6POINT1_FRONT` — `SixPointZeroFront|LFE`.
-    pub const SixPointOneFront: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_6POINT1_FRONT` — `SIX_POINT_ZERO_FRONT|LFE`.
+    pub const SIX_POINT_ONE_FRONT: ChannelLayout = native(
         7,
-        ChannelLayout::SixPointZeroFront.mask | bit(Channel::LowFrequency),
+        ChannelLayout::SIX_POINT_ZERO_FRONT.mask | bit(Channel::LowFrequency),
     );
-    /// `AV_CHANNEL_LAYOUT_7POINT0` — `FivePointZero|BL|BR`.
-    pub const SevenPointZero: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_7POINT0` — `FIVE_POINT_ZERO|BL|BR`.
+    pub const SEVEN_POINT_ZERO: ChannelLayout = native(
         7,
-        ChannelLayout::FivePointZero.mask | bit(Channel::BackLeft) | bit(Channel::BackRight),
+        ChannelLayout::FIVE_POINT_ZERO.mask | bit(Channel::BackLeft) | bit(Channel::BackRight),
     );
-    /// `AV_CHANNEL_LAYOUT_7POINT0_FRONT` — `FivePointZero|FLC|FRC`.
-    pub const SevenPointZeroFront: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_7POINT0_FRONT` — `FIVE_POINT_ZERO|FLC|FRC`.
+    pub const SEVEN_POINT_ZERO_FRONT: ChannelLayout = native(
         7,
-        ChannelLayout::FivePointZero.mask
+        ChannelLayout::FIVE_POINT_ZERO.mask
             | bit(Channel::FrontLeftOfCenter)
             | bit(Channel::FrontRightOfCenter),
     );
-    /// `AV_CHANNEL_LAYOUT_7POINT1` — `FivePointOne|BL|BR`.
-    pub const SevenPointOne: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_7POINT1` — `FIVE_POINT_ONE|BL|BR`.
+    pub const SEVEN_POINT_ONE: ChannelLayout = native(
         8,
-        ChannelLayout::FivePointOne.mask | bit(Channel::BackLeft) | bit(Channel::BackRight),
+        ChannelLayout::FIVE_POINT_ONE.mask | bit(Channel::BackLeft) | bit(Channel::BackRight),
     );
-    /// `AV_CHANNEL_LAYOUT_7POINT1_WIDE` — `FivePointOne|FLC|FRC`.
-    pub const SevenPointOneWide: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_7POINT1_WIDE` — `FIVE_POINT_ONE|FLC|FRC`.
+    pub const SEVEN_POINT_ONE_WIDE: ChannelLayout = native(
         8,
-        ChannelLayout::FivePointOne.mask
+        ChannelLayout::FIVE_POINT_ONE.mask
             | bit(Channel::FrontLeftOfCenter)
             | bit(Channel::FrontRightOfCenter),
     );
-    /// `AV_CHANNEL_LAYOUT_7POINT1_WIDE_BACK` — `FivePointOneBack|FLC|FRC`.
-    pub const SevenPointOneWideBack: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_7POINT1_WIDE_BACK` — `FIVE_POINT_ONE_BACK|FLC|FRC`.
+    pub const SEVEN_POINT_ONE_WIDE_BACK: ChannelLayout = native(
         8,
-        ChannelLayout::FivePointOneBack.mask
+        ChannelLayout::FIVE_POINT_ONE_BACK.mask
             | bit(Channel::FrontLeftOfCenter)
             | bit(Channel::FrontRightOfCenter),
     );
-    /// `AV_CHANNEL_LAYOUT_5POINT1POINT2` — `FivePointOne|TFL|TFR`.
-    pub const FivePointOnePointTwo: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_5POINT1POINT2` — `FIVE_POINT_ONE|TFL|TFR`.
+    pub const FIVE_POINT_ONE_POINT_TWO: ChannelLayout = native(
         8,
-        ChannelLayout::FivePointOne.mask | bit(Channel::TopFrontLeft) | bit(Channel::TopFrontRight),
-    );
-    /// `AV_CHANNEL_LAYOUT_5POINT1POINT2_BACK` — `FivePointOneBack|TFL|TFR`.
-    pub const FivePointOnePointTwoBack: ChannelLayout = native(
-        8,
-        ChannelLayout::FivePointOneBack.mask
+        ChannelLayout::FIVE_POINT_ONE.mask
             | bit(Channel::TopFrontLeft)
             | bit(Channel::TopFrontRight),
     );
-    /// `AV_CHANNEL_LAYOUT_OCTAGONAL` — `FivePointZero|BL|BC|BR`.
+    /// `AV_CHANNEL_LAYOUT_5POINT1POINT2_BACK` — `FIVE_POINT_ONE_BACK|TFL|TFR`.
+    pub const FIVE_POINT_ONE_POINT_TWO_BACK: ChannelLayout = native(
+        8,
+        ChannelLayout::FIVE_POINT_ONE_BACK.mask
+            | bit(Channel::TopFrontLeft)
+            | bit(Channel::TopFrontRight),
+    );
+    /// `AV_CHANNEL_LAYOUT_OCTAGONAL` — `FIVE_POINT_ZERO|BL|BC|BR`.
     pub const OCTAGONAL: ChannelLayout = native(
         8,
-        ChannelLayout::FivePointZero.mask
+        ChannelLayout::FIVE_POINT_ZERO.mask
             | bit(Channel::BackLeft)
             | bit(Channel::BackCenter)
             | bit(Channel::BackRight),
@@ -352,45 +354,45 @@ impl ChannelLayout {
             | bit(Channel::TopBackLeft)
             | bit(Channel::TopBackRight),
     );
-    /// `AV_CHANNEL_LAYOUT_5POINT1POINT4` — `FivePointOnePointTwo|TBL|TBR`.
-    pub const FivePointOnePointFour: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_5POINT1POINT4` — `FIVE_POINT_ONE_POINT_TWO|TBL|TBR`.
+    pub const FIVE_POINT_ONE_POINT_FOUR: ChannelLayout = native(
         10,
-        ChannelLayout::FivePointOnePointTwo.mask
+        ChannelLayout::FIVE_POINT_ONE_POINT_TWO.mask
             | bit(Channel::TopBackLeft)
             | bit(Channel::TopBackRight),
     );
-    /// `AV_CHANNEL_LAYOUT_7POINT1POINT2` — `SevenPointOne|TFL|TFR`.
-    pub const SevenPointOnePointTwo: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_7POINT1POINT2` — `SEVEN_POINT_ONE|TFL|TFR`.
+    pub const SEVEN_POINT_ONE_POINT_TWO: ChannelLayout = native(
         10,
-        ChannelLayout::SevenPointOne.mask
+        ChannelLayout::SEVEN_POINT_ONE.mask
             | bit(Channel::TopFrontLeft)
             | bit(Channel::TopFrontRight),
     );
-    /// `AV_CHANNEL_LAYOUT_7POINT1POINT4` — `SevenPointOnePointTwo|TBL|TBR`.
-    pub const SevenPointOnePointFour: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_7POINT1POINT4` — `SEVEN_POINT_ONE_POINT_TWO|TBL|TBR`.
+    pub const SEVEN_POINT_ONE_POINT_FOUR: ChannelLayout = native(
         12,
-        ChannelLayout::SevenPointOnePointTwo.mask
+        ChannelLayout::SEVEN_POINT_ONE_POINT_TWO.mask
             | bit(Channel::TopBackLeft)
             | bit(Channel::TopBackRight),
     );
-    /// `AV_CHANNEL_LAYOUT_7POINT2POINT3` — `SevenPointOnePointTwo|TBC|LFE2`.
-    pub const SevenTwoThree: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_7POINT2POINT3` — `SEVEN_POINT_ONE_POINT_TWO|TBC|LFE2`.
+    pub const SEVEN_TWO_THREE: ChannelLayout = native(
         12,
-        ChannelLayout::SevenPointOnePointTwo.mask
+        ChannelLayout::SEVEN_POINT_ONE_POINT_TWO.mask
             | bit(Channel::TopBackCenter)
             | bit(Channel::LowFrequency2),
     );
-    /// `AV_CHANNEL_LAYOUT_9POINT1POINT4` — `SevenPointOnePointFour|FLC|FRC`.
-    pub const NineOneFour: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_9POINT1POINT4` — `SEVEN_POINT_ONE_POINT_FOUR|FLC|FRC`.
+    pub const NINE_ONE_FOUR: ChannelLayout = native(
         14,
-        ChannelLayout::SevenPointOnePointFour.mask
+        ChannelLayout::SEVEN_POINT_ONE_POINT_FOUR.mask
             | bit(Channel::FrontLeftOfCenter)
             | bit(Channel::FrontRightOfCenter),
     );
-    /// `AV_CHANNEL_LAYOUT_9POINT1POINT6` — `NineOneFour|TSL|TSR`.
-    pub const NineOneSix: ChannelLayout = native(
+    /// `AV_CHANNEL_LAYOUT_9POINT1POINT6` — `NINE_ONE_FOUR|TSL|TSR`.
+    pub const NINE_ONE_SIX: ChannelLayout = native(
         16,
-        ChannelLayout::NineOneFour.mask | bit(Channel::TopSideLeft) | bit(Channel::TopSideRight),
+        ChannelLayout::NINE_ONE_FOUR.mask | bit(Channel::TopSideLeft) | bit(Channel::TopSideRight),
     );
     /// `AV_CHANNEL_LAYOUT_HEXADECAGONAL` —
     /// `OCTAGONAL|WL|WR|TBL|TBR|TBC|TFC|TFL|TFR` (`h:253`).
@@ -413,10 +415,10 @@ impl ChannelLayout {
     pub const STEREO_DOWNMIX: ChannelLayout =
         native(2, bit(Channel::StereoLeft) | bit(Channel::StereoRight));
     /// `AV_CHANNEL_LAYOUT_22POINT2` —
-    /// `NineOneSix|BC|LFE2|TFC|TC|TBC|BFC|BFL|BFR` (`h:256`).
-    pub const TwentyTwoTwo: ChannelLayout = native(
+    /// `NINE_ONE_SIX|BC|LFE2|TFC|TC|TBC|BFC|BFL|BFR` (`h:256`).
+    pub const TWENTY_TWO_TWO: ChannelLayout = native(
         24,
-        ChannelLayout::NineOneSix.mask
+        ChannelLayout::NINE_ONE_SIX.mask
             | bit(Channel::BackCenter)
             | bit(Channel::LowFrequency2)
             | bit(Channel::TopFrontCenter)
