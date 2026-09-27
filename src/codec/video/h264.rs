@@ -1459,14 +1459,14 @@ impl H264Decoder {
         // Luma DC (intra16x16)
         if self.mb_type == MB_INTRA16X16 {
             self.mb_luma_dc = [0; 16];
-            let qmul = self.pps.as_ref().unwrap().dequant(0, self.qscale as usize)[0];
             let mut dc = self.mb_luma_dc;
-            decode_residual(self, &cv, gb, &mut dc, LUMA_DC, &scan, qmul, 16, true)?;
+            decode_residual(self, &cv, gb, &mut dc, LUMA_DC, &scan, None, 16)?;
             if std::env::var_os("H264_DUMP").is_some() {
                 eprintln!("  LUMADC {:?}", &dc[..8]);
             }
             self.mb_luma_dc = dc;
             if self.cbp & 15 != 0 {
+                let qm = *self.pps.as_ref().unwrap().dequant(0, self.qscale as usize);
                 for i in 0..16usize {
                     let mut blk = [0i16; 16];
                     decode_residual(
@@ -1476,9 +1476,8 @@ impl H264Decoder {
                         &mut blk,
                         i,
                         &scan_shift1(),
-                        qmul_scan1(self.qscale as usize),
+                        Some(&qm),
                         15,
-                        false,
                     )?;
                     self.mb[i * 16..(i + 1) * 16].copy_from_slice(&blk);
                 }
@@ -1488,22 +1487,19 @@ impl H264Decoder {
                 }
             }
         } else if self.cbp & 15 != 0 {
+            // C's cqm for luma non-16x16: (IS_INTRA ? 0 : 3) + p.
+            let cqm = if self.mb_type == MB_INTRA4X4 || self.mb_type == MB_PCM {
+                0
+            } else {
+                3
+            };
+            let qm = *self.pps.as_ref().unwrap().dequant(cqm, self.qscale as usize);
             for i8x8 in 0..4usize {
                 if self.cbp & (1 << i8x8) != 0 {
                     for i4x4 in 0..4usize {
                         let index = i4x4 + 4 * i8x8;
                         let mut blk = [0i16; 16];
-                        decode_residual(
-                            self,
-                            &cv,
-                            gb,
-                            &mut blk,
-                            index,
-                            &scan,
-                            qmul_c(self.qscale as usize, 0),
-                            16,
-                            false,
-                        )?;
+                        decode_residual(self, &cv, gb, &mut blk, index, &scan, Some(&qm), 16)?;
                         self.mb[index * 16..(index + 1) * 16].copy_from_slice(&blk);
                     }
                 } else {
@@ -1523,30 +1519,44 @@ impl H264Decoder {
             if self.cbp & 0x30 != 0 {
                 for ch in 0..2usize {
                     // C routes chroma DC through the SAME decode_residual
-                    // (max_coeff 4 picks the chroma DC VLCs).
-                    let mut dc = [0i16; 16];
+                    // (max_coeff 4 picks the chroma DC VLCs), storing raw
+                    // levels at ff_h264_chroma_dc_scan = {0,16,32,48} into
+                    // the 4-block chroma region of mb.
+                    let mut scan_cdc = [0u8; 16];
+                    scan_cdc[..4].copy_from_slice(&CHROMA_DC_SCAN);
+                    let mut dc64 = [0i16; 64];
                     decode_residual(
                         self,
                         &cv,
                         gb,
-                        &mut dc,
+                        &mut dc64,
                         CHROMA_DC + ch,
-                        &scan_shim(),
-                        1,
+                        &scan_cdc,
+                        None,
                         4,
-                        false,
                     )?;
-                    // C stores the chroma DC block at mb + 256*(1+ch)
-                    // (the DC-only 2x2, scattered later by
-                    // chroma_dc_dequant_idct).
+                    // C's block pointer is mb + 16*(16+16*ch); the scan put
+                    // the four coefficients at slots 0/16/32/48 of that.
                     let base = 16 * (16 + 16 * ch);
-                    for b in 0..4usize {
-                        self.mb[base + b] = dc[b];
+                    for s in [0usize, 16, 32, 48] {
+                        self.mb[base + s] = dc64[s];
                     }
                 }
             }
             if self.cbp & 0x20 != 0 {
                 for ch in 0..2usize {
+                    // C's chroma AC qmul set: chroma_idx+1 + (IS_INTRA?0:3).
+                    let set = ch + 1
+                        + if self.mb_type == MB_INTRA4X4
+                            || self.mb_type == MB_INTRA16X16
+                            || self.mb_type == MB_PCM
+                        {
+                            0
+                        } else {
+                            3
+                        };
+                    let qm =
+                        *self.pps.as_ref().unwrap().dequant(set, self.chroma_qp[ch] as usize);
                     // 4:2:0: one 8x8 per component (num_c8x8 = 1)
                     for i8 in 0..1usize {
                         for i4 in 0..4usize {
@@ -1562,9 +1572,8 @@ impl H264Decoder {
                                 &mut blk,
                                 block_idx,
                                 &scan_shift1(),
-                                qmul_c(self.chroma_qp[ch] as usize, ch + 1),
+                                Some(&qm),
                                 15,
-                                false,
                             )?;
                             self.mb[index..index + 16].copy_from_slice(&blk);
                         }
@@ -1794,8 +1803,13 @@ impl H264Decoder {
                     pic.y[y0 + 15 * w + 15]
                 );
             }
-            // chroma DC dequant scatter
-            self.apply_chroma_dc(c0, w);
+            // chroma residual (C gates the whole section on cbp & 0x30)
+            if self.cbp & 0x30 != 0 {
+                self.apply_chroma_dc();
+            }
+            if self.cbp & 0x20 != 0 {
+                self.apply_chroma_ac(c0, w);
+            }
             return Ok(());
         }
 
@@ -1898,7 +1912,7 @@ impl H264Decoder {
 
         // chroma residual for intra4x4 (AC + DC)
         if self.cbp & 0x30 != 0 {
-            self.apply_chroma_dc(c0, w);
+            self.apply_chroma_dc();
         }
         if self.cbp & 0x20 != 0 {
             self.apply_chroma_ac(c0, w);
@@ -1948,7 +1962,7 @@ impl H264Decoder {
             }
         }
         if self.cbp & 0x30 != 0 {
-            self.apply_chroma_dc(c0, w);
+            self.apply_chroma_dc();
         }
         if self.cbp & 0x20 != 0 {
             self.apply_chroma_ac(c0, w);
@@ -1974,10 +1988,12 @@ impl H264Decoder {
                     d[r * 4 + c] = pic.y[base + r * w + c];
                 }
             }
-            if nnz == 1 {
-                idct_dc_add(&mut d, 4, &mut blk);
-            } else {
+            if nnz != 0 {
                 idct_add(&mut d, 4, &mut blk);
+            } else {
+                // nnz == 0 with a scattered DC → C's idct_add16intra
+                // idct_dc_add fast path.
+                idct_dc_add(&mut d, 4, &mut blk);
             }
             for r in 0..4 {
                 for c in 0..4 {
@@ -1987,68 +2003,44 @@ impl H264Decoder {
         }
     }
 
-    /// Chroma DC dequant-idct scatter + add into the four DC positions.
-    fn apply_chroma_dc(&mut self, c0: usize, w: usize) {
-        let cw = w / 2;
+    /// Chroma DC dequant-idct (h264_mb_template.c:236): gated on the DC
+    /// block's nnz, in place over the shared 64-coeff chroma region — the
+    /// four dequantized DCs land in each 4x4 block's [0] slot (the
+    /// ff_h264_chroma_dc_scan positions {0,16,32,48}) and are spread over
+    /// the pixels by apply_chroma_ac (idct_add8's branches). Dequant set:
+    /// intra 1/2, inter 4/5.
+    fn apply_chroma_dc(&mut self) {
         for ch in 0..2usize {
+            if self.nnz_cache[SCAN8[CHROMA_DC + ch]] == 0 {
+                continue;
+            }
             let q = self.chroma_qp[ch] as usize;
-            let qmul = self.pps.as_ref().unwrap().dequant(ch + 1, q)[0];
-            // collect the 4 DC coeffs (stored at block bases)
-            let mut blk = [0i16; 32];
-            for b in 0..4usize {
-                blk[b] = self.mb[(16 + 16 * ch + 16 * b) as usize];
-            }
-            let mut dc4 = [0i16; 16];
-            dc4[0] = blk[0];
-            dc4[1] = blk[1];
-            dc4[16 / 2 + 0] = blk[2];
-            dc4[16 / 2 + 1] = blk[3];
-            // The 2x2 DCs at stride-32 positions {0,16,32,48} (C's
-            // block[stride*y + xstride*x] layout).
+            let intra = self.mb_type == MB_INTRA4X4
+                || self.mb_type == MB_INTRA16X16
+                || self.mb_type == MB_PCM;
+            let set = if intra { ch + 1 } else { ch + 4 };
+            let qmul = self.pps.as_ref().unwrap().dequant(set, q)[0];
+            let base = 16 * (16 + 16 * ch);
             let mut block64 = [0i16; 64];
-            block64[0] = blk[0];
-            block64[16] = blk[1];
-            block64[32] = blk[2];
-            block64[48] = blk[3];
+            block64.copy_from_slice(&self.mb[base..base + 64]);
             chroma_dc_dequant_idct(&mut block64, qmul);
-            // The dequant-idct wrote ((v*qmul + 128) >> 8); C adds
-            // these into the pixel via idct_dc_add ((v + 32) >> 6) on the
-            // DC slot of each 4x4 chroma block.
-            let dcs = [block64[0], block64[16], block64[32], block64[48]];
-            let pic = self.cur.as_mut().unwrap();
-            for (i, v) in dcs.iter().enumerate() {
-                let at = c0 + (i / 2) * cw + (i % 2);
-                let base = if ch == 0 {
-                    pic.cb[at] as i32
-                } else {
-                    pic.cr[at] as i32
-                };
-                let nv = clip8(base + ((*v as i32) + 32 >> 6));
-                if ch == 0 {
-                    pic.cb[at] = nv;
-                } else {
-                    pic.cr[at] = nv;
-                }
-            }
+            self.mb[base..base + 64].copy_from_slice(&block64);
         }
     }
 
-    /// Chroma AC residual: the 4x4 idct over each coded chroma block
-    /// (C's idct_add8 path — 4:2:0 has one 8x8 per component = 4 blocks).
+    /// Chroma residual apply = C's ff_h264_idct_add8 (h264idct_template.c):
+    /// per 4x4 block, nnz != 0 → full idct (DC at [0] + AC); nnz == 0 with
+    /// a scattered DC → idct_dc_add; else nothing.
     fn apply_chroma_ac(&mut self, c0: usize, w: usize) {
         let cw = w / 2;
         for ch in 0..2usize {
             for b in 0..4usize {
                 let block_idx = 16 + 16 * ch + b;
                 let nnz = self.nnz_cache[SCAN8[block_idx]] as usize;
-                if nnz == 0 {
-                    continue;
-                }
                 let mb_off = 16 * (16 + 16 * ch) + 16 * b;
                 let mut blk = [0i16; 16];
                 blk.copy_from_slice(&self.mb[mb_off..mb_off + 16]);
-                blk[0] = 0; // DC handled by apply_chroma_dc
-                if blk == [0i16; 16] {
+                if nnz == 0 && blk[0] == 0 {
                     continue;
                 }
                 let bx = (b % 2) * 4;
@@ -2062,10 +2054,10 @@ impl H264Decoder {
                         d[r * 4 + c] = plane[base + r * cw + c];
                     }
                 }
-                if nnz == 1 {
-                    idct_dc_add(&mut d, 4, &mut blk);
-                } else {
+                if nnz != 0 {
                     idct_add(&mut d, 4, &mut blk);
+                } else {
+                    idct_dc_add(&mut d, 4, &mut blk);
                 }
                 for r in 0..4 {
                     for c in 0..4 {
@@ -2430,15 +2422,18 @@ struct Pps {
     constrained_intra_pred: bool,
     redundant_pic_cnt_present: bool,
     /// `dequant4_coeff[i][q][x]` (init_dequant4_coeff_table, h264_ps.c:617)
-    /// with the default all-16 scaling matrix.
+    /// with the default all-16 scaling matrix (custom lists gate Unsupported).
     dequant4_full: Vec<[[u32; 16]; 52]>,
 }
 
 impl Pps {
     fn build_dequant(&mut self) {
+        // Flat scaling list: scaling_matrix4[i][x] = 16 everywhere, so C's
+        // `* pps->scaling_matrix4[i][x]` (h264_ps.c:643-644) contributes a
+        // constant x16 that is folded into the shift below.
         for i in 0..6usize {
             for q in 0..52usize {
-                let shift = QUANT_DIV6[q] as u32 + 2;
+                let shift = QUANT_DIV6[q] as u32 + 2 + 4;
                 let idx = QUANT_REM6[q] as usize;
                 for x in 0..16usize {
                     let transposed = (x >> 2) | ((x << 2) & 0xF);
@@ -3182,17 +3177,19 @@ fn mc_chroma(
 // ---------------------------------------------------------------------
 
 /// `decode_residual` for 4x4 blocks. `n` indexes the nnz cache (scan8).
-/// `is_dc16`: luma16 DC block (max_coeff 16, no qmul application).
+/// `qmul`: C's STORE_BLOCK (h264_cavlc.c:564) — `None` (C's NULL, luma16 /
+/// chroma DC blocks, n >= LUMA_DC_BLOCK_INDEX) stores levels raw;
+/// `Some` is the per-position dequant table indexed by scan value:
+/// `block[s] = (level*qmul[s] + 32) >> 6`.
 fn decode_residual(
     h: &mut H264Decoder,
     cv: &Cavlc,
     gb: &mut Gb,
-    block: &mut [i16; 16],
+    block: &mut [i16],
     n: usize,
     scan: &[u8; 16],
-    qmul: u32,
+    qmul: Option<&[u32; 16]>,
     max_coeff: usize,
-    is_luma_dc: bool,
 ) -> Result<()> {
     let mut level = [0i32; 16];
     if std::env::var_os("H264_DUMP").is_some() {
@@ -3371,11 +3368,10 @@ fn decode_residual(
             ));
         }
         let s = scan[pos as usize] as usize;
-        if !is_luma_dc {
-            block[s] = ((level[i] as i64 * qmul as i64 + 32) >> 6) as i16;
-        } else {
-            block[s] = level[i] as i16;
-        }
+        block[s] = match qmul {
+            None => level[i] as i16,
+            Some(q) => ((level[i] as i64 * q[s] as i64 + 32) >> 6) as i16,
+        };
         i += 1;
         if i >= total_coeff || zi <= 0 {
             break;
@@ -3397,11 +3393,10 @@ fn decode_residual(
                 return Err(Error::InvalidData("coeff overrun".into()));
             }
             let s = scan[pos as usize] as usize;
-            if !is_luma_dc {
-                block[s] = ((level[k] as i64 * qmul as i64 + 32) >> 6) as i16;
-            } else {
-                block[s] = level[k] as i16;
-            }
+            block[s] = match qmul {
+                None => level[k] as i16,
+                Some(q) => ((level[k] as i64 * q[s] as i64 + 32) >> 6) as i16,
+            };
             pos -= 1;
         }
     }
@@ -3534,46 +3529,6 @@ fn scan_shift1() -> [u8; 16] {
 }
 fn qmul_scan1(_q: usize) -> u32 {
     0
-}
-
-/// Chroma DC scan stand-in (positions 0..3, never multiplied).
-fn scan_shim() -> [u8; 16] {
-    [0u8; 16]
-}
-fn qmul_c(q: usize, set: usize) -> u32 {
-    // dequant4_coeff[set][q][0] — the residual path applies qmul per
-    // position; using the DC-slot value keeps the level scaling right
-    // for the (i,j)=(0,0) tap; full per-position qmul below in store.
-    H264_DEQUANT_SET(q, set)
-}
-
-// per-position dequant helper (decode_residual uses a scalar qmul in
-// this port: C multiplies per scan position via qmul[scantable]; we
-// approximate with the flat table like C does for the luma DC case and
-// accept the per-position matrix for AC — folded by using position 0.
-fn H264_DEQUANT_SET(q: usize, set: usize) -> u32 {
-    // The residual store applies qmul per scan position in C; this port
-    // passes the flat table's [0] entry for the level scaling (the
-    // default scaling list is uniform, so [0] == every position).
-    global_dequant(set, q)
-}
-
-fn global_dequant(set: usize, q: usize) -> u32 {
-    static T: OnceLock<Vec<[[u32; 16]; 52]>> = OnceLock::new();
-    let t = T.get_or_init(|| {
-        let mut pps = Pps {
-            pic_order_present: false,
-            ref_count: [1, 1],
-            init_qp: 26,
-            deblocking_filter_parameters_present: false,
-            constrained_intra_pred: false,
-            redundant_pic_cnt_present: false,
-            dequant4_full: vec![[[0u32; 16]; 52]; 6],
-        };
-        pps.build_dequant();
-        pps.dequant4_full
-    });
-    t[set.min(5)][q.min(51)][0]
 }
 
 // pred16x16/pred8x8 with availability-aware DC (C's *_DC_* variants).
