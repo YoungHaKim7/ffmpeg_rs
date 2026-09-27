@@ -1469,16 +1469,7 @@ impl H264Decoder {
                 let qm = *self.pps.as_ref().unwrap().dequant(0, self.qscale as usize);
                 for i in 0..16usize {
                     let mut blk = [0i16; 16];
-                    decode_residual(
-                        self,
-                        &cv,
-                        gb,
-                        &mut blk,
-                        i,
-                        &scan_shift1(),
-                        Some(&qm),
-                        15,
-                    )?;
+                    decode_residual(self, &cv, gb, &mut blk, i, &scan_shift1(), Some(&qm), 15)?;
                     self.mb[i * 16..(i + 1) * 16].copy_from_slice(&blk);
                 }
             } else {
@@ -1493,7 +1484,11 @@ impl H264Decoder {
             } else {
                 3
             };
-            let qm = *self.pps.as_ref().unwrap().dequant(cqm, self.qscale as usize);
+            let qm = *self
+                .pps
+                .as_ref()
+                .unwrap()
+                .dequant(cqm, self.qscale as usize);
             for i8x8 in 0..4usize {
                 if self.cbp & (1 << i8x8) != 0 {
                     for i4x4 in 0..4usize {
@@ -1525,16 +1520,7 @@ impl H264Decoder {
                     let mut scan_cdc = [0u8; 16];
                     scan_cdc[..4].copy_from_slice(&CHROMA_DC_SCAN);
                     let mut dc64 = [0i16; 64];
-                    decode_residual(
-                        self,
-                        &cv,
-                        gb,
-                        &mut dc64,
-                        CHROMA_DC + ch,
-                        &scan_cdc,
-                        None,
-                        4,
-                    )?;
+                    decode_residual(self, &cv, gb, &mut dc64, CHROMA_DC + ch, &scan_cdc, None, 4)?;
                     // C's block pointer is mb + 16*(16+16*ch); the scan put
                     // the four coefficients at slots 0/16/32/48 of that.
                     let base = 16 * (16 + 16 * ch);
@@ -1546,7 +1532,8 @@ impl H264Decoder {
             if self.cbp & 0x20 != 0 {
                 for ch in 0..2usize {
                     // C's chroma AC qmul set: chroma_idx+1 + (IS_INTRA?0:3).
-                    let set = ch + 1
+                    let set = ch
+                        + 1
                         + if self.mb_type == MB_INTRA4X4
                             || self.mb_type == MB_INTRA16X16
                             || self.mb_type == MB_PCM
@@ -1555,8 +1542,11 @@ impl H264Decoder {
                         } else {
                             3
                         };
-                    let qm =
-                        *self.pps.as_ref().unwrap().dequant(set, self.chroma_qp[ch] as usize);
+                    let qm = *self
+                        .pps
+                        .as_ref()
+                        .unwrap()
+                        .dequant(set, self.chroma_qp[ch] as usize);
                     // 4:2:0: one 8x8 per component (num_c8x8 = 1)
                     for i8 in 0..1usize {
                         for i4 in 0..4usize {
@@ -2957,7 +2947,9 @@ fn pred8x8_plane(dst: &mut [u8], top: &[u8; 8], left: &[u8; 8], lt: u8, lb: u8) 
 
 /// `ff_h264_idct_add` (h264idct_template.c:34).
 fn idct_add(dst: &mut [u8], dstride: usize, block: &mut [i16; 16]) {
-    block[0] += 1 << 5;
+    // C's int16_t `block[0] += 1<<5` wraps on extreme streams (garbage
+    // levels from a desynced walk can overflow i16 here); mirror that.
+    block[0] = block[0].wrapping_add(1 << 5);
     // columns
     for i in 0..4 {
         let z0 = block[i] as i32 + block[i + 8] as i32;
