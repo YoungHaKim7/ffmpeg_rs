@@ -75,7 +75,13 @@ const LUMA_DC: usize = 48;
 const CHROMA_DC: usize = 49;
 
 /// `ff_zigzag_scan` (mathtables.c:148).
-const ZIGZAG: [u8; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
+/// C's `h->zigzag_scan` (init_scan_tables, h264_slice.c:755):
+/// TRANSPOSE(ff_zigzag_scan[i]) with TRANSPOSE(x) = (x>>2)|((x<<2)&0xF).
+/// The whole CAVLC residual space (dequant4_coeff's transposed build,
+/// qmul[scan_value] indexing) is transposed — the RAW scan is only used
+/// for transform_bypass (qscale 0); the port has no bypass, so always
+/// use the transposed table.
+const ZIGZAG: [u8; 16] = [0, 4, 1, 2, 5, 8, 12, 9, 6, 3, 7, 10, 13, 14, 11, 15];
 
 /// `ff_h264_chroma_qp[0]` (h264data.c:203, the depth-8 row).
 #[rustfmt::skip]
@@ -921,8 +927,10 @@ impl H264Decoder {
         };
         if self.n_top == MB_INTRA4X4 {
             let modes = &pic.mb_i4x4[self.mb_x + (self.mb_y - 1).max(0) * self.mb_width];
+            // C (h264_mvpred.h): AV_COPY32(cache+4+8*0, stored) — the
+            // above MB's stored[0..3] = its BOTTOM luma row.
             for c in 0..4 {
-                self.intra4x4_pred_mode_cache[4 + c] = modes[4 + c];
+                self.intra4x4_pred_mode_cache[4 + c] = modes[c];
             }
         } else {
             let v = 2 - 3 * (!type_mask(self.n_top)) as i8;
@@ -930,15 +938,22 @@ impl H264Decoder {
                 self.intra4x4_pred_mode_cache[4 + c] = v;
             }
         }
-        for i in 0..2usize {
+        {
+            // C: cache[3+8*(1..4)] = mode[6 - left_block[0..3]] with the
+            // progressive left_block {0,1,2,3} → stored[6]=b5 (row 1),
+            // stored[5]=b7 (row 2), stored[4]=b13 (row 3), stored[3]=b15
+            // (row 4) — the left MB's right-column blocks bottom-to-top.
             if self.n_left == MB_INTRA4X4 {
                 let modes = &pic.mb_i4x4[self.mb_x.saturating_sub(1) + self.mb_y * self.mb_width];
-                self.intra4x4_pred_mode_cache[3 + 8 * (1 + 2 * i)] = modes[[4, 5][i]];
-                self.intra4x4_pred_mode_cache[3 + 8 * (2 + 2 * i)] = modes[[6, 7][i]];
+                self.intra4x4_pred_mode_cache[3 + 8 * 1] = modes[6];
+                self.intra4x4_pred_mode_cache[3 + 8 * 2] = modes[5];
+                self.intra4x4_pred_mode_cache[3 + 8 * 3] = modes[4];
+                self.intra4x4_pred_mode_cache[3 + 8 * 4] = modes[3];
             } else {
                 let v = 2 - 3 * (!type_mask(self.n_left)) as i8;
-                self.intra4x4_pred_mode_cache[3 + 8 * (1 + 2 * i)] = v;
-                self.intra4x4_pred_mode_cache[3 + 8 * (2 + 2 * i)] = v;
+                for r in 1..5usize {
+                    self.intra4x4_pred_mode_cache[3 + 8 * r] = v;
+                }
             }
         }
     }
@@ -1619,18 +1634,21 @@ impl H264Decoder {
                 None => return Err(Error::InvalidData("inter MB without a reference".into())),
             };
             let cur = self.cur.as_mut().unwrap();
-            for r in 0..4usize {
-                for c in 0..4usize {
-                    let mv = self.mv_cache[SCAN8[4 * r + c]];
-                    let bx = self.mb_x as i32 * 16 + 4 * c as i32;
-                    let by = self.mb_y as i32 * 16 + 4 * r as i32;
-                    // luma
-                    let mut luma = [0u8; 16];
-                    mc_luma(&mut luma, 4, 4, 4, prev, bx, by, mv[0], mv[1]);
-                    for dr in 0..4 {
-                        for dc in 0..4 {
-                            cur.y[y0 + (4 * r + dr) * w + 4 * c + dc] = luma[dr * 4 + dc];
-                        }
+            for i in 0..16usize {
+                let mv = self.mv_cache[SCAN8[i]];
+                // scan8 (quadrant) order → pixel position, C's block_offset.
+                let grid = SCAN8[i];
+                let bc = ((grid & 7) - 4) as i32;
+                let br = ((grid >> 3) - 1) as i32;
+                let bx = self.mb_x as i32 * 16 + 4 * bc;
+                let by = self.mb_y as i32 * 16 + 4 * br;
+                // luma
+                let mut luma = [0u8; 16];
+                mc_luma(&mut luma, 4, 4, 4, prev, bx, by, mv[0], mv[1]);
+                for dr in 0..4usize {
+                    for dc in 0..4usize {
+                        cur.y[y0 + (4 * br + dr as i32) as usize * w + (4 * bc + dc as i32) as usize] =
+                            luma[dr * 4 + dc];
                     }
                 }
             }
@@ -1807,46 +1825,55 @@ impl H264Decoder {
             return Ok(());
         }
 
-        // intra4x4: predict each block from reconstructed pixels, add IDCT
+        // intra4x4: predict each block from reconstructed pixels, add IDCT.
+        // Block index i is in C's scan8 order — QUADRANT-based (blocks
+        // 0-3 = top-left 8x8's 2x2), NOT raster: block 2 sits at (br1,bc0).
+        // Pixel positions derive from the scan8 grid like C's block_offset
+        // (h264_slice.c:557).
         for i in 0..16usize {
             let mode = self.intra4x4_pred_mode_cache[SCAN8[i]] as i32;
-            let bx = (i % 4) * 4;
-            let by = (i / 4) * 4;
+            let grid = SCAN8[i];
+            let bx = ((grid & 7) - 4) * 4;
+            let by = ((grid >> 3) - 1) * 4;
+            let (br, bc) = ((grid >> 3) - 1, (grid & 7) - 4);
             let at = y0 + by * w + bx;
             let pic = self.cur.as_ref().unwrap();
             let mut top = [0u8; 8];
             let mut left = [0u8; 4];
             let mut lt = 0u8;
-            let top_ok = (self.top_samples_available & 0x8000) != 0;
-            let left_ok = (self.left_samples_available & (0x8000 >> (i & 3))) != 0;
-            let tr_ok = (self.topright_samples_available & (0x4000 >> (i & 3))) != 0
-                && (i & 3) != 3
-                || (i % 4 == 3 && i < 15 && (self.topright_samples_available & 0x4000) != 0);
+            // C reads i4x4 neighbors straight from the reconstructed
+            // frame (no per-block gating — modes are pre-validated by
+            // ff_h264_check_intra_pred_mode); availability reduces to
+            // "does the source exist": within-MB blocks (br>0 / bc>0)
+            // are already reconstructed (scan8 order guarantees the
+            // up-left quadrant blocks exist before their right/below
+            // neighbors).
+            let top_ok = br > 0 || self.mb_y > 0;
+            let left_ok = bc > 0 || self.mb_x > 0;
+            // C's topright gate (h264_mb.c:678):
+            // (topright_samples_available << i) & 0x8000 — else the
+            // block's own top-right pixel is replicated 4x.
+            let tr_ok = ((self.topright_samples_available << i) & 0x8000) != 0;
+            if std::env::var_os("H264_DUMP").is_some() && self.mb_y == 0 && self.mb_x < 2 {
+                eprintln!(
+                    "  I4 mb{}:{} blk{i} mode={mode} t={top_ok} l={left_ok} tr={tr_ok} trmask={:04x}",
+                    self.mb_x,
+                    self.mb_y,
+                    self.topright_samples_available
+                );
+            }
             if top_ok {
                 for k in 0..4 {
                     top[k] = pic.y[at - w + k];
                 }
-                // topright pixels (from the top neighbor or this MB)
-                for k in 4..8 {
-                    let src_at = if (i & 3) == 3 {
-                        at - w + 4 + (k - 4) // next block's top row (this MB: pred'd later?)
-                    } else {
-                        at - w + k
-                    };
-                    top[k] = if tr_ok || (i & 3) != 3 {
-                        pic.y[src_at]
-                    } else {
-                        top[3]
-                    };
-                }
                 if tr_ok {
-                    for k in 4..8 {
-                        let src = at - w + k;
-                        top[k] = pic.y[src];
+                    for k in 0..4 {
+                        top[4 + k] = pic.y[at - w + 4 + k];
                     }
                 } else {
-                    for k in 4..8 {
-                        top[k] = top[3];
+                    // C: topright = ptr[3 - linesize] replicated 4x
+                    for k in 0..4 {
+                        top[4 + k] = top[3];
                     }
                 }
             } else {
@@ -1934,8 +1961,10 @@ impl H264Decoder {
             }
             let mut blk = [0i16; 16];
             blk.copy_from_slice(&self.mb[i * 16..(i + 1) * 16]);
-            let bx = (i % 4) * 4;
-            let by = (i / 4) * 4;
+            // scan8 (quadrant) order → pixel position, C's block_offset.
+            let grid = SCAN8[i];
+            let bx = ((grid & 7) - 4) * 4;
+            let by = ((grid >> 3) - 1) * 4;
             let pic = self.cur.as_mut().unwrap();
             let base = y0 + by * w + bx;
             let mut d = [0u8; 16];
@@ -1972,8 +2001,10 @@ impl H264Decoder {
             }
             let mut blk = [0i16; 16];
             blk.copy_from_slice(&self.mb[i * 16..(i + 1) * 16]);
-            let bx = (i % 4) * 4;
-            let by = (i / 4) * 4;
+            // scan8 (quadrant) order → pixel position, C's block_offset.
+            let grid = SCAN8[i];
+            let bx = ((grid & 7) - 4) * 4;
+            let by = ((grid >> 3) - 1) * 4;
             let pic = self.cur.as_mut().unwrap();
             let base = y0 + by * w + bx;
             let mut d = [0u8; 16];
@@ -2673,116 +2704,121 @@ fn pred4x4(mode: i8, dst: &mut [u8], top: &[u8; 8], left: &[u8; 4], lt: u8) {
             put(3, 0, ((t1 + 2 * t2 + t3 + 2) >> 2) as u8);
         }
         VERT_RIGHT_PRED => {
+            // h264pred_template.c pred4x4_vertical_right
+            // (src[col + row*stride] → put(row, col))
             let mut put = |r: usize, c: usize, v: u8| dst[r * 4 + c] = v;
             let a = ((lt as u32 + t0 + 1) >> 1) as u8;
             put(0, 0, a);
-            put(1, 2, a);
+            put(2, 1, a);
             let a = ((t0 + t1 + 1) >> 1) as u8;
             put(0, 1, a);
-            put(1, 3, a);
+            put(2, 2, a);
             let a = ((t1 + t2 + 1) >> 1) as u8;
             put(0, 2, a);
-            put(2, 0, a);
+            put(2, 3, a);
             let a = ((t2 + t3 + 1) >> 1) as u8;
             put(0, 3, a);
-            put(2, 1, a);
             let a = ((l0 + 2 * lt as u32 + t0 + 2) >> 2) as u8;
             put(1, 0, a);
-            put(2, 2, a);
+            put(3, 1, a);
             let a = ((lt as u32 + 2 * t0 + t1 + 2) >> 2) as u8;
             put(1, 1, a);
-            put(2, 3, a);
-            let a = ((t0 + 2 * t1 + t2 + 2) >> 2) as u8;
-            put(3, 0, a);
-            let a = ((t1 + 2 * t2 + t3 + 2) >> 2) as u8;
-            put(3, 1, a);
-            let a = ((t2 + 2 * t3 + t4 + 2) >> 2) as u8;
             put(3, 2, a);
-            let a = ((t3 + 2 * t4 + t5 + 2) >> 2) as u8;
+            let a = ((t0 + 2 * t1 + t2 + 2) >> 2) as u8;
+            put(1, 2, a);
             put(3, 3, a);
+            let a = ((t1 + 2 * t2 + t3 + 2) >> 2) as u8;
+            put(1, 3, a);
+            let a = ((lt as u32 + 2 * l0 + l1 + 2) >> 2) as u8;
+            put(2, 0, a);
+            let a = ((l0 + 2 * l1 + l2 + 2) >> 2) as u8;
+            put(3, 0, a);
         }
         HOR_DOWN_PRED => {
+            // h264pred_template.c pred4x4_horizontal_down
             let mut put = |r: usize, c: usize, v: u8| dst[r * 4 + c] = v;
             let a = ((lt as u32 + l0 + 1) >> 1) as u8;
             put(0, 0, a);
-            put(2, 2, a);
+            put(1, 2, a);
+            let a = ((l0 + 2 * lt as u32 + t0 + 2) >> 2) as u8;
+            put(0, 1, a);
+            put(1, 3, a);
+            let a = ((lt as u32 + 2 * t0 + t1 + 2) >> 2) as u8;
+            put(0, 2, a);
+            let a = ((t0 + 2 * t1 + t2 + 2) >> 2) as u8;
+            put(0, 3, a);
             let a = ((l0 + l1 + 1) >> 1) as u8;
             put(1, 0, a);
-            put(3, 2, a);
-            let a = ((l1 + l2 + 1) >> 1) as u8;
-            put(2, 0, a);
-            let a = ((l2 + l3 + 1) >> 1) as u8;
-            put(3, 0, a);
-            let a = ((t1 + 2 * t0 + lt as u32 + 2) >> 2) as u8;
-            put(0, 1, a);
-            put(2, 3, a);
-            let a = ((t2 + 2 * t1 + t0 + 2) >> 2) as u8;
-            put(0, 2, a);
-            put(1, 3, a);
-            let a = ((t3 + 2 * t2 + t1 + 2) >> 2) as u8;
-            put(0, 3, a);
+            put(2, 2, a);
             let a = ((lt as u32 + 2 * l0 + l1 + 2) >> 2) as u8;
             put(1, 1, a);
-            put(3, 3, a);
-            let a = ((t0 + 2 * lt as u32 + l0 + 2) >> 2) as u8;
-            put(1, 2, a);
-            let a = ((t1 + 2 * t0 + lt as u32 + 2) >> 2) as u8;
+            put(2, 3, a);
+            let a = ((l1 + l2 + 1) >> 1) as u8;
+            put(2, 0, a);
+            put(3, 2, a);
+            let a = ((l0 + 2 * l1 + l2 + 2) >> 2) as u8;
             put(2, 1, a);
-            let a = ((t2 + 2 * t1 + t0 + 2) >> 2) as u8;
+            put(3, 3, a);
+            let a = ((l2 + l3 + 1) >> 1) as u8;
+            put(3, 0, a);
+            let a = ((l1 + 2 * l2 + l3 + 2) >> 2) as u8;
             put(3, 1, a);
         }
         VERT_LEFT_PRED => {
+            // h264pred_template.c pred4x4_vertical_left
             let mut put = |r: usize, c: usize, v: u8| dst[r * 4 + c] = v;
             let a = ((t0 + t1 + 1) >> 1) as u8;
             put(0, 0, a);
-            put(2, 2, a);
             let a = ((t1 + t2 + 1) >> 1) as u8;
             put(0, 1, a);
-            put(2, 3, a);
+            put(2, 0, a);
             let a = ((t2 + t3 + 1) >> 1) as u8;
             put(0, 2, a);
+            put(2, 1, a);
             let a = ((t3 + t4 + 1) >> 1) as u8;
             put(0, 3, a);
-            put(2, 1, a);
+            put(2, 2, a);
+            let a = ((t4 + t5 + 1) >> 1) as u8;
+            put(2, 3, a);
             let a = ((t0 + 2 * t1 + t2 + 2) >> 2) as u8;
             put(1, 0, a);
-            put(3, 2, a);
             let a = ((t1 + 2 * t2 + t3 + 2) >> 2) as u8;
             put(1, 1, a);
-            put(3, 3, a);
+            put(3, 0, a);
             let a = ((t2 + 2 * t3 + t4 + 2) >> 2) as u8;
             put(1, 2, a);
+            put(3, 1, a);
             let a = ((t3 + 2 * t4 + t5 + 2) >> 2) as u8;
             put(1, 3, a);
+            put(3, 2, a);
             let a = ((t4 + 2 * t5 + t6 + 2) >> 2) as u8;
-            put(3, 0, a);
-            let a = ((t5 + 2 * t6 + t7 + 2) >> 2) as u8;
-            put(3, 1, a);
+            put(3, 3, a);
         }
         HOR_UP_PRED => {
+            // h264pred_template.c pred4x4_horizontal_up
             let mut put = |r: usize, c: usize, v: u8| dst[r * 4 + c] = v;
             let a = ((l0 + l1 + 1) >> 1) as u8;
             put(0, 0, a);
-            put(1, 2, a);
-            let a = ((l1 + l2 + 1) >> 1) as u8;
-            put(0, 1, a);
-            put(1, 3, a);
-            let a = ((l2 + l3 + 1) >> 1) as u8;
-            put(0, 2, a);
             let a = ((l0 + 2 * l1 + l2 + 2) >> 2) as u8;
-            put(0, 3, a);
-            put(2, 0, a);
-            let a = ((l1 + 2 * l2 + l3 + 2) >> 2) as u8;
+            put(0, 1, a);
+            let a = ((l1 + l2 + 1) >> 1) as u8;
+            put(0, 2, a);
             put(1, 0, a);
-            put(2, 1, a);
-            put(3, 2, a);
-            let a = ((l2 + 2 * l3 + l3 + 2) >> 2) as u8;
+            let a = ((l1 + 2 * l2 + l3 + 2) >> 2) as u8;
+            put(0, 3, a);
             put(1, 1, a);
-            put(2, 2, a);
-            put(3, 3, a);
-            put(2, 3, ((l3 + 2 * l3 + l3 + 2) >> 2) as u8);
-            put(3, 0, ((l2 + 2 * l3 + l3 + 2) >> 2) as u8);
-            put(3, 1, ((l2 + l2 + 2 * l2 + 2) >> 2) as u8);
+            let a = ((l2 + l3 + 1) >> 1) as u8;
+            put(1, 2, a);
+            put(2, 0, a);
+            let a = ((l2 + 2 * l3 + l3 + 2) >> 2) as u8;
+            put(1, 3, a);
+            put(2, 1, a);
+            put(2, 2, l3 as u8);
+            put(2, 3, l3 as u8);
+            put(3, 0, l3 as u8);
+            put(3, 1, l3 as u8);
+            put(3, 2, l3 as u8);
+            put(3, 3, l3 as u8);
         }
         _ => {
             // 128 DC fallback (caller maps unavailable modes away)
@@ -2980,11 +3016,14 @@ fn idct_add(dst: &mut [u8], dstride: usize, block: &mut [i16; 16]) {
         let z1 = block[4 * i] as i32 - block[4 * i + 2] as i32;
         let z2 = (block[4 * i + 1] >> 1) as i32 - block[4 * i + 3] as i32;
         let z3 = block[4 * i + 1] as i32 + (block[4 * i + 3] >> 1) as i32;
-        let base = i * dstride;
+        // C writes COLUMN-major: dst[i + k*stride] — the coefficients are
+        // stored in transposed raster (the transposed zigzag scan), so the
+        // row-major loop-variable write would transpose every block.
+        let base = i;
         dst[base] = clip8(dst[base] as i32 + ((z0 + z3) >> 6));
-        dst[base + 1] = clip8(dst[base + 1] as i32 + ((z1 + z2) >> 6));
-        dst[base + 2] = clip8(dst[base + 2] as i32 + ((z1 - z2) >> 6));
-        dst[base + 3] = clip8(dst[base + 3] as i32 + ((z0 - z3) >> 6));
+        dst[base + dstride] = clip8(dst[base + dstride] as i32 + ((z1 + z2) >> 6));
+        dst[base + 2 * dstride] = clip8(dst[base + 2 * dstride] as i32 + ((z1 - z2) >> 6));
+        dst[base + 3 * dstride] = clip8(dst[base + 3 * dstride] as i32 + ((z0 - z3) >> 6));
     }
     *block = [0; 16];
 }
@@ -3243,7 +3282,7 @@ fn decode_residual(
                     cv.level_tab[suffix_length][bitsi][0], cv.level_tab[suffix_length][bitsi][1]
                 );
             }
-            if std::env::var_os("H264_DUMP").is_some() && (n < 2 || n == 11) {
+            if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
                 eprintln!(
                     "  FIRST sl={suffix_length} bitsi={bitsi} e0={} e1={}",
                     cv.level_tab[suffix_length][bitsi][0], cv.level_tab[suffix_length][bitsi][1]
@@ -3298,14 +3337,14 @@ fn decode_residual(
         // remaining levels
         for i in (trailing_ones + 1)..total_coeff {
             let bitsi = gb.peek(LEVEL_TAB_BITS) as usize;
-            if std::env::var_os("H264_DUMP").is_some() && (n < 2 || n == 11) {
+            if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
                 eprintln!("  LVL i={i} sl={suffix_length} bitsi={bitsi}");
             }
             let (mut level_code, consumed) = (
                 cv.level_tab[suffix_length][bitsi][0] as i32,
                 cv.level_tab[suffix_length][bitsi][1] as u32,
             );
-            if std::env::var_os("H264_DUMP").is_some() && (n < 2 || n == 11) {
+            if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
                 eprintln!(
                     "  RLOOK i={i} sl={suffix_length} bitsi={bitsi} c={level_code} l={consumed} pre={}",
                     gb.index
@@ -3317,7 +3356,7 @@ fn decode_residual(
                 if prefix == LEVEL_TAB_BITS as i32 {
                     prefix += gb.level_prefix()? as i32;
                 }
-                if std::env::var_os("H264_DUMP").is_some() && (n < 2 || n == 11) {
+                if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
                     eprintln!(
                         "  RESC i={i} prefix={prefix} sl={suffix_length} pos={}",
                         gb.index
@@ -3386,7 +3425,7 @@ fn decode_residual(
         } else {
             cv.run7.get(gb)? as usize
         };
-        if std::env::var_os("H264_DUMP").is_some() && (n < 2) {
+        if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
             eprintln!("  RUN i={i} zi={zi} run={run} pos={}", gb.index);
         }
         zi -= run as i32;
@@ -3394,6 +3433,12 @@ fn decode_residual(
     }
     if i < total_coeff {
         for k in i..total_coeff {
+            // C's tail (h264_cavlc.c STORE_BLOCK): `scantable--;` BEFORE
+            // the store — the remaining coefficients step down one at a
+            // time from the last stored position (storing at the current
+            // pos first shifts every tail coeff one slot too high and
+            // drops the lowest-frequency one entirely).
+            pos -= 1;
             if !(0..16).contains(&pos) {
                 return Err(Error::InvalidData("coeff overrun".into()));
             }
@@ -3402,11 +3447,17 @@ fn decode_residual(
                 None => level[k] as i16,
                 Some(q) => ((level[k] as i64 * q[s] as i64 + 32) >> 6) as i16,
             };
-            pos -= 1;
         }
     }
     if std::env::var_os("H264_DUMP").is_some() {
         eprintln!("RES n={n} tc={total_coeff} to={trailing_ones} zl={zeros_left}");
+        if h.mb_y == 0 && h.mb_x < 2 {
+            let mut dbg = String::new();
+            for v in block.iter().take(16) {
+                dbg.push_str(&format!("{v} "));
+            }
+            eprintln!("  BLK{n}: {dbg}");
+        }
     }
     if zi < 0 {
         return Err(Error::InvalidData("negative zeros".into()));
