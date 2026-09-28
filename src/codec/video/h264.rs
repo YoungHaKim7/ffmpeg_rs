@@ -633,20 +633,7 @@ impl H264Decoder {
         // left[] = {0,-1,TOP_DC_PRED,0,-1,-1,-1,0,-1,DC_128_PRED} — the DC
         // variants are the i4x4-namespace codes 9/10/11 (NOT the 0-3
         // 16x16 codes); pred4x4 handles them with availability.
-        static TOP: [i8; 12] = [
-            -1,
-            0,
-            I4_LEFT_DC_PRED,
-            -1,
-            -1,
-            -1,
-            -1,
-            -1,
-            0,
-            -1,
-            -1,
-            -1,
-        ];
+        static TOP: [i8; 12] = [-1, 0, I4_LEFT_DC_PRED, -1, -1, -1, -1, -1, 0, -1, -1, -1];
         static LEFT: [i8; 12] = [
             0,
             -1,
@@ -1815,17 +1802,21 @@ impl H264Decoder {
             }
             if self.nnz_cache[SCAN8[LUMA_DC]] != 0 {
                 let qmul = self.pps.as_ref().unwrap().dequant(0, self.qscale as usize)[0];
-                // luma_dc_dequant_idct's output layout: the DC of block
-                // (r, c) of the 4x4 block grid lands at
-                // 16·row[r] + x_off[c] with row = {0,1,4,5}, x_off = {0,32,128,160}.
+                // C writes value(loop-i, stride-slot k) at
+                // output[16·k + x_off[i]] — i.e. into mb block
+                // k + {0,2,8,10}[i] with k ∈ {0,1,4,5} (the function
+                // writes straight into sl->mb). Map each transform output
+                // to exactly that block; a per-(r,c) ROW/XOFF composition
+                // lands on the transposed block for non-symmetric DC
+                // matrices (uniform per-block pixel offsets).
                 let mut scattered = [0i16; 256];
                 let dc = self.mb_luma_dc;
                 luma_dc_dequant_idct(&mut scattered, &dc, qmul);
-                const ROW: [usize; 4] = [0, 1, 4, 5];
                 const XOFF: [usize; 4] = [0, 32, 128, 160];
-                for r in 0..4usize {
-                    for c in 0..4usize {
-                        self.mb[(4 * r + c) * 16] = scattered[16 * ROW[r] + XOFF[c]];
+                for k in [0usize, 1, 4, 5] {
+                    for i in 0..4usize {
+                        let block = k + [0usize, 2, 8, 10][i];
+                        self.mb[block * 16] = scattered[16 * k + XOFF[i]];
                     }
                 }
                 if std::env::var_os("H264_DUMP").is_some() && self.mb_x == 0 && self.mb_y == 0 {
@@ -2669,8 +2660,8 @@ fn pred4x4(mode: i8, dst: &mut [u8], top: &[u8; 8], left: &[u8; 4], lt: u8) {
             return;
         }
         I4_TOP_DC_PRED => {
-            let dc = ((top[0] as u32 + top[1] as u32 + top[2] as u32 + top[3] as u32 + 2) >> 2)
-                as u8;
+            let dc =
+                ((top[0] as u32 + top[1] as u32 + top[2] as u32 + top[3] as u32 + 2) >> 2) as u8;
             for r in 0..4 {
                 for c in 0..4 {
                     dst[r * 4 + c] = dc;
@@ -2679,8 +2670,8 @@ fn pred4x4(mode: i8, dst: &mut [u8], top: &[u8; 8], left: &[u8; 4], lt: u8) {
             return;
         }
         I4_LEFT_DC_PRED => {
-            let dc = ((left[0] as u32 + left[1] as u32 + left[2] as u32 + left[3] as u32 + 2)
-                >> 2) as u8;
+            let dc = ((left[0] as u32 + left[1] as u32 + left[2] as u32 + left[3] as u32 + 2) >> 2)
+                as u8;
             for r in 0..4 {
                 for c in 0..4 {
                     dst[r * 4 + c] = dc;
