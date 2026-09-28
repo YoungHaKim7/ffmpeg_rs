@@ -577,8 +577,10 @@ impl H264Decoder {
             return Err(Error::InvalidData(format!("QP {qp} out of range")));
         }
         self.qscale = qp;
-        self.chroma_qp[0] = CHROMA_QP8[qp.clamp(0, 51) as usize] as i32;
-        self.chroma_qp[1] = self.chroma_qp[0];
+        let off = self.pps.as_ref().map(|p| p.chroma_qp_offset).unwrap_or(0);
+        let cqp = CHROMA_QP8[(qp + off).clamp(0, 51) as usize] as i32;
+        self.chroma_qp[0] = cqp;
+        self.chroma_qp[1] = cqp;
 
         if pps.deblocking_filter_parameters_present {
             let idc = gb.ue()?;
@@ -1486,8 +1488,10 @@ impl H264Decoder {
             if !(0..=51).contains(&self.qscale) {
                 return Err(Error::InvalidData("dquant out of range".into()));
             }
-            self.chroma_qp[0] = CHROMA_QP8[self.qscale as usize] as i32;
-            self.chroma_qp[1] = self.chroma_qp[0];
+            let off = self.pps.as_ref().map(|p| p.chroma_qp_offset).unwrap_or(0);
+            let cqp = CHROMA_QP8[(self.qscale + off).clamp(0, 51) as usize] as i32;
+            self.chroma_qp[0] = cqp;
+            self.chroma_qp[1] = cqp;
         }
         self.mb = [0; 48 * 16];
 
@@ -1506,7 +1510,9 @@ impl H264Decoder {
                 for i in 0..16usize {
                     let mut blk = [0i16; 16];
                     decode_residual(self, &cv, gb, &mut blk, i, &scan_shift1(), Some(&qm), 15)?;
-                    self.mb[i * 16..(i + 1) * 16].copy_from_slice(&blk);
+                    // scan+1 path: positions 1..15 only (C decodes in
+                    // place; the DC slot is written by the later scatter).
+                    self.mb[i * 16 + 1..(i + 1) * 16].copy_from_slice(&blk[1..16]);
                 }
             } else {
                 for i in 0..16usize {
@@ -1587,9 +1593,11 @@ impl H264Decoder {
                     for i8 in 0..1usize {
                         for i4 in 0..4usize {
                             // Block index for nnz/SCAN8 (0..47); the mb
-                            // offset C uses is 16*(16+16*ch) + 16*block.
+                            // offset C uses is 16*(16+16*ch) + 16*block
+                            // (`+ i4` would scatter all four blocks into
+                            // block 0's first bytes).
                             let block_idx = 16 + 16 * ch + i4;
-                            let index = 16 * (16 + 16 * ch) + i4;
+                            let index = 16 * (16 + 16 * ch) + 16 * i4;
                             let mut blk = [0i16; 16];
                             decode_residual(
                                 self,
@@ -1601,7 +1609,11 @@ impl H264Decoder {
                                 Some(&qm),
                                 15,
                             )?;
-                            self.mb[index..index + 16].copy_from_slice(&blk);
+                            // C decodes ACs IN PLACE (scan+1 writes positions
+                            // 1..15 only, preserving the DC slots that the
+                            // chroma-DC decode left at {0,16,32,48}) — copy
+                            // positions 1..16, never clobbering blk[0].
+                            self.mb[index + 1..index + 16].copy_from_slice(&blk[1..16]);
                         }
                     }
                 }
@@ -1876,9 +1888,7 @@ impl H264Decoder {
             // (topright_samples_available << i) & 0x8000 — else the
             // block's own top-right pixel is replicated 4x.
             let tr_ok = ((self.topright_samples_available << i) & 0x8000) != 0;
-            if std::env::var_os("H264_DUMP").is_some()
-                && (self.mb_x == 0 && (self.mb_y == 2 || self.mb_y == 3))
-            {
+            if std::env::var_os("H264_DUMP").is_some() && (self.mb_y == 0 && self.mb_x == 0) {
                 eprintln!(
                     "  I4 mb{}:{} blk{i} mode={mode} t={top_ok} l={left_ok} tr={tr_ok} trmask={:04x}",
                     self.mb_x, self.mb_y, self.topright_samples_available
@@ -2087,6 +2097,9 @@ impl H264Decoder {
                 let mb_off = 16 * (16 + 16 * ch) + 16 * b;
                 let mut blk = [0i16; 16];
                 blk.copy_from_slice(&self.mb[mb_off..mb_off + 16]);
+                if std::env::var_os("H264_DUMP").is_some() && self.mb_x == 0 && self.mb_y == 0 {
+                    eprintln!("  CAC ch{ch} b{b} nnz={nnz} blk0..3={:?}", &blk[..8]);
+                }
                 if nnz == 0 && blk[0] == 0 {
                     continue;
                 }
@@ -2477,6 +2490,8 @@ struct Pps {
     deblocking_filter_parameters_present: bool,
     constrained_intra_pred: bool,
     redundant_pic_cnt_present: bool,
+    /// PPS chroma_qp_index_offset (get_chroma_qp adds it, clamped 0..51).
+    chroma_qp_offset: i32,
     /// `dequant4_coeff[i][q][x]` (init_dequant4_coeff_table, h264_ps.c:617)
     /// with the default all-16 scaling matrix (custom lists gate Unsupported).
     dequant4_full: Vec<[[u32; 16]; 52]>,
@@ -2618,7 +2633,7 @@ fn parse_pps(rbsp: &[u8], sps_ok: bool) -> Result<Pps> {
     let _weighted_bipred = gb.read(2);
     let init_qp = gb.se()? + 26;
     let _init_qs = gb.se()?;
-    let _chroma_qp_off = gb.se()?;
+    let chroma_qp_off = gb.se()?;
     let deblocking_present = gb.read_bit() == 1;
     let constrained_intra_pred = gb.read_bit() == 1;
     let redundant_pic_cnt_present = gb.read_bit() == 1;
@@ -2629,6 +2644,7 @@ fn parse_pps(rbsp: &[u8], sps_ok: bool) -> Result<Pps> {
         deblocking_filter_parameters_present: deblocking_present,
         constrained_intra_pred,
         redundant_pic_cnt_present,
+        chroma_qp_offset: chroma_qp_off,
         dequant4_full: vec![[[0u32; 16]; 52]; 6],
     };
     pps.build_dequant();
@@ -2735,28 +2751,30 @@ fn pred4x4(mode: i8, dst: &mut [u8], top: &[u8; 8], left: &[u8; 4], lt: u8) {
             let _ = px;
         }
         DIAG_DOWN_RIGHT_PRED => {
+            // h264pred_template.c pred4x4_down_right (src[c + r*stride])
             let mut put = |r: usize, c: usize, v: u8| dst[r * 4 + c] = v;
-            put(0, 3, ((l3 + 2 * l2 + l1 + 2) >> 2) as u8);
+            let a = ((l3 + 2 * l2 + l1 + 2) >> 2) as u8;
+            put(3, 0, a);
             let a = ((l2 + 2 * l1 + l0 + 2) >> 2) as u8;
-            put(0, 2, a);
-            put(1, 3, a);
+            put(2, 0, a);
+            put(3, 1, a);
             let a = ((l1 + 2 * l0 + lt as u32 + 2) >> 2) as u8;
-            put(0, 1, a);
-            put(1, 2, a);
-            put(2, 3, a);
+            put(1, 0, a);
+            put(2, 1, a);
+            put(3, 2, a);
             let a = ((l0 + 2 * lt as u32 + t0 + 2) >> 2) as u8;
             put(0, 0, a);
             put(1, 1, a);
             put(2, 2, a);
             put(3, 3, a);
             let a = ((lt as u32 + 2 * t0 + t1 + 2) >> 2) as u8;
-            put(1, 0, a);
-            put(2, 1, a);
-            put(3, 2, a);
+            put(0, 1, a);
+            put(1, 2, a);
+            put(2, 3, a);
             let a = ((t0 + 2 * t1 + t2 + 2) >> 2) as u8;
-            put(2, 0, a);
-            put(3, 1, a);
-            put(3, 0, ((t1 + 2 * t2 + t3 + 2) >> 2) as u8);
+            put(0, 2, a);
+            put(1, 3, a);
+            put(0, 3, ((t1 + 2 * t2 + t3 + 2) >> 2) as u8);
         }
         VERT_RIGHT_PRED => {
             // h264pred_template.c pred4x4_vertical_right
@@ -3136,10 +3154,12 @@ fn chroma_dc_dequant_idct(block: &mut [i16], qmul: u32) {
     let f = c - d;
     let g = a + b;
     let h = c + d;
-    block[STRIDE * 0 + XSTR * 0] = (((g + h) as i64 * qmul as i64 + 128) >> 8) as i16;
-    block[STRIDE * 0 + XSTR * 1] = (((e + f) as i64 * qmul as i64 + 128) >> 8) as i16;
-    block[STRIDE * 1 + XSTR * 0] = (((g - h) as i64 * qmul as i64 + 128) >> 8) as i16;
-    block[STRIDE * 1 + XSTR * 1] = (((e - f) as i64 * qmul as i64 + 128) >> 8) as i16;
+    // This FFmpeg's version (h264idct_template.c:332): plain >> 7, NO +128
+    // rounding (an older variant's (v*qmul+128)>>8 is 2x too small).
+    block[STRIDE * 0 + XSTR * 0] = (((g + h) as i64 * qmul as i64) >> 7) as i16;
+    block[STRIDE * 0 + XSTR * 1] = (((e + f) as i64 * qmul as i64) >> 7) as i16;
+    block[STRIDE * 1 + XSTR * 0] = (((g - h) as i64 * qmul as i64) >> 7) as i16;
+    block[STRIDE * 1 + XSTR * 1] = (((e - f) as i64 * qmul as i64) >> 7) as i16;
 }
 
 // ---------------------------------------------------------------------
@@ -3516,7 +3536,7 @@ fn decode_residual(
     }
     if std::env::var_os("H264_DUMP").is_some() {
         eprintln!("RES n={n} tc={total_coeff} to={trailing_ones} zl={zeros_left}");
-        if h.mb_x == 0 && (h.mb_y == 2 || h.mb_y == 3) {
+        if h.mb_y == 0 && h.mb_x == 0 {
             let mut dbg = String::new();
             for v in block.iter().take(16) {
                 dbg.push_str(&format!("{v} "));
