@@ -108,9 +108,14 @@ const VERT_RIGHT_PRED: i8 = 5;
 const HOR_DOWN_PRED: i8 = 6;
 const VERT_LEFT_PRED: i8 = 7;
 const HOR_UP_PRED: i8 = 8;
-const LEFT_DC_PRED: i8 = 2; // subset of DC for 16x16/chroma
-const TOP_DC_PRED: i8 = 1;
-const DC_128_PRED: i8 = 3;
+// i4x4 DC variants live ABOVE the 9 real modes (C's LEFT_DC_PRED=9,
+// TOP_DC_PRED=10, DC_128_PRED=11 — a separate namespace; squashing them
+// into 0-3 collides with HOR_PRED and silently changes the prediction).
+// The 16x16/chroma path folds its DC variants into plain DC(2) and lets
+// the availability-aware preds handle them instead.
+const I4_LEFT_DC_PRED: i8 = 9;
+const I4_TOP_DC_PRED: i8 = 10;
+const I4_DC_128_PRED: i8 = 11;
 
 const LEVEL_TAB_BITS: u32 = 8;
 
@@ -624,18 +629,35 @@ impl H264Decoder {
     /// `ff_h264_check_intra4x4_pred_mode` (h264_parse.c:134) — returns
     /// the (possibly DC-fallback) modes for the 16 blocks.
     fn check_intra4x4_pred_mode(&mut self) -> Result<()> {
-        static TOP: [i8; 12] = [-1, 0, LEFT_DC_PRED, -1, -1, -1, -1, -1, 0, -1, -1, -1];
+        // C (h264_parse.c:134): top[] = {-1,0,LEFT_DC_PRED,-1,-1,-1,-1,-1,0}
+        // left[] = {0,-1,TOP_DC_PRED,0,-1,-1,-1,0,-1,DC_128_PRED} — the DC
+        // variants are the i4x4-namespace codes 9/10/11 (NOT the 0-3
+        // 16x16 codes); pred4x4 handles them with availability.
+        static TOP: [i8; 12] = [
+            -1,
+            0,
+            I4_LEFT_DC_PRED,
+            -1,
+            -1,
+            -1,
+            -1,
+            -1,
+            0,
+            -1,
+            -1,
+            -1,
+        ];
         static LEFT: [i8; 12] = [
             0,
             -1,
-            TOP_DC_PRED,
+            I4_TOP_DC_PRED,
             0,
             -1,
             -1,
             -1,
             0,
             -1,
-            DC_128_PRED,
+            I4_DC_128_PRED,
             -1,
             -1,
         ];
@@ -1247,10 +1269,18 @@ impl H264Decoder {
                 };
                 self.mb_type = mbt as u32;
                 self.cbp = if cbp == 255 { u32::MAX } else { cbp as u32 }; // 255 = -1 (none)
-                // The table's pred column already uses this port's mode
-                // space (C's INTRA16x16 codes: 0=V, 1=H, 2=DC, 3=plane
-                // — identical layout; no remap).
-                self.intra16x16_pred_mode = pred;
+                // The table's pred column is in C's 16x16 namespace
+                // (pred16x16[] indexing: 0=DC, 1=H, 2=V, 3=plane —
+                // h264pred.h PRED8x8 codes), NOT this port's
+                // (0=V, 1=H, 2=DC, 3=plane): remap (black/gray never
+                // noticed — VERT and DC coincide at 128 when both
+                // neighbors are unavailable).
+                self.intra16x16_pred_mode = match pred {
+                    0 => 2, // C DC → port DC
+                    1 => 1, // H
+                    2 => 0, // C VERT → port VERT
+                    _ => 3, // plane
+                };
                 self.decode_mb_intra(gb, mb_xy)?;
             }
             Part::P16x16 | Part::P16x8 | Part::P8x16 | Part::P8x8 => {
@@ -1856,7 +1886,7 @@ impl H264Decoder {
             // block's own top-right pixel is replicated 4x.
             let tr_ok = ((self.topright_samples_available << i) & 0x8000) != 0;
             if std::env::var_os("H264_DUMP").is_some()
-                && ((self.mb_y == 0 && self.mb_x <= 2) || (self.mb_y == 2 && self.mb_x == 0))
+                && (self.mb_x == 0 && (self.mb_y == 2 || self.mb_y == 3))
             {
                 eprintln!(
                     "  I4 mb{}:{} blk{i} mode={mode} t={top_ok} l={left_ok} tr={tr_ok} trmask={:04x}",
@@ -2627,6 +2657,39 @@ fn clip8(v: i32) -> u8 {
 /// replicated when unavailable — caller prepares per C's rules),
 /// `left` = I..L (4), `lt` = the top-left sample.
 fn pred4x4(mode: i8, dst: &mut [u8], top: &[u8; 8], left: &[u8; 4], lt: u8) {
+    // The DC variants (9/10/11) need availability; every other mode was
+    // validated against it by check_intra4x4_pred_mode.
+    match mode {
+        I4_DC_128_PRED => {
+            for r in 0..4 {
+                for c in 0..4 {
+                    dst[r * 4 + c] = 128;
+                }
+            }
+            return;
+        }
+        I4_TOP_DC_PRED => {
+            let dc = ((top[0] as u32 + top[1] as u32 + top[2] as u32 + top[3] as u32 + 2) >> 2)
+                as u8;
+            for r in 0..4 {
+                for c in 0..4 {
+                    dst[r * 4 + c] = dc;
+                }
+            }
+            return;
+        }
+        I4_LEFT_DC_PRED => {
+            let dc = ((left[0] as u32 + left[1] as u32 + left[2] as u32 + left[3] as u32 + 2)
+                >> 2) as u8;
+            for r in 0..4 {
+                for c in 0..4 {
+                    dst[r * 4 + c] = dc;
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
     let (t0, t1, t2, t3) = (top[0] as u32, top[1] as u32, top[2] as u32, top[3] as u32);
     let (t4, t5, t6, t7) = (top[4] as u32, top[5] as u32, top[6] as u32, top[7] as u32);
     let (l0, l1, l2, l3) = (
@@ -3462,7 +3525,7 @@ fn decode_residual(
     }
     if std::env::var_os("H264_DUMP").is_some() {
         eprintln!("RES n={n} tc={total_coeff} to={trailing_ones} zl={zeros_left}");
-        if (h.mb_y == 0 && h.mb_x <= 2) || (h.mb_y == 2 && h.mb_x == 0) {
+        if h.mb_x == 0 && (h.mb_y == 2 || h.mb_y == 3) {
             let mut dbg = String::new();
             for v in block.iter().take(16) {
                 dbg.push_str(&format!("{v} "));
@@ -3604,15 +3667,24 @@ fn pred16x16_avail(
     l_ok: bool,
 ) {
     match mode {
-        0 | 2 => {
+        0 => {
+            // VERT (port space 0): replicate the top row
+            for r in 0..16 {
+                dst[r * 16..r * 16 + 16].copy_from_slice(top);
+            }
+        }
+        2 => {
+            // DC (port space 2): C pred16x16_dc — (sum+16)>>5 both,
+            // (sum+8)>>4 single side, 128 none.
             let dc = match (t_ok, l_ok) {
                 (true, true) => {
                     (top.iter().map(|&v| v as u32).sum::<u32>()
-                        + left.iter().map(|&v| v as u32).sum::<u32>())
-                        / 32
+                        + left.iter().map(|&v| v as u32).sum::<u32>()
+                        + 16)
+                        >> 5
                 }
-                (true, false) => (top.iter().map(|&v| v as u32).sum::<u32>() + 8) / 16,
-                (false, true) => (left.iter().map(|&v| v as u32).sum::<u32>() + 8) / 16,
+                (true, false) => (top.iter().map(|&v| v as u32).sum::<u32>() + 8) >> 4,
+                (false, true) => (left.iter().map(|&v| v as u32).sum::<u32>() + 8) >> 4,
                 (false, false) => 128,
             };
             for r in 0..16 {
@@ -3657,15 +3729,26 @@ fn pred8x8_avail(
     lb: u8,
 ) {
     match mode {
-        0 | 2 => {
+        0 => {
+            // VERT (port space 0): replicate the top row
+            for r in 0..8 {
+                for c in 0..8 {
+                    dst[r * dstride + c] = top[c];
+                }
+            }
+        }
+        2 => {
+            // DC (port space 2): C pred8x8l-style rounding — (sum+8)>>4
+            // both sides, (sum+4)>>3 single side.
             let dc = match (t_ok, l_ok) {
                 (true, true) => {
                     (top.iter().map(|&v| v as u32).sum::<u32>()
-                        + left.iter().map(|&v| v as u32).sum::<u32>())
-                        / 16
+                        + left.iter().map(|&v| v as u32).sum::<u32>()
+                        + 8)
+                        >> 4
                 }
-                (true, false) => (top.iter().map(|&v| v as u32).sum::<u32>() + 4) / 8,
-                (false, true) => (left.iter().map(|&v| v as u32).sum::<u32>() + 4) / 8,
+                (true, false) => (top.iter().map(|&v| v as u32).sum::<u32>() + 4) >> 3,
+                (false, true) => (left.iter().map(|&v| v as u32).sum::<u32>() + 4) >> 3,
                 (false, false) => 128,
             };
             for r in 0..8 {
