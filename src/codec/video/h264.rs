@@ -1647,8 +1647,9 @@ impl H264Decoder {
                 mc_luma(&mut luma, 4, 4, 4, prev, bx, by, mv[0], mv[1]);
                 for dr in 0..4usize {
                     for dc in 0..4usize {
-                        cur.y[y0 + (4 * br + dr as i32) as usize * w + (4 * bc + dc as i32) as usize] =
-                            luma[dr * 4 + dc];
+                        cur.y[y0
+                            + (4 * br + dr as i32) as usize * w
+                            + (4 * bc + dc as i32) as usize] = luma[dr * 4 + dc];
                     }
                 }
             }
@@ -1854,12 +1855,12 @@ impl H264Decoder {
             // (topright_samples_available << i) & 0x8000 — else the
             // block's own top-right pixel is replicated 4x.
             let tr_ok = ((self.topright_samples_available << i) & 0x8000) != 0;
-            if std::env::var_os("H264_DUMP").is_some() && self.mb_y == 0 && self.mb_x < 2 {
+            if std::env::var_os("H264_DUMP").is_some()
+                && ((self.mb_y == 0 && self.mb_x <= 2) || (self.mb_y == 2 && self.mb_x == 0))
+            {
                 eprintln!(
                     "  I4 mb{}:{} blk{i} mode={mode} t={top_ok} l={left_ok} tr={tr_ok} trmask={:04x}",
-                    self.mb_x,
-                    self.mb_y,
-                    self.topright_samples_available
+                    self.mb_x, self.mb_y, self.topright_samples_available
                 );
             }
             if top_ok {
@@ -3282,7 +3283,9 @@ fn decode_residual(
                     cv.level_tab[suffix_length][bitsi][0], cv.level_tab[suffix_length][bitsi][1]
                 );
             }
-            if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
+            if std::env::var_os("H264_DUMP").is_some() && (h.mb_y == 0 && h.mb_x <= 2)
+                || (h.mb_y == 2 && h.mb_x == 0)
+            {
                 eprintln!(
                     "  FIRST sl={suffix_length} bitsi={bitsi} e0={} e1={}",
                     cv.level_tab[suffix_length][bitsi][0], cv.level_tab[suffix_length][bitsi][1]
@@ -3337,14 +3340,18 @@ fn decode_residual(
         // remaining levels
         for i in (trailing_ones + 1)..total_coeff {
             let bitsi = gb.peek(LEVEL_TAB_BITS) as usize;
-            if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
+            if std::env::var_os("H264_DUMP").is_some() && (h.mb_y == 0 && h.mb_x <= 2)
+                || (h.mb_y == 2 && h.mb_x == 0)
+            {
                 eprintln!("  LVL i={i} sl={suffix_length} bitsi={bitsi}");
             }
             let (mut level_code, consumed) = (
                 cv.level_tab[suffix_length][bitsi][0] as i32,
                 cv.level_tab[suffix_length][bitsi][1] as u32,
             );
-            if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
+            if std::env::var_os("H264_DUMP").is_some() && (h.mb_y == 0 && h.mb_x <= 2)
+                || (h.mb_y == 2 && h.mb_x == 0)
+            {
                 eprintln!(
                     "  RLOOK i={i} sl={suffix_length} bitsi={bitsi} c={level_code} l={consumed} pre={}",
                     gb.index
@@ -3356,7 +3363,9 @@ fn decode_residual(
                 if prefix == LEVEL_TAB_BITS as i32 {
                     prefix += gb.level_prefix()? as i32;
                 }
-                if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
+                if std::env::var_os("H264_DUMP").is_some() && (h.mb_y == 0 && h.mb_x <= 2)
+                    || (h.mb_y == 2 && h.mb_x == 0)
+                {
                     eprintln!(
                         "  RESC i={i} prefix={prefix} sl={suffix_length} pos={}",
                         gb.index
@@ -3425,7 +3434,9 @@ fn decode_residual(
         } else {
             cv.run7.get(gb)? as usize
         };
-        if std::env::var_os("H264_DUMP").is_some() && h.mb_x == 0 && h.mb_y == 0 {
+        if std::env::var_os("H264_DUMP").is_some() && (h.mb_y == 0 && h.mb_x <= 2)
+            || (h.mb_y == 2 && h.mb_x == 0)
+        {
             eprintln!("  RUN i={i} zi={zi} run={run} pos={}", gb.index);
         }
         zi -= run as i32;
@@ -3451,7 +3462,7 @@ fn decode_residual(
     }
     if std::env::var_os("H264_DUMP").is_some() {
         eprintln!("RES n={n} tc={total_coeff} to={trailing_ones} zl={zeros_left}");
-        if h.mb_y == 0 && h.mb_x < 2 {
+        if (h.mb_y == 0 && h.mb_x <= 2) || (h.mb_y == 2 && h.mb_x == 0) {
             let mut dbg = String::new();
             for v in block.iter().take(16) {
                 dbg.push_str(&format!("{v} "));
