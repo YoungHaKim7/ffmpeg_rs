@@ -1247,11 +1247,6 @@ impl H264Decoder {
                 // the predicted skip MV — cavlc path returns early but
                 // hl_decode_mb runs for every MB, C: h264dec.c:101).
                 self.hl_decode_mb(mb_xy)?;
-                if std::env::var_os("H264_WATCH").is_some() {
-                    let w2 = self.mb_width * 16;
-                    let v = self.cur.as_ref().unwrap().y[5 * w2 + 6 * 16 + 5];
-                    eprintln!("  WATCH after SKIP mb={}:{} mv={:?} y(6,0)+5,5={}", self.mb_x, self.mb_y, self.mv_cache[SCAN8[0]], v);
-                }
                 return Ok(());
             }
             // run == 0: falls through with the counter at -1 so the next
@@ -1345,11 +1340,6 @@ impl H264Decoder {
         pic.qscale[mb_xy] = self.qscale as u8;
         self.slice_table[mb_xy] = self.slice_num;
         self.hl_decode_mb(mb_xy)?;
-        if std::env::var_os("H264_WATCH").is_some() && self.slice_type_nos == 0 {
-            let w2 = self.mb_width * 16;
-            let v = self.cur.as_ref().unwrap().y[5 * w2 + 6 * 16 + 5];
-            eprintln!("  WATCH after mb={}:{} y(6,0)+5,5={}", self.mb_x, self.mb_y, v);
-        }
         Ok(())
     }
 
@@ -2931,14 +2921,9 @@ fn pred4x4(mode: i8, dst: &mut [u8], top: &[u8; 8], left: &[u8; 4], lt: u8) {
             }
         }
         DC_PRED => {
-            let (sum, n) = if top[7] == top[0] && top[0] == 255 && false {
-                (0, 0)
-            } else {
-                // availability handled by caller via 128-fill; standard DC:
-                let s = t0 + t1 + t2 + t3 + l0 + l1 + l2 + l3;
-                (s, 8)
-            };
-            let dc = (sum / n) as u8;
+            // C pred4x4_dc: (top[0..3] + left[0..3] + 4) >> 3 — ROUNDED
+            // (unavailable sides arrive here as the DC variants 9/10/11).
+            let dc = ((t0 + t1 + t2 + t3 + l0 + l1 + l2 + l3 + 4) >> 3) as u8;
             for r in 0..4 {
                 dst[r * 4..r * 4 + 4].copy_from_slice(&[dc; 4]);
             }
@@ -3202,16 +3187,13 @@ fn pred16x16(mode: i32, dst: &mut [u8], top: &[u8; 16], left: &[u8; 16], lt: u8)
             let a = 16 * (top[15] as i32 + left[15] as i32);
             let b = (5 * h + 32) >> 6;
             let c = (5 * v + 32) >> 6;
-            for y in 0..8i32 {
-                for x in 0..8i32 {
-                    let val = clip8((a + b * (x - 3) + c * (y - 3) + 16) >> 5);
-                    dst[(y as usize) * 16 + x as usize] = val;
-                    dst[(y as usize) * 16 + 8 + x as usize] =
-                        clip8((a + b * (x + 8 - 3) + c * (y - 3) + 16) >> 5);
-                    dst[(8 + y as usize) * 16 + x as usize] =
-                        clip8((a + b * (x - 3) + c * (y + 8 - 3) + 16) >> 5);
-                    dst[(8 + y as usize) * 16 + 8 + x as usize] =
-                        clip8((a + b * (x + 8 - 3) + c * (y + 8 - 3) + 16) >> 5);
+            // spec 8.3.3.4 / C pred16x16_plane: (a + b(x−7) + c(y−7) + 16)
+            // >> 5 over the whole 16x16 (the old per-8x8 x−3/y−3 form added
+            // a constant 4b+4c).
+            for y in 0..16i32 {
+                for x in 0..16i32 {
+                    dst[(y as usize) * 16 + x as usize] =
+                        clip8((a + b * (x - 7) + c * (y - 7) + 16) >> 5);
                 }
             }
         }
@@ -3996,14 +3978,13 @@ fn pred8x8_avail(
                         + left[0] as u32 + left[1] as u32 + left[2] as u32 + left[3] as u32
                         + 4)
                         >> 3;
-                    let dc1 = (top[4] as u32 + top[5] as u32 + top[6] as u32 + top[7] as u32 + 2)
-                        >> 2;
-                    let dc2 =
-                        (left[4] as u32 + left[5] as u32 + left[6] as u32 + left[7] as u32 + 2)
-                            >> 2;
-                    // C averages the RAW sums (dc1/dc2 still hold
-                    // 4-sample sums at this point), not the /4 values.
-                    let dc3 = (dc1 * 4 + dc2 * 4 + 4) >> 3;
+                    let s1 = top[4] as u32 + top[5] as u32 + top[6] as u32 + top[7] as u32;
+                    let s2 = left[4] as u32 + left[5] as u32 + left[6] as u32 + left[7] as u32;
+                    let dc1 = (s1 + 2) >> 2;
+                    let dc2 = (s2 + 2) >> 2;
+                    // C averages the RAW 4-sample sums (not the rounded
+                    // quadrant DCs — rebuilding sums from dc1/dc2 is lossy).
+                    let dc3 = (s1 + s2 + 4) >> 3;
                     for r in 0..8 {
                         for c in 0..8 {
                             let v = if r < 4 {
@@ -4159,7 +4140,9 @@ mod tests {
                     let _ = f.write_all(&out);
                 }
             }
-            eprintln!("H264 FRAME {idx}: (reconstruction WIP — assert turns on at <= 8)");
+            // Bit-exact vs `ffmpeg -skip_loop_filter all` (the deblocking
+            // filter is not ported yet).
+            assert_eq!(maxd, 0, "frame {idx} differs from the ffmpeg reference");
         }
     }
 }
