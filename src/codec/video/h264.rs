@@ -1607,8 +1607,35 @@ impl H264Decoder {
                     for j in 0..count {
                         // C index (scan8 quadrant order) → grid position
                         let block = 4 * i + bw * j;
+                        let dbgN = std::env::var_os("H264_DUMP").is_some()
+                            && self.mb_x == 1
+                            && self.mb_y == 7
+                            && self.slice_frame_num == 5;
+                        if dbgN {
+                            let idx = SCAN8[block];
+                            eprintln!(
+                                "  NB blk{block} idx{idx} L=({},{}) rL={} T=({},{}) rT={} C=({},{}) rC={}",
+                                self.mv_cache[idx - 1][0],
+                                self.mv_cache[idx - 1][1],
+                                self.ref_cache[idx - 1],
+                                self.mv_cache[idx - 8][0],
+                                self.mv_cache[idx - 8][1],
+                                self.ref_cache[idx - 8],
+                                self.mv_cache[idx - 8 + bw][0],
+                                self.mv_cache[idx - 8 + bw][1],
+                                self.ref_cache[idx - 8 + bw]
+                            );
+                        }
                         let (mx, my) = self.pred_motion(block, bw, refs8[i]);
                         let (dx, dy) = read_mvd(gb)?;
+                        if dbgN {
+                            eprintln!(
+                                "  SUBMB mb=1:7 sub{i} j{j} blk{block} sub{sub} bw{bw} ref={} pred=({mx},{my}) mvd=({dx},{dy}) final=({},{})",
+                                refs8[i],
+                                mx + dx,
+                                my + dy
+                            );
+                        }
                         if std::env::var_os("H264_DUMP").is_some()
                             && self.slice_type_nos == 0
                             && self.mb_y == 0
@@ -1642,6 +1669,16 @@ impl H264Decoder {
         }
 
         self.decode_mb_residual(gb, mb_xy)?;
+        if std::env::var_os("H264_DUMP").is_some()
+            && self.mb_x == 1
+            && self.mb_y == 7
+            && self.slice_frame_num == 5
+        {
+            eprintln!(
+                "  RESIDPOST mb=1:7 blocks8..11={:?}",
+                &self.mb[8 * 16..12 * 16]
+            );
+        }
         let pic = self.cur.as_mut().unwrap();
         pic.mb_type[mb_xy] = self.mb_type;
         Ok(())
@@ -1708,6 +1745,18 @@ impl H264Decoder {
         self.mb = [0; 48 * 16];
 
         let scan: [u8; 16] = ZIGZAG;
+        if std::env::var_os("H264_DUMP").is_some()
+            && self.mb_x == 1
+            && self.mb_y == 7
+            && self.slice_frame_num == 5
+        {
+            eprintln!(
+                "  RESID mb=1:7 cbp={:#04x} q={} blocks8..11={:?}",
+                self.cbp,
+                self.qscale,
+                &self.mb[8 * 16..12 * 16]
+            );
+        }
         // Luma DC (intra16x16)
         if self.mb_type == MB_INTRA16X16 {
             self.mb_luma_dc = [0; 16];
@@ -4316,7 +4365,9 @@ mod tests {
                 }
             }
             // Bit-exact vs default ffmpeg (deblocking included).
-            assert_eq!(maxd, 0, "frame {idx} differs from the ffmpeg reference");
+            if std::env::var_os("H264_DUMP").is_none() {
+                assert_eq!(maxd, 0, "frame {idx} differs from the ffmpeg reference");
+            }
         }
     }
 }
