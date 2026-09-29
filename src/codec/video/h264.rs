@@ -867,39 +867,48 @@ impl H264Decoder {
         }
 
         // ---- mv/ref cache (list 0) ----
+        // C fill_decode_caches (h264_mvpred.h:740-800, frame pictures):
+        // top = BOTTOM row of the MB above (ref[4*top+2 + c/2]),
+        // topright cell = scan8[0]-8+4 (= 8; the 8-wide cache wraps), from
+        // the bottom-left 4x4 of the top-right MB (ref +2), topleft cell =
+        // scan8[0]-8-1 from the bottom-right 4x4 of the top-left MB (ref +3).
         if mb_type == MB_INTER {
             let pic = self.cur.as_ref().unwrap();
             let b_stride = self.mb_width * 4 + 1;
             let top_xy = self.mb_x + self.mb_y.saturating_sub(1) * self.mb_width;
             let left_xy = self.mb_x.saturating_sub(1) + self.mb_y * self.mb_width;
             let uses = |t: u32| -> bool { t == MB_INTER };
+            let fill_edge = |t: u32| -> i8 { if t != MB_UNAVAIL { -1 } else { -2 } };
+            let top0 = SCAN8[0] - 8;
             if uses(self.n_top) {
-                let bxy = 4 * self.mb_x + 4 * self.mb_y.saturating_sub(1) * b_stride;
+                let bxy = 4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
                 for c in 0..4 {
-                    self.mv_cache[4 + c] = pic.mv[bxy + c];
-                    self.ref_cache[4 + c] = pic.ref_index[4 * top_xy + (c >> 1)];
-                }
-            } else if self.n_top != MB_UNAVAIL {
-                for c in 0..4 {
-                    self.mv_cache[4 + c] = [0, 0];
-                    self.ref_cache[4 + c] = -1; // LIST_NOT_USED
+                    self.mv_cache[top0 + c] = pic.mv[bxy + c];
+                    self.ref_cache[top0 + c] = pic.ref_index[4 * top_xy + 2 + (c >> 1)];
                 }
             } else {
                 for c in 0..4 {
-                    self.mv_cache[4 + c] = [0, 0];
-                    self.ref_cache[4 + c] = -2; // PART_NOT_AVAILABLE
+                    self.mv_cache[top0 + c] = [0, 0];
+                    self.ref_cache[top0 + c] = fill_edge(self.n_top);
                 }
             }
+            let tr = SCAN8[0] - 8 + 4;
             if uses(self.n_topright) {
-                let bxy = 4 * (self.mb_x + 1) + 4 * self.mb_y.saturating_sub(1) * b_stride;
-                self.mv_cache[5 * 8 - 8 + 4 + 0] = pic.mv[bxy];
-                self.ref_cache[5 * 8 - 8 + 4 + 0] = pic.ref_index[4 * (top_xy + 1)];
-            } else if self.n_topright != MB_UNAVAIL {
-                self.mv_cache[5 * 8 - 8 + 4 + 0] = [0, 0];
-                self.ref_cache[5 * 8 - 8 + 4 + 0] = -1;
+                let bxy = 4 * (self.mb_x + 1) + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
+                self.mv_cache[tr] = pic.mv[bxy];
+                self.ref_cache[tr] = pic.ref_index[4 * (top_xy + 1) + 2];
             } else {
-                self.mv_cache[5 * 8 - 8 + 4 + 0] = [0, 0];
-                self.ref_cache[5 * 8 - 8 + 4 + 0] = -2;
+                self.mv_cache[tr] = [0, 0];
+                self.ref_cache[tr] = fill_edge(self.n_topright);
+            }
+            let tl = SCAN8[0] - 8 - 1;
+            if uses(self.n_topleft) {
+                let bxy = 4 * (self.mb_x - 1) + 4 * (self.mb_y - 1) * b_stride + 3 + 3 * b_stride;
+                self.mv_cache[tl] = pic.mv[bxy];
+                self.ref_cache[tl] = pic.ref_index[4 * (top_xy - 1) + 3];
+            } else {
+                self.mv_cache[tl] = [0, 0];
+                self.ref_cache[tl] = fill_edge(self.n_topleft);
             }
             for i in 0..4 {
                 if uses(self.n_left) {
@@ -1009,7 +1018,7 @@ impl H264Decoder {
         let pic = self.cur.as_mut().unwrap();
         for r in 0..4 {
             for c in 0..4 {
-                pic.mv[b_xy + r * b_stride + c] = self.mv_cache[SCAN8[4 * r + c]];
+                pic.mv[b_xy + r * b_stride + c] = self.mv_cache[SCAN8[0] + 8 * r + c];
             }
         }
         pic.ref_index[4 * mb_xy] = self.ref_cache[SCAN8[0]];
@@ -1082,7 +1091,8 @@ impl H264Decoder {
                 return (a[0], a[1]);
             }
         }
-        self.pred_motion(n, 4, r)
+        // C passes the BLOCK index (8*n), not the partition number.
+        self.pred_motion(8 * n, 4, r)
     }
 
     /// `pred_8x16_motion` (n = 0 left half, 1 right half).
@@ -1099,80 +1109,85 @@ impl H264Decoder {
                 return (c[0], c[1]);
             }
         }
-        self.pred_motion(n, 2, r)
+        // C passes the BLOCK index (4*n), not the partition number.
+        self.pred_motion(4 * n, 2, r)
     }
 
-    /// `pred_pskip_motion` (h264_mvpred.h:390).
+    /// `pred_pskip_motion` (h264_mvpred.h:390) — C-verbatim for frame
+    /// pictures: neighbours read from the written-back picture arrays
+    /// (bottom row of top/topright, right column of left, bottom-right of
+    /// topleft), zero-MV early outs, then the pred_motion match_count rule.
     fn pred_pskip_motion(&mut self) {
-        // Uses the written-back arrays of neighbors (like C).
+        const NOT_USED: i8 = -1; // LIST_NOT_USED
+        const NOT_AVAIL: i8 = -2; // PART_NOT_AVAILABLE
         let b_stride = self.mb_width * 4 + 1;
         let pic = self.cur.as_ref().unwrap();
-        let zeromv = [0i16, 0];
-        let left_xy = if self.mb_x > 0 {
-            Some(self.mb_x - 1 + self.mb_y * self.mb_width)
-        } else {
-            None
-        };
-        let top_xy = if self.mb_y > 0 {
-            Some(self.mb_x + (self.mb_y - 1) * self.mb_width)
-        } else {
-            None
-        };
-        let mut mv = [0i16, 0];
-        'zeromv: {
-            let (a, _lr) = match left_xy {
-                Some(xy) if self.n_left == MB_INTER => {
-                    let lref = pic.ref_index[4 * xy + 1];
-                    let a = pic.mv[4 * (self.mb_x - 1) + 4 * self.mb_y * b_stride + 3];
-                    if lref == 0 && a == zeromv {
-                        break 'zeromv;
-                    }
-                    (a, lref)
+        let zero = [0i16, 0];
+        let b_xy = |x: usize, y: usize| 4 * x + 4 * y * b_stride;
+        let mw = self.mb_width;
+        let (mx_, my_) = (self.mb_x, self.mb_y);
+        let mv = 'pred: {
+            // A: left
+            let (left_ref, a) = if self.n_left == MB_INTER {
+                let xy = mx_ - 1 + my_ * mw;
+                let r = pic.ref_index[4 * xy + 1];
+                let a = pic.mv[b_xy(mx_ - 1, my_) + 3];
+                if r == 0 && a == zero {
+                    break 'pred zero;
                 }
-                Some(_) => (zeromv, -1),
-                None => break 'zeromv,
-            };
-            let (b, _tr) = match top_xy {
-                Some(xy) if self.n_top == MB_INTER => {
-                    let tref = pic.ref_index[4 * xy + 2];
-                    let b = pic.mv[4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride];
-                    if tref == 0 && b == zeromv {
-                        break 'zeromv;
-                    }
-                    (b, tref)
-                }
-                Some(_) => (zeromv, -1),
-                None => break 'zeromv,
-            };
-            // diagonal: topright else topleft
-            let c = if self.mb_x + 1 < self.mb_width && self.n_topright == MB_INTER {
-                let xy = top_xy.unwrap() + 1;
-                let _cr = pic.ref_index[4 * xy + 2];
-                pic.mv[4 * (self.mb_x + 1) + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride]
-            } else if self.mb_x > 0 && self.mb_y > 0 && self.n_topleft == MB_INTER {
-                let xy = top_xy.unwrap() - 1;
-                let _tlr = pic.ref_index[4 * xy + 3];
-                pic.mv[4 * (self.mb_x - 1) + 4 * (self.mb_y - 1) * b_stride + 3 + b_stride]
+                (r, a)
+            } else if self.n_left != MB_UNAVAIL {
+                (NOT_USED, zero)
             } else {
-                zeromv
+                break 'pred zero;
             };
-            let mid3 = |x: i16, y: i16, z: i16| -> i16 {
-                let (lo, hi) = (x.min(y), x.max(y));
-                if z < lo {
-                    lo
-                } else if z > hi {
-                    hi
-                } else {
-                    z
+            // B: top
+            let (top_ref, bm) = if self.n_top == MB_INTER {
+                let xy = mx_ + (my_ - 1) * mw;
+                let r = pic.ref_index[4 * xy + 2];
+                let bm = pic.mv[b_xy(mx_, my_ - 1) + 3 * b_stride];
+                if r == 0 && bm == zero {
+                    break 'pred zero;
                 }
+                (r, bm)
+            } else if self.n_top != MB_UNAVAIL {
+                (NOT_USED, zero)
+            } else {
+                break 'pred zero;
             };
-            mv = [mid3(a[0], b[0], c[0]), mid3(a[1], b[1], c[1])];
-        }
-        let (mx, my) = (mv[0], mv[1]);
+            // C: topright, else topleft
+            let (diag_ref, c) = if self.n_topright == MB_INTER {
+                let xy = mx_ + 1 + (my_ - 1) * mw;
+                (pic.ref_index[4 * xy + 2], pic.mv[b_xy(mx_ + 1, my_ - 1) + 3 * b_stride])
+            } else if self.n_topright != MB_UNAVAIL {
+                (NOT_USED, zero)
+            } else if self.n_topleft == MB_INTER {
+                let xy = mx_ - 1 + (my_ - 1) * mw;
+                (pic.ref_index[4 * xy + 3], pic.mv[b_xy(mx_ - 1, my_ - 1) + 3 + 3 * b_stride])
+            } else if self.n_topleft != MB_UNAVAIL {
+                (NOT_USED, zero)
+            } else {
+                (NOT_AVAIL, zero)
+            };
+            let match_count = (diag_ref == 0) as i32 + (top_ref == 0) as i32 + (left_ref == 0) as i32;
+            if match_count > 1 {
+                [mid_pred(a[0], bm[0], c[0]), mid_pred(a[1], bm[1], c[1])]
+            } else if match_count == 1 {
+                if left_ref == 0 {
+                    a
+                } else if top_ref == 0 {
+                    bm
+                } else {
+                    c
+                }
+            } else {
+                [mid_pred(a[0], bm[0], c[0]), mid_pred(a[1], bm[1], c[1])]
+            }
+        };
         for r in 0..4 {
             for c in 0..4 {
-                self.mv_cache[SCAN8[4 * r + c]] = [mx, my];
-                self.ref_cache[SCAN8[4 * r + c]] = 0;
+                self.mv_cache[SCAN8[0] + 8 * r + c] = mv;
+                self.ref_cache[SCAN8[0] + 8 * r + c] = 0;
             }
         }
     }
@@ -1194,6 +1209,11 @@ impl H264Decoder {
                 // the predicted skip MV — cavlc path returns early but
                 // hl_decode_mb runs for every MB, C: h264dec.c:101).
                 self.hl_decode_mb(mb_xy)?;
+                if std::env::var_os("H264_WATCH").is_some() {
+                    let w2 = self.mb_width * 16;
+                    let v = self.cur.as_ref().unwrap().y[5 * w2 + 6 * 16 + 5];
+                    eprintln!("  WATCH after SKIP mb={}:{} mv={:?} y(6,0)+5,5={}", self.mb_x, self.mb_y, self.mv_cache[SCAN8[0]], v);
+                }
                 return Ok(());
             }
             // run == 0: falls through with the counter at -1 so the next
@@ -1283,6 +1303,11 @@ impl H264Decoder {
         pic.qscale[mb_xy] = self.qscale as u8;
         self.slice_table[mb_xy] = self.slice_num;
         self.hl_decode_mb(mb_xy)?;
+        if std::env::var_os("H264_WATCH").is_some() && self.slice_type_nos == 0 {
+            let w2 = self.mb_width * 16;
+            let v = self.cur.as_ref().unwrap().y[5 * w2 + 6 * 16 + 5];
+            eprintln!("  WATCH after mb={}:{} y(6,0)+5,5={}", self.mb_x, self.mb_y, v);
+        }
         Ok(())
     }
 
@@ -1369,6 +1394,11 @@ impl H264Decoder {
     fn decode_mb_inter(&mut self, gb: &mut Gb, mb_xy: usize, part: &Part) -> Result<()> {
         self.fill_decode_caches(MB_INTER);
         // ref_count is always 1 in this subset: no ref_idx syntax.
+        // C fills ref_cache for the whole MB BEFORE predicting any mvd —
+        // pred_motion of later partitions reads these in-MB refs.
+        for i in 0..16usize {
+            self.ref_cache[SCAN8[i]] = 0;
+        }
 
         let read_mvd = |gb: &mut Gb| -> Result<(i16, i16)> {
             let dx = gb.se()?;
@@ -1379,6 +1409,9 @@ impl H264Decoder {
             Part::P16x16 => {
                 let (mx, my) = self.pred_motion(0, 4, 0);
                 let (dx, dy) = read_mvd(gb)?;
+                if std::env::var_os("H264_DUMP").is_some() && self.slice_type_nos == 0 && self.mb_y == 0 {
+                    eprintln!("  MV16 mb={}:{} pred=({mx},{my}) mvd=({dx},{dy})", self.mb_x, self.mb_y);
+                }
                 let (mx, my) = (mx + dx, my + dy);
                 self.fill_mv_rect(0, 0, 4, 4, mx, my);
             }
@@ -1399,11 +1432,16 @@ impl H264Decoder {
                 }
             }
             Part::P8x8 | Part::Intra(_) => {
-                for i in 0..4usize {
-                    let sub = gb.ue()?;
-                    if sub > 3 {
+                // C (h264_cavlc.c:853): ALL four sub_mb_types first, then
+                // ref_idx (none here: ref0 / single ref), THEN the mvds.
+                let mut subs = [0u32; 4];
+                for sub in subs.iter_mut() {
+                    *sub = gb.ue()?;
+                    if *sub > 3 {
                         return Err(Error::InvalidData("P sub_mb_type out of range".into()));
                     }
+                }
+                for (i, &sub) in subs.iter().enumerate() {
                     // sub: 0=sub8x8(1 part), 1=sub8x4(2), 2=sub4x8(2), 3=sub4x4(4)
                     let (bw, bh, count) = match sub {
                         0 => (2usize, 2usize, 1usize),
@@ -1412,20 +1450,19 @@ impl H264Decoder {
                         _ => (1, 1, 4),
                     };
                     for j in 0..count {
+                        // C index (scan8 quadrant order) → grid position
                         let block = 4 * i + bw * j;
                         let (mx, my) = self.pred_motion(block, bw, 0);
                         let (dx, dy) = read_mvd(gb)?;
+                        if std::env::var_os("H264_DUMP").is_some() && self.slice_type_nos == 0 && self.mb_y == 0 {
+                            eprintln!("  MV8 mb={}:{} sub{i} blk{block} pred=({mx},{my}) mvd=({dx},{dy})", self.mb_x, self.mb_y);
+                        }
                         let (mx, my) = (mx + dx, my + dy);
-                        let bx = (block % 4) * 1;
-                        let by = block / 4;
-                        self.fill_mv_rect(bx, by, bw, bh, mx, my);
+                        let g = SCAN8[block];
+                        self.fill_mv_rect((g & 7) - 4, (g >> 3) - 1, bw, bh, mx, my);
                     }
                 }
             }
-        }
-        // every 4x4 ref is 0 in this subset
-        for i in 0..16usize {
-            self.ref_cache[SCAN8[i]] = 0;
         }
         self.write_back_motion(mb_xy);
 
@@ -1436,6 +1473,9 @@ impl H264Decoder {
         }
         cbp = GOLOMB_TO_INTER_CBP[cbp as usize] as u32;
         self.cbp = cbp;
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!("  IEND mb={}:{} cbp={:#04x} pos={}", self.mb_x, self.mb_y, cbp, gb.index);
+        }
 
         self.decode_mb_residual(gb, mb_xy)?;
         let pic = self.cur.as_mut().unwrap();
@@ -1447,8 +1487,10 @@ impl H264Decoder {
     fn fill_mv_rect(&mut self, x: usize, y: usize, w: usize, h: usize, mx: i16, my: i16) {
         for r in 0..h {
             for c in 0..w {
-                let idx = 4 * (y + r) + (x + c);
-                self.mv_cache[SCAN8[idx]] = [mx, my];
+                // (x, y) are 4x4-grid coords; cache is 8 wide with the
+                // MB's top-left cell at SCAN8[0]. (Raster→SCAN8 would
+                // mis-place partitions: SCAN8 is quadrant-ordered.)
+                self.mv_cache[SCAN8[0] + 8 * (y + r) + (x + c)] = [mx, my];
             }
         }
     }
@@ -1460,6 +1502,12 @@ impl H264Decoder {
         // cur_pic.mb_type[mb_xy]); set it or the stale intra type from
         // the previous MB leaks into the skip reconstruction.
         self.mb_type = MB_INTER;
+        // C: a skipped MB carries no residual (cbp 0, all nnz 0) — without
+        // this, hl_decode_mb re-adds the PREVIOUS MB's stale coefficients.
+        self.cbp = 0;
+        for i in 0..48usize {
+            self.nnz_cache[SCAN8[i]] = 0;
+        }
         self.pred_pskip_motion();
         for i in 0..16usize {
             self.ref_cache[SCAN8[i]] = 0;
@@ -1684,7 +1732,8 @@ impl H264Decoder {
             }
             for r in 0..4usize {
                 for c in 0..4usize {
-                    let mv = self.mv_cache[SCAN8[4 * r + c]];
+                    // raster block (r, c) ↔ cache cell SCAN8[0] + 8r + c
+                    let mv = self.mv_cache[SCAN8[0] + 8 * r + c];
                     let bx = self.mb_x as i32 * 16 + 4 * c as i32;
                     let by = self.mb_y as i32 * 16 + 4 * r as i32;
                     let mut cb = [0u8; 16];
@@ -3196,6 +3245,12 @@ fn chroma_dc_dequant_idct(block: &mut [i16], qmul: u32) {
 // Motion compensation (spec 8.4.2.2; scalar form of h264qpel/h264chroma)
 // ---------------------------------------------------------------------
 
+/// `mid_pred` (libavutil/mathops.h): median of three.
+fn mid_pred(a: i16, b: i16, c: i16) -> i16 {
+    let (lo, hi) = (a.min(b), a.max(b));
+    c.clamp(lo, hi)
+}
+
 fn hpel6(vals: [i32; 6]) -> i32 {
     (vals[0] - 5 * vals[1] + 20 * vals[2] + 20 * vals[3] - 5 * vals[4] + vals[5] + 16) >> 5
 }
@@ -3239,42 +3294,44 @@ fn mc_luma(
             i_px(x, y + 3),
         ])) as i32
     };
-    let j_px = |x: i32, y: i32| -> i32 {
-        // vertical filter over horizontally-filtered half-pels
-        clip8(hpel6([
-            h_px(x, y - 2),
-            h_px(x, y - 1),
-            h_px(x, y),
-            h_px(x, y + 1),
-            h_px(x, y + 2),
-            h_px(x, y + 3),
-        ])) as i32
+    // j (center half-pel), spec 8.4.2.2.1: 6-tap over the UNROUNDED
+    // horizontal intermediates b1, then (j1 + 512) >> 10. (Filtering the
+    // already-rounded/clipped b values is not bit-exact.)
+    let b1 = |x: i32, y: i32| -> i32 {
+        i_px(x - 2, y) - 5 * i_px(x - 1, y) + 20 * i_px(x, y) + 20 * i_px(x + 1, y)
+            - 5 * i_px(x + 2, y)
+            + i_px(x + 3, y)
     };
+    let j_px = |x: i32, y: i32| -> i32 {
+        let j1 = b1(x, y - 2) - 5 * b1(x, y - 1) + 20 * b1(x, y) + 20 * b1(x, y + 1)
+            - 5 * b1(x, y + 2)
+            + b1(x, y + 3);
+        clip8((j1 + 512) >> 10) as i32
+    };
+    let avg = |a: i32, b: i32| -> i32 { (a + b + 1) >> 1 };
     for r in 0..h {
         for c in 0..w {
             let x = ox + c as i32;
             let y = oy + r as i32;
+            // Spec 8.4.2.2.1 sample table (G at integer (x,y); b = h_px,
+            // h = v_px, j = centre; s = b one row down, m = h one col right).
             let v: i32 = match (fx, fy) {
                 (0, 0) => i_px(x, y),
-                (2, 0) | (0, 2) if fy == 0 => h_px(x, y),
-                (0, _) => v_px(x, y),
-                (2, 2) => j_px(x, y),
-                (2, _) => {
-                    // fy 1 or 3
-                    let vy = if fy == 1 { y - 1 } else { y + 1 };
-                    let base = if fy == 1 { v_px(x, y) } else { v_px(x, y + 1) };
-                    let _ = vy;
-                    (base + j_px(x, y) + 1) >> 1
-                }
-                (_, 2) => {
-                    let base = if fx == 1 { h_px(x, y) } else { h_px(x + 1, y) };
-                    (base + j_px(x, y) + 1) >> 1
-                }
-                (1, 1) => (i_px(x, y) + j_px(x, y) + 1) >> 1,
-                (3, 1) => (i_px(x + 1, y) + j_px(x, y) + 1) >> 1,
-                (1, 3) => (i_px(x, y + 1) + j_px(x, y) + 1) >> 1,
-                (3, 3) => (i_px(x + 1, y + 1) + j_px(x, y) + 1) >> 1,
-                _ => unreachable!(),
+                (1, 0) => avg(i_px(x, y), h_px(x, y)),     // a
+                (2, 0) => h_px(x, y),                      // b
+                (3, 0) => avg(i_px(x + 1, y), h_px(x, y)), // c
+                (0, 1) => avg(i_px(x, y), v_px(x, y)),     // d
+                (0, 2) => v_px(x, y),                      // h
+                (0, 3) => avg(i_px(x, y + 1), v_px(x, y)), // n
+                (2, 2) => j_px(x, y),                      // j
+                (2, 1) => avg(h_px(x, y), j_px(x, y)),     // f
+                (2, 3) => avg(j_px(x, y), h_px(x, y + 1)), // q
+                (1, 2) => avg(v_px(x, y), j_px(x, y)),     // i
+                (3, 2) => avg(j_px(x, y), v_px(x + 1, y)), // k
+                (1, 1) => avg(h_px(x, y), v_px(x, y)),     // e
+                (3, 1) => avg(h_px(x, y), v_px(x + 1, y)), // g
+                (1, 3) => avg(v_px(x, y), h_px(x, y + 1)), // p
+                _ => avg(v_px(x + 1, y), h_px(x, y + 1)),  // r (3,3)
             };
             dst[r * dstride + c] = v as u8;
         }
