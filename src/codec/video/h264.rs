@@ -2,15 +2,14 @@
 //! **baseline-profile subset**: CAVLC entropy coding, frame pictures,
 //! I/P slices, intra (4x4/16x16/PCM) and inter (16x16/16x8/8x16/8x8
 //! partitions) macroblocks, 6-tap luma / bilinear chroma motion
-//! compensation, single short-term reference picture.
+//! compensation, multiple short-term reference pictures (sliding window +
+//! list modification), and the in-loop **deblocking filter**
+//! ([`deblock`]). Acceptance: bit-exact vs default `ffmpeg` output.
 //!
 //! Gated `Unsupported` (degrade honestly, like AAC's ER objects): CABAC,
 //! B slices + direct mode + weighted prediction (baseline excludes them),
 //! MBAFF/field pictures, 8x8 transform, FMO, SP/SI slices, chroma
-//! 422/444, bit depths > 8, custom scaling matrices, MMCO/reordering.
-//! The **deblocking loop filter is not ported yet** — acceptance compares
-//! against `ffmpeg -skip_loop_filter all` (documented divergence; the
-//! filter is its own follow-up phase).
+//! 422/444, bit depths > 8, custom scaling matrices, MMCO/long-term refs.
 //!
 //! ## C → Rust map
 //!
@@ -28,13 +27,15 @@
 //! | `ff_h264_idct_add`/`idct_dc_add`/`luma_dc_dequant_idct` (h264idct_template.c) | same names |
 //! | `hl_decode_mb` (h264_mb_template.c) | [`H264Decoder::hl_decode_mb`] |
 //! | qpel 6-tap + chroma MC (h264qpel/h264chroma templates, spec 8.4.2.2) | [`mc_luma`] / [`mc_chroma`] (scalar) |
-//! | ref-list/MMCO (`h264_refs.c`) | IDR resets the DPB, prev frame is list0 (baseline streams) |
-//! | deblocking (`h264_loopfilter.c`) | not ported (see above) |
+//! | ref-list (`h264_refs.c`) | [`H264Decoder::build_ref_list`] — short-term sliding window, no MMCO |
+//! | deblocking (`h264_loopfilter.c` + `h264dsp_template.c` filters) | [`deblock::filter_picture`] |
 //!
 //! Output: `PixelFormat::Yuv420p` frames, SPS-cropped, decode order.
 //! The generator for `tables.rs` (extracted CAVLC/h264data tables) is
 //! the python script documented in that file's header.
 
+mod deblock;
+mod deblock_tables;
 mod tables;
 
 use crate::{
@@ -51,6 +52,7 @@ use crate::{
 };
 use std::sync::OnceLock;
 
+use deblock::{MbDeblock, PART_16X16, PART_16X8, PART_8X16, PART_8X8};
 use tables::*;
 
 /// `scan8` (h264dec.h): block index → position in the 6x8 neighborhood
@@ -154,6 +156,16 @@ struct Picture {
     mb_i4x4: Vec<[i8; 8]>,
     /// frame_num of this picture (PicNum derivation for the ref list).
     frame_num: u32,
+    /// Unique id — the deblocking filter compares references by picture
+    /// identity (C's `ref2frm`), not by per-slice ref_idx.
+    id: u64,
+    /// Per 8x8 (4 per MB): id of the referenced picture, -1 = none.
+    ref_pic: Vec<i32>,
+    /// Per MB: coded_block_pattern (C's `cbp_table`), inter partition
+    /// shape, and the slice's deblocking parameters.
+    cbp: Vec<u8>,
+    part: Vec<u8>,
+    dbk: Vec<MbDeblock>,
 }
 
 impl Picture {
@@ -174,6 +186,11 @@ impl Picture {
             qscale: vec![0; mb_w * mb_h + 1],
             mb_i4x4: vec![[-1; 8]; mb_w * mb_h + 1],
             frame_num: 0,
+            id: 0,
+            ref_pic: vec![-1; 4 * (mb_w * mb_h + 1)],
+            cbp: vec![0; mb_w * mb_h + 1],
+            part: vec![PART_16X16; mb_w * mb_h + 1],
+            dbk: vec![MbDeblock::default(); mb_w * mb_h + 1],
         }
     }
     fn sample_y(&self, x: i32, y: i32) -> u8 {
@@ -389,6 +406,11 @@ pub struct H264Decoder {
     slice_num: usize,
     slice_table: Vec<usize>,
     prev_mb_skipped: bool,
+    /// Deblocking parameters of the slice being decoded.
+    slice_dbk: MbDeblock,
+    /// Inter partition shape of the MB being decoded (PART_*).
+    cur_part: u8,
+    next_pic_id: u64,
     // per-MB scratch
     mb: [i16; 48 * 16],
     mb_luma_dc: [i16; 16],
@@ -453,6 +475,9 @@ impl H264Decoder {
             slice_num: 0,
             slice_table: Vec::new(),
             prev_mb_skipped: false,
+            slice_dbk: MbDeblock::default(),
+            cur_part: PART_16X16,
+            next_pic_id: 1,
             mb: [0; 48 * 16],
             mb_luma_dc: [0; 16],
             intra4x4_pred_mode_cache: [-1; 120],
@@ -620,6 +645,14 @@ impl H264Decoder {
         self.chroma_qp[0] = cqp;
         self.chroma_qp[1] = cqp;
 
+        // Deblocking (h264_slice.c:1900-1928): C keeps the idc with 0/1
+        // swapped (1 = on, 0 = off, 2 = on but not across slice edges) and
+        // the offsets doubled.
+        let mut dbk = MbDeblock {
+            mode: 1,
+            cqp_off: [pps.chroma_qp_offset; 2],
+            ..MbDeblock::default()
+        };
         if pps.deblocking_filter_parameters_present {
             let idc = gb.ue()?;
             if idc > 2 {
@@ -629,14 +662,18 @@ impl H264Decoder {
             if on < 2 {
                 on ^= 1;
             }
+            dbk.mode = on;
             if on != 0 {
                 let a = gb.se()?;
                 let b = gb.se()?;
                 if !(-6..=6).contains(&a) || !(-6..=6).contains(&b) {
                     return Err(Error::InvalidData("deblocking offsets".into()));
                 }
+                dbk.alpha = a * 2;
+                dbk.beta = b * 2;
             }
         }
+        self.slice_dbk = dbk;
         Ok((
             first_mb,
             frame_num != self.frame_num || nal.kind == 5 || first_mb == 0 && self.got_mb,
@@ -1063,6 +1100,32 @@ impl H264Decoder {
         pic.ref_index[4 * mb_xy + 1] = self.ref_cache[SCAN8[4]];
         pic.ref_index[4 * mb_xy + 2] = self.ref_cache[SCAN8[8]];
         pic.ref_index[4 * mb_xy + 3] = self.ref_cache[SCAN8[12]];
+        // C's ref2frm: the loop filter compares the referenced PICTURES.
+        for (k, blk) in [0usize, 4, 8, 12].into_iter().enumerate() {
+            let ri = self.ref_cache[SCAN8[blk]];
+            let id = if ri < 0 {
+                -1
+            } else {
+                self.ref_list
+                    .get(ri as usize)
+                    .and_then(|&i| self.refs.get(i))
+                    .map_or(-1, |p| p.id as i32)
+            };
+            self.cur.as_mut().unwrap().ref_pic[4 * mb_xy + k] = id;
+        }
+    }
+
+    /// Per-MB state kept in the picture after decoding: qscale (0 for
+    /// PCM — C's `qscale_table`, the running slice QP is untouched), cbp,
+    /// partition shape and the slice's deblocking parameters.
+    fn record_mb(&mut self, mb_xy: usize) {
+        let pcm = self.mb_type == MB_PCM;
+        let pic = self.cur.as_mut().unwrap();
+        pic.qscale[mb_xy] = if pcm { 0 } else { self.qscale as u8 };
+        pic.cbp[mb_xy] = if self.cbp == u32::MAX { 0 } else { self.cbp as u8 };
+        pic.part[mb_xy] = self.cur_part;
+        pic.dbk[mb_xy] = self.slice_dbk;
+        self.slice_table[mb_xy] = self.slice_num;
     }
 
     // ---------------- MV prediction (h264_mvpred.h) ----------------
@@ -1343,9 +1406,7 @@ impl H264Decoder {
             }
         }
 
-        let pic = self.cur.as_mut().unwrap();
-        pic.qscale[mb_xy] = self.qscale as u8;
-        self.slice_table[mb_xy] = self.slice_num;
+        self.record_mb(mb_xy);
         self.hl_decode_mb(mb_xy)?;
         Ok(())
     }
@@ -1366,7 +1427,8 @@ impl H264Decoder {
             let pic = self.cur.as_mut().unwrap();
             pic.nnz[mb_xy] = [16; 48];
             pic.mb_type[mb_xy] = self.mb_type;
-            self.qscale = 0;
+            // C stores qscale_table[mb_xy] = 0 (record_mb) but leaves the
+            // slice's running QP alone for the MBs that follow.
             return Ok(());
         }
 
@@ -1431,6 +1493,12 @@ impl H264Decoder {
     /// weighting, MBAFF; single reference ⇒ no ref_idx reads when
     /// ref_count == 1, which the baseline single-ref DPB always is).
     fn decode_mb_inter(&mut self, gb: &mut Gb, mb_xy: usize, part: &Part) -> Result<()> {
+        self.cur_part = match part {
+            Part::P16x8 => PART_16X8,
+            Part::P8x16 => PART_8X16,
+            Part::P8x8 => PART_8X8,
+            _ => PART_16X16,
+        };
         self.fill_decode_caches(MB_INTER);
         // ref_idx_l0 = te(v) (h264_cavlc.c:944): absent for one active
         // ref, one inverted bit for two, ue otherwise. C reads ALL of an
@@ -1608,8 +1676,8 @@ impl H264Decoder {
         let pic = self.cur.as_mut().unwrap();
         pic.mb_type[mb_xy] = MB_INTER;
         pic.nnz[mb_xy] = [0; 48];
-        pic.qscale[mb_xy] = self.qscale as u8;
-        self.slice_table[mb_xy] = self.slice_num;
+        self.cur_part = PART_16X16;
+        self.record_mb(mb_xy);
         self.prev_mb_skipped = true;
     }
 
@@ -2303,8 +2371,10 @@ impl H264Decoder {
         // (the caller emitted the old picture via finish_picture, which
         // also moved it into `prev` — the single-ref DPB)
         self.cur = None;
-        self.cur = Some(Picture::new(self.mb_width, self.mb_height));
-        self.slice_num += 1;
+        let mut pic = Picture::new(self.mb_width, self.mb_height);
+        pic.id = self.next_pic_id;
+        self.next_pic_id += 1;
+        self.cur = Some(pic);
         self.slice_table = vec![0; self.mb_width * self.mb_height];
         self.got_mb = false;
         self.mb_skip_run = -1;
@@ -2323,6 +2393,11 @@ impl H264Decoder {
             self.frame_num = self.slice_frame_num;
             self.cur.as_mut().unwrap().frame_num = self.slice_frame_num;
         }
+        // One number per slice (C's current_slice / slice_table): MBs of
+        // other slices are unavailable for prediction, and deblocking mode 2
+        // stops at slice edges.
+        self.slice_num += 1;
+        self.slice_dbk.slice = self.slice_num;
         self.build_ref_list()?;
         // (frame_num kept from header for next comparison)
         self.got_mb = true;
@@ -2354,10 +2429,13 @@ impl H264Decoder {
 
     /// Emit the finished picture as an output Frame (cropped).
     fn finish_picture(&mut self) -> Result<()> {
-        let pic = match self.cur.take() {
+        let mut pic = match self.cur.take() {
             Some(p) => p,
             None => return Ok(()),
         };
+        // In-loop deblocking: the filtered picture is both the output and
+        // the reference for later P slices.
+        deblock::filter_picture(&mut pic, self.mb_width, self.mb_height);
         // Sliding-window short-term marking (h264_refs.c, no MMCO): the
         // newest reference goes first; the oldest drops past
         // max_num_ref_frames. A non-reference picture is output only.
@@ -4121,9 +4199,9 @@ mod tests {
 
     #[test]
     fn decodes_all_intra_fixture() {
-        // H264_TEST=/path.h264 to decode another fixture; the reference
-        // YUV is looked up as /tmp/h264_ref_*.yuv alongside a matching
-        // -skip_loop_filter all decode.
+        // H264_TEST=/path.h264 to decode another fixture; the reference is
+        // /tmp/h264_ref_<stem>.yuv, a DEFAULT `ffmpeg -i x.h264 -f rawvideo
+        // -pix_fmt yuv420p` decode (loop filter on).
         let path = std::env::var("H264_TEST").unwrap_or_else(|_| "/tmp/h264_alli.h264".into());
         let Ok(_data) = std::fs::read(&path) else {
             eprintln!("skip: no {path} fixture");
@@ -4136,7 +4214,7 @@ mod tests {
         let stem = path
             .trim_start_matches("/tmp/h264_")
             .trim_end_matches(".h264");
-        let ref_path = std::format!("/tmp/h264_ref_{stem}_nolf.yuv");
+        let ref_path = std::format!("/tmp/h264_ref_{stem}.yuv");
         let Ok(_ref) = std::fs::read(&ref_path) else {
             eprintln!("skip: no {ref_path} reference");
             return;
@@ -4178,8 +4256,7 @@ mod tests {
                     let _ = f.write_all(&out);
                 }
             }
-            // Bit-exact vs `ffmpeg -skip_loop_filter all` (the deblocking
-            // filter is not ported yet).
+            // Bit-exact vs default ffmpeg (deblocking included).
             assert_eq!(maxd, 0, "frame {idx} differs from the ffmpeg reference");
         }
     }
