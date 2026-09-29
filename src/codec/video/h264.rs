@@ -2387,9 +2387,25 @@ impl H264Decoder {
         }
     }
 
-    fn decode_slice(&mut self, nal: &Nal) -> Result<bool> {
+    fn decode_slice(&mut self, nal: &Nal, next_slice_idx: usize) -> Result<bool> {
         let mut gb = Gb::new(&nal.rbsp);
-        let (first_mb, new_pic) = self.parse_slice_header(nal, &mut gb)?;
+        let (first_mb, new_pic) = self.parse_slice_header(nal, &mut gb).map_err(|e| {
+            eprintln!(
+                "H264DBG: slice hdr err kind={} ref_idc={} len={} : {e}",
+                nal.kind,
+                nal.ref_idc,
+                nal.rbsp.len()
+            );
+            e
+        })?;
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!(
+                "H264DBG: slice kind={} first_mb={first_mb} new_pic={new_pic} hdr_bits={} left={}",
+                nal.kind,
+                gb.index,
+                gb.left()
+            );
+        }
         if new_pic {
             self.finish_picture()?; // emit the finished picture first
             self.start_new_picture(nal.kind == 5);
@@ -2412,11 +2428,28 @@ impl H264Decoder {
         // finish at end-of-picture; stop on exhausted bits ONLY when no
         // skip run is pending — an all-skip slice has zero bits left for
         // the remaining MBs (skip MBs consume no bits), so more_rbsp_data
-        // must NOT gate the loop.
+        // must NOT gate the loop. C also stops each slice at
+        // next_slice_idx (ff_h264_execute_decode_slices): the first MB of
+        // the following slice — a slice's rbsp trailing bits leave a few
+        // readable bits, so bit exhaustion alone would overread into the
+        // padding (multi-slice pictures).
         loop {
+            if mb_abs >= next_slice_idx {
+                break;
+            }
             self.mb_x = mb_abs % self.mb_width;
             self.mb_y = mb_abs / self.mb_width;
-            self.decode_mb_cavlc(&mut gb)?;
+            self.decode_mb_cavlc(&mut gb).map_err(|e| {
+                eprintln!(
+                    "H264DBG: MB decode err slice#{} kind={} first_mb={first_mb} at mb({},{}) bits={}: {e}",
+                    self.slice_num,
+                    nal.kind,
+                    self.mb_x,
+                    self.mb_y,
+                    gb.index
+                );
+                e
+            })?;
             mb_abs += 1;
             if mb_abs >= mb_num {
                 break;
@@ -2563,7 +2596,19 @@ impl Decoder for H264Decoder {
         }
         self.pending.clear();
 
-        for nal in split_nals(pkt.as_slice()) {
+        let nals = split_nals(pkt.as_slice());
+        // first_mb_in_slice is the slice header's very first ue(v); peek it
+        // so each slice knows where the next one begins (C's next_slice_idx).
+        let slice_first: Vec<usize> = nals
+            .iter()
+            .filter(|n| n.kind == 1 || n.kind == 5)
+            .map(|n| {
+                let mut gb = Gb::new(&n.rbsp);
+                gb.ue().map(|v| v as usize).unwrap_or(usize::MAX)
+            })
+            .collect();
+        let mut si = 0usize;
+        for nal in &nals {
             match nal.kind {
                 7 => {
                     self.sps = Some(parse_sps(&nal.rbsp)?);
@@ -2576,7 +2621,17 @@ impl Decoder for H264Decoder {
                     self.pps = Some(parse_pps(&nal.rbsp, self.sps.is_some())?);
                 }
                 5 | 1 => {
-                    self.decode_slice(&nal)?;
+                    // A slice whose successor starts at a later MB belongs
+                    // to the same picture; otherwise the picture must end
+                    // by itself (bit exhaustion).
+                    let mb_num = self.mb_width * self.mb_height;
+                    let next = slice_first
+                        .get(si + 1)
+                        .copied()
+                        .filter(|&f| f > slice_first[si] && f <= mb_num)
+                        .unwrap_or(mb_num);
+                    self.decode_slice(nal, next)?;
+                    si += 1;
                 }
                 _ => {} // SEI etc. skipped
             }
