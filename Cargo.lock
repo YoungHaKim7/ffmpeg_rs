@@ -462,7 +462,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "vulkano"
 version = "0.35.0"
-source = "git+https://github.com/vulkano-rs/vulkano?rev=fb4cfdb#fb4cfdb56998f16b0a1265b813efbec63b93c036"
+source = "git+https://github.com/vulkano-rs/vulkano?rev=9a80c29e7#9a80c29e7f8a90d7f39564b31769d6a9c85f6cc4"
 dependencies = [
  "ash",
  "bytemuck",
@@ -484,7 +484,7 @@ dependencies = [
 [[package]]
 name = "vulkano-macros"
 version = "0.35.0"
-source = "git+https://github.com/vulkano-rs/vulkano?rev=fb4cfdb#fb4cfdb56998f16b0a1265b813efbec63b93c036"
+source = "git+https://github.com/vulkano-rs/vulkano?rev=9a80c29e7#9a80c29e7f8a90d7f39564b31769d6a9c85f6cc4"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -495,7 +495,7 @@ dependencies = [
 [[package]]
 name = "vulkano-shaders"
 version = "0.35.0"
-source = "git+https://github.com/vulkano-rs/vulkano?rev=fb4cfdb#fb4cfdb56998f16b0a1265b813efbec63b93c036"
+source = "git+https://github.com/vulkano-rs/vulkano?rev=9a80c29e7#9a80c29e7f8a90d7f39564b31769d6a9c85f6cc4"
 dependencies = [
  "foldhash",
  "heck",

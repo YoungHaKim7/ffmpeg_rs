@@ -62,10 +62,12 @@ impl ComputeGpu {
         .map_err(|e| Error::Unsupported(format!("creating Vulkan instance: {e}")))?;
 
         // Preference order like the sibling projects: discrete first.
+        // (Newer vulkano returns a Vec here — chain through into_iter.)
         let candidates = instance
             .enumerate_physical_devices()
             .map_err(|e| Error::Unsupported(format!("enumerating devices: {e}")))?;
         let mut ranked: Vec<_> = candidates
+            .into_iter()
             .filter(|p| {
                 p.queue_family_properties()
                     .iter()
@@ -96,7 +98,7 @@ impl ComputeGpu {
             .expect("filtered above") as u32;
 
         let device_name = physical_device.properties().device_name.clone();
-        let (device, mut queues) = Device::new(
+        let (device, queues) = Device::new(
             &physical_device,
             &DeviceCreateInfo {
                 queue_create_infos: &[QueueCreateInfo {
@@ -107,7 +109,11 @@ impl ComputeGpu {
             },
         )
         .map_err(|e| Error::Unsupported(format!("creating Vulkan device: {e}")))?;
-        let queue = queues.next().expect("one queue was requested");
+        // Newer vulkano hands the created queues back as a Vec.
+        let queue = queues
+            .into_iter()
+            .next()
+            .expect("one queue was requested");
 
         Ok(ComputeGpu {
             memory_allocator: Arc::new(StandardMemoryAllocator::new(&device, &Default::default())),
