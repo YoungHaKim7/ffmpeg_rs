@@ -1277,7 +1277,11 @@ impl H264Decoder {
                 0 => Part::P16x16,
                 1 => Part::P16x8,
                 2 => Part::P8x16,
-                _ => Part::P8x8, // 8x8 and 8x8-ref0 (single-ref subset)
+                _ => {
+                    // 3 = P_8x8, 4 = P_8x8ref0 (no ref_idx; all ref 0)
+                    self.p8x8_ref0 = raw == 4;
+                    Part::P8x8
+                }
             }
         } else {
             if raw - 5 > 25 {
@@ -1431,12 +1435,31 @@ impl H264Decoder {
     /// ref_count == 1, which the baseline single-ref DPB always is).
     fn decode_mb_inter(&mut self, gb: &mut Gb, mb_xy: usize, part: &Part) -> Result<()> {
         self.fill_decode_caches(MB_INTER);
-        // ref_count is always 1 in this subset: no ref_idx syntax.
-        // C fills ref_cache for the whole MB BEFORE predicting any mvd —
-        // pred_motion of later partitions reads these in-MB refs.
-        for i in 0..16usize {
-            self.ref_cache[SCAN8[i]] = 0;
-        }
+        // ref_idx_l0 = te(v) (h264_cavlc.c:944): absent for one active
+        // ref, one inverted bit for two, ue otherwise. C reads ALL of an
+        // MB's ref_idx before any mvd and fills ref_cache with them —
+        // pred_motion of later partitions compares against these refs.
+        let rc = self.ref_count_l0;
+        let read_ref = |gb: &mut Gb| -> Result<i8> {
+            match rc {
+                0 | 1 => Ok(0),
+                2 => Ok((gb.read_bit() ^ 1) as i8),
+                _ => {
+                    let v = gb.ue()?;
+                    if v >= rc {
+                        return Err(Error::InvalidData(format!("ref {v} overflow")));
+                    }
+                    Ok(v as i8)
+                }
+            }
+        };
+        let set_ref = |cache: &mut [i8], x: usize, y: usize, w: usize, h: usize, r: i8| {
+            for yy in 0..h {
+                for xx in 0..w {
+                    cache[SCAN8[0] + 8 * (y + yy) + (x + xx)] = r;
+                }
+            }
+        };
 
         let read_mvd = |gb: &mut Gb| -> Result<(i16, i16)> {
             let dx = gb.se()?;
@@ -1445,7 +1468,9 @@ impl H264Decoder {
         };
         match part {
             Part::P16x16 => {
-                let (mx, my) = self.pred_motion(0, 4, 0);
+                let r0 = read_ref(gb)?;
+                set_ref(&mut self.ref_cache, 0, 0, 4, 4, r0);
+                let (mx, my) = self.pred_motion(0, 4, r0);
                 let (dx, dy) = read_mvd(gb)?;
                 if std::env::var_os("H264_DUMP").is_some() && self.slice_type_nos == 0 && self.mb_y == 0 {
                     eprintln!("  MV16 mb={}:{} pred=({mx},{my}) mvd=({dx},{dy})", self.mb_x, self.mb_y);
@@ -1454,16 +1479,26 @@ impl H264Decoder {
                 self.fill_mv_rect(0, 0, 4, 4, mx, my);
             }
             Part::P16x8 => {
+                let mut r = [0i8; 2];
+                for (n, rn) in r.iter_mut().enumerate() {
+                    *rn = read_ref(gb)?;
+                    set_ref(&mut self.ref_cache, 0, 2 * n, 4, 2, *rn);
+                }
                 for n in 0..2usize {
-                    let (mx, my) = self.pred_16x8_motion(n, 0);
+                    let (mx, my) = self.pred_16x8_motion(n, r[n]);
                     let (dx, dy) = read_mvd(gb)?;
                     let (mx, my) = (mx + dx, my + dy);
                     self.fill_mv_rect(0, 2 * n, 4, 2, mx, my);
                 }
             }
             Part::P8x16 => {
+                let mut r = [0i8; 2];
+                for (n, rn) in r.iter_mut().enumerate() {
+                    *rn = read_ref(gb)?;
+                    set_ref(&mut self.ref_cache, 2 * n, 0, 2, 4, *rn);
+                }
                 for n in 0..2usize {
-                    let (mx, my) = self.pred_8x16_motion(n, 0);
+                    let (mx, my) = self.pred_8x16_motion(n, r[n]);
                     let (dx, dy) = read_mvd(gb)?;
                     let (mx, my) = (mx + dx, my + dy);
                     self.fill_mv_rect(2 * n, 0, 2, 4, mx, my);
@@ -1479,6 +1514,13 @@ impl H264Decoder {
                         return Err(Error::InvalidData("P sub_mb_type out of range".into()));
                     }
                 }
+                // ref_idx per 8x8 (quadrant i: x = 2*(i&1), y = 2*(i>>1)),
+                // skipped for P_8x8ref0.
+                let mut refs8 = [0i8; 4];
+                for (i, ri) in refs8.iter_mut().enumerate() {
+                    *ri = if self.p8x8_ref0 { 0 } else { read_ref(gb)? };
+                    set_ref(&mut self.ref_cache, 2 * (i & 1), 2 * (i >> 1), 2, 2, *ri);
+                }
                 for (i, &sub) in subs.iter().enumerate() {
                     // sub: 0=sub8x8(1 part), 1=sub8x4(2), 2=sub4x8(2), 3=sub4x4(4)
                     let (bw, bh, count) = match sub {
@@ -1490,7 +1532,7 @@ impl H264Decoder {
                     for j in 0..count {
                         // C index (scan8 quadrant order) → grid position
                         let block = 4 * i + bw * j;
-                        let (mx, my) = self.pred_motion(block, bw, 0);
+                        let (mx, my) = self.pred_motion(block, bw, refs8[i]);
                         let (dx, dy) = read_mvd(gb)?;
                         if std::env::var_os("H264_DUMP").is_some() && self.slice_type_nos == 0 && self.mb_y == 0 {
                             eprintln!("  MV8 mb={}:{} sub{i} blk{block} pred=({mx},{my}) mvd=({dx},{dy})", self.mb_x, self.mb_y);
@@ -1743,14 +1785,19 @@ impl H264Decoder {
         }
 
         if self.mb_type == MB_INTER {
-            // MC from the single reference, per 4x4 block via the cache.
-            let prev = match self.prev.as_ref() {
-                Some(p) => p,
-                None => return Err(Error::InvalidData("inter MB without a reference".into())),
+            // MC per 4x4 block: ref_cache → RefPicList0 → DPB picture.
+            let refs = &self.refs;
+            let ref_list = &self.ref_list;
+            let pick = |ri: i8| -> Result<&Picture> {
+                ref_list
+                    .get(ri.max(0) as usize)
+                    .and_then(|&k| refs.get(k))
+                    .ok_or_else(|| Error::InvalidData("inter MB references a missing picture".into()))
             };
             let cur = self.cur.as_mut().unwrap();
             for i in 0..16usize {
                 let mv = self.mv_cache[SCAN8[i]];
+                let prev = pick(self.ref_cache[SCAN8[i]])?;
                 // scan8 (quadrant) order → pixel position, C's block_offset.
                 let grid = SCAN8[i];
                 let bc = ((grid & 7) - 4) as i32;
@@ -1772,6 +1819,7 @@ impl H264Decoder {
                 for c in 0..4usize {
                     // raster block (r, c) ↔ cache cell SCAN8[0] + 8r + c
                     let mv = self.mv_cache[SCAN8[0] + 8 * r + c];
+                    let prev = pick(self.ref_cache[SCAN8[0] + 8 * r + c])?;
                     let bx = self.mb_x as i32 * 16 + 4 * c as i32;
                     let by = self.mb_y as i32 * 16 + 4 * r as i32;
                     let mut cb = [0u8; 16];
@@ -2324,10 +2372,59 @@ impl H264Decoder {
             frame.plane_mut(2)[r * cs..r * cs + ow / 2].copy_from_slice(&pic.cr[src..src + ow / 2]);
         }
         self.frame_count += 1;
-        self.cur = None; // picture moved to prev above
-        // keep prev = this picture (reference for the next P slice)
+        self.cur = None; // picture moved into the DPB above
+        if keep {
+            self.refs.truncate(max_refs);
+        } else {
+            self.refs.remove(pic_idx);
+        }
         self.pending.push_back(frame);
         self.got_mb = false;
+        Ok(())
+    }
+
+    /// RefPicList0 init + modification for a P slice (h264_refs.c:
+    /// ff_h264_build_ref_list, short-term only). Default order is
+    /// descending PicNum (PicNum = FrameNumWrap: frame_num, minus
+    /// MaxFrameNum when it exceeds the current frame_num); the
+    /// modification ops then move the named picture to each index.
+    fn build_ref_list(&mut self) -> Result<()> {
+        self.ref_list.clear();
+        if self.slice_type_nos == 2 {
+            return Ok(());
+        }
+        let max_fn = 1i64 << self.sps.as_ref().unwrap().log2_max_frame_num;
+        let cur_fn = self.slice_frame_num as i64;
+        let pic_num = |f: u32| -> i64 {
+            let f = f as i64;
+            if f > cur_fn { f - max_fn } else { f }
+        };
+        let mut list: Vec<usize> = (0..self.refs.len()).collect();
+        list.sort_by_key(|&i| std::cmp::Reverse(pic_num(self.refs[i].frame_num)));
+        let mut pred = cur_fn;
+        for (idx, &(op, val)) in self.reorder_ops.iter().enumerate() {
+            let abs_diff = val as i64 + 1;
+            if op == 0 {
+                pred -= abs_diff;
+                if pred < 0 {
+                    pred += max_fn;
+                }
+            } else {
+                pred += abs_diff;
+                if pred >= max_fn {
+                    pred -= max_fn;
+                }
+            }
+            let want = if pred > cur_fn { pred - max_fn } else { pred };
+            let Some(pos) = list.iter().position(|&i| pic_num(self.refs[i].frame_num) == want)
+            else {
+                return Err(Error::InvalidData("reference picture missing during reorder".into()));
+            };
+            let r = list.remove(pos);
+            list.insert(idx.min(list.len()), r);
+        }
+        list.truncate(self.ref_count_l0 as usize);
+        self.ref_list = list;
         Ok(())
     }
 }
