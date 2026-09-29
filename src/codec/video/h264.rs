@@ -152,6 +152,8 @@ struct Picture {
     /// intra4x4 modes: bottom row (4) + right column (4) per MB — C's
     /// `mb2br`-indexed `intra4x4_pred_mode` slots the caches read.
     mb_i4x4: Vec<[i8; 8]>,
+    /// frame_num of this picture (PicNum derivation for the ref list).
+    frame_num: u32,
 }
 
 impl Picture {
@@ -171,6 +173,7 @@ impl Picture {
             ref_index: vec![-1; (mb_w * 4 + 1) * (mb_h * 4 + 1)],
             qscale: vec![0; mb_w * mb_h + 1],
             mb_i4x4: vec![[-1; 8]; mb_w * mb_h + 1],
+            frame_num: 0,
         }
     }
     fn sample_y(&self, x: i32, y: i32) -> u8 {
@@ -354,7 +357,24 @@ pub struct H264Decoder {
     eof: bool,
     // picture state
     cur: Option<Picture>,
-    prev: Option<Picture>,
+    /// Short-term reference DPB, newest first (sliding window of
+    /// max_num_ref_frames; C's h264_refs.c without MMCO/long-term).
+    refs: Vec<Picture>,
+    /// RefPicList0 for the current slice: indices into `refs`.
+    ref_list: Vec<usize>,
+    /// num_ref_idx_l0_active for the current slice (PPS default or the
+    /// slice-header override).
+    ref_count_l0: u32,
+    /// Parsed ref_pic_list_modification ops (idc, value), applied after
+    /// the previous picture enters the DPB.
+    reorder_ops: Vec<(u32, u32)>,
+    /// frame_num from the slice header being decoded.
+    slice_frame_num: u32,
+    /// nal_ref_idc of the current picture (non-ref pictures stay out of
+    /// the DPB).
+    cur_is_ref: bool,
+    /// P_8x8ref0 (mb_type 4): every sub-8x8 uses ref 0, no ref_idx.
+    p8x8_ref0: bool,
     got_mb: bool, // cur has decoded MBs (start-of-picture detection)
     frame_num: u32,
     // slice state
@@ -413,7 +433,13 @@ impl H264Decoder {
             pending: std::collections::VecDeque::new(),
             eof: false,
             cur: None,
-            prev: None,
+            refs: Vec::new(),
+            ref_list: Vec::new(),
+            ref_count_l0: 1,
+            reorder_ops: Vec::new(),
+            slice_frame_num: 0,
+            cur_is_ref: true,
+            p8x8_ref0: false,
             got_mb: false,
             frame_num: u32::MAX,
             slice_type_nos: 2,
@@ -453,7 +479,8 @@ impl H264Decoder {
 
     pub fn flush(&mut self) {
         self.cur = None;
-        self.prev = None;
+        self.refs.clear();
+        self.ref_list.clear();
         self.slice_table.clear();
         self.pending.clear();
         self.got_mb = false;
@@ -526,11 +553,18 @@ impl H264Decoder {
             let _rpc = gb.ue()?;
         }
 
+        self.slice_frame_num = frame_num;
+        self.ref_count_l0 = pps.ref_count[0];
+        self.reorder_ops.clear();
         if self.slice_type_nos != 2 {
             // ff_h264_parse_ref_count (h264_parse.c:237): the l1 count
             // is only read for B slices.
             if gb.read_bit() == 1 {
-                let _l0 = gb.ue()?;
+                let l0 = gb.ue()? + 1;
+                if l0 > 32 {
+                    return Err(Error::InvalidData("reference overflow".into()));
+                }
+                self.ref_count_l0 = l0;
                 if self.slice_type_nos == 1 {
                     let _l1 = gb.ue()?;
                 }
@@ -549,7 +583,11 @@ impl H264Decoder {
                             "illegal modification_of_pic_nums_idc {op}"
                         )));
                     }
-                    let _val = gb.ue()?;
+                    let val = gb.ue()?;
+                    if op == 2 {
+                        return Err(Error::Unsupported("long-term reference reordering".into()));
+                    }
+                    self.reorder_ops.push((op, val));
                 }
             }
         }
@@ -2209,7 +2247,7 @@ impl H264Decoder {
         self.got_mb = false;
         self.mb_skip_run = -1;
         if is_idr {
-            self.prev = None; // IDR clears the DPB
+            self.refs.clear(); // IDR clears the DPB
         }
     }
 
@@ -2219,7 +2257,11 @@ impl H264Decoder {
         if new_pic {
             self.finish_picture()?; // emit the finished picture first
             self.start_new_picture(nal.kind == 5);
+            self.cur_is_ref = nal.ref_idc != 0;
+            self.frame_num = self.slice_frame_num;
+            self.cur.as_mut().unwrap().frame_num = self.slice_frame_num;
         }
+        self.build_ref_list()?;
         // (frame_num kept from header for next comparison)
         self.got_mb = true;
 
@@ -2254,8 +2296,14 @@ impl H264Decoder {
             Some(p) => p,
             None => return Ok(()),
         };
-        self.prev = Some(pic);
-        let pic = self.prev.as_ref().unwrap();
+        // Sliding-window short-term marking (h264_refs.c, no MMCO): the
+        // newest reference goes first; the oldest drops past
+        // max_num_ref_frames. A non-reference picture is output only.
+        let max_refs = self.sps.as_ref().map(|s| s.ref_frame_count.max(1)).unwrap_or(1) as usize;
+        let keep = self.cur_is_ref;
+        self.refs.insert(0, pic);
+        let pic_idx = 0usize;
+        let pic = &self.refs[pic_idx];
 
         let sps = self.sps.as_ref().unwrap();
         let w = self.mb_width * 16;
