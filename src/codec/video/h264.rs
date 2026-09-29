@@ -52,7 +52,7 @@ use crate::{
 };
 use std::sync::OnceLock;
 
-use deblock::{MbDeblock, PART_16X16, PART_16X8, PART_8X16, PART_8X8};
+use deblock::{MbDeblock, PART_8X8, PART_8X16, PART_16X8, PART_16X16};
 use tables::*;
 
 /// `scan8` (h264dec.h): block index → position in the 6x8 neighborhood
@@ -1122,7 +1122,11 @@ impl H264Decoder {
         let pcm = self.mb_type == MB_PCM;
         let pic = self.cur.as_mut().unwrap();
         pic.qscale[mb_xy] = if pcm { 0 } else { self.qscale as u8 };
-        pic.cbp[mb_xy] = if self.cbp == u32::MAX { 0 } else { self.cbp as u8 };
+        pic.cbp[mb_xy] = if self.cbp == u32::MAX {
+            0
+        } else {
+            self.cbp as u8
+        };
         pic.part[mb_xy] = self.cur_part;
         pic.dbk[mb_xy] = self.slice_dbk;
         self.slice_table[mb_xy] = self.slice_num;

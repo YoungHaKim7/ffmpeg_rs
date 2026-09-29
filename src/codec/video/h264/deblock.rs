@@ -18,7 +18,7 @@
 //! `ff_h264_filter_mb` without it, which is what is ported here.
 
 use super::deblock_tables::{ALPHA_TABLE, BETA_TABLE, TC0_TABLE};
-use super::{CHROMA_QP8, MB_INTER, MB_INTRA16X16, MB_INTRA4X4, MB_PCM, Picture};
+use super::{CHROMA_QP8, MB_INTER, MB_INTRA4X4, MB_INTRA16X16, MB_PCM, Picture};
 
 /// Inter partition shape of an MB, for the edge masks (C's
 /// `MB_TYPE_16x16 / 16x8 / 8x16 / 8x8` bits). P_Skip is 16x16.
@@ -61,7 +61,15 @@ fn at(pos: isize, k: isize, s: isize) -> usize {
     (pos + k * s) as usize
 }
 
-fn loop_filter_luma(p: &mut [u8], pos: isize, xs: isize, ys: isize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn loop_filter_luma(
+    p: &mut [u8],
+    pos: isize,
+    xs: isize,
+    ys: isize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i8; 4],
+) {
     let mut pix = pos;
     for &t in tc0 {
         let tc_orig = t as i32;
@@ -139,7 +147,15 @@ fn loop_filter_luma_intra(p: &mut [u8], pos: isize, xs: isize, ys: isize, alpha:
     }
 }
 
-fn loop_filter_chroma(p: &mut [u8], pos: isize, xs: isize, ys: isize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn loop_filter_chroma(
+    p: &mut [u8],
+    pos: isize,
+    xs: isize,
+    ys: isize,
+    alpha: i32,
+    beta: i32,
+    tc0: &[i8; 4],
+) {
     let mut pix = pos;
     for &t in tc0 {
         // C: tc = ((tc0[i] - 1U) << 0) + 1 — the edge helper already added
@@ -306,7 +322,11 @@ fn filter_mb(pic: &mut Picture, mb_w: usize, mb_x: usize, mb_y: usize) {
     let left_type = nb_type(left_xy);
 
     // Inter caches (fill_filter_caches_inter, list 0) + nnz.
-    let mut c = Caches { nnz: [0; 40], refs: [-1; 40], mv: [[0, 0]; 40] };
+    let mut c = Caches {
+        nnz: [0; 40],
+        refs: [-1; 40],
+        mv: [[0, 0]; 40],
+    };
     let b_stride = mb_w * 4 + 1;
     if !is_intra(mb_type) {
         let bxy = |x: usize, y: usize| 4 * x + 4 * y * b_stride;
@@ -362,7 +382,24 @@ fn filter_mb(pic: &mut Picture, mb_w: usize, mb_x: usize, mb_y: usize) {
     let nbs = [left_xy, top_xy];
     let nb_types = [left_type, top_type];
     for dir in 0..2usize {
-        filter_mb_dir(pic, mb_w, mb_x, mb_y, mb_type, &c, dir, nbs[dir], nb_types[dir], qp, cqp, a, b, cbp, part, d);
+        filter_mb_dir(
+            pic,
+            mb_w,
+            mb_x,
+            mb_y,
+            mb_type,
+            &c,
+            dir,
+            nbs[dir],
+            nb_types[dir],
+            qp,
+            cqp,
+            a,
+            b,
+            cbp,
+            part,
+            d,
+        );
     }
 }
 
@@ -392,10 +429,18 @@ fn filter_mb_dir(
     let (w_i, cw_i) = (w as isize, cw as isize);
     // dir 0 = vertical edges (filter across x): xs 1, ys stride.
     // dir 1 = horizontal edges (filter across y): xs stride, ys 1.
-    let (lxs, lys, cxs, cys) = if dir == 0 { (1, w_i, 1, cw_i) } else { (w_i, 1, cw_i, 1) };
+    let (lxs, lys, cxs, cys) = if dir == 0 {
+        (1, w_i, 1, cw_i)
+    } else {
+        (w_i, 1, cw_i, 1)
+    };
     let intra_mb = is_intra(mb_type);
     let mask_edge = if intra_mb { 0 } else { mask_edge(dir, part) };
-    let edges = if mask_edge == 3 && (cbp & 15) == 0 { 1 } else { 4 };
+    let edges = if mask_edge == 3 && (cbp & 15) == 0 {
+        1
+    } else {
+        4
+    };
     let mask_par0 = !intra_mb && par0(dir, part);
     let step = if dir == 0 { 1 } else { 8 };
     let mvy_limit = 4;
