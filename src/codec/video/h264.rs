@@ -1196,18 +1196,25 @@ impl H264Decoder {
             // C: topright, else topleft
             let (diag_ref, c) = if self.n_topright == MB_INTER {
                 let xy = mx_ + 1 + (my_ - 1) * mw;
-                (pic.ref_index[4 * xy + 2], pic.mv[b_xy(mx_ + 1, my_ - 1) + 3 * b_stride])
+                (
+                    pic.ref_index[4 * xy + 2],
+                    pic.mv[b_xy(mx_ + 1, my_ - 1) + 3 * b_stride],
+                )
             } else if self.n_topright != MB_UNAVAIL {
                 (NOT_USED, zero)
             } else if self.n_topleft == MB_INTER {
                 let xy = mx_ - 1 + (my_ - 1) * mw;
-                (pic.ref_index[4 * xy + 3], pic.mv[b_xy(mx_ - 1, my_ - 1) + 3 + 3 * b_stride])
+                (
+                    pic.ref_index[4 * xy + 3],
+                    pic.mv[b_xy(mx_ - 1, my_ - 1) + 3 + 3 * b_stride],
+                )
             } else if self.n_topleft != MB_UNAVAIL {
                 (NOT_USED, zero)
             } else {
                 (NOT_AVAIL, zero)
             };
-            let match_count = (diag_ref == 0) as i32 + (top_ref == 0) as i32 + (left_ref == 0) as i32;
+            let match_count =
+                (diag_ref == 0) as i32 + (top_ref == 0) as i32 + (left_ref == 0) as i32;
             if match_count > 1 {
                 [mid_pred(a[0], bm[0], c[0]), mid_pred(a[1], bm[1], c[1])]
             } else if match_count == 1 {
@@ -1462,8 +1469,14 @@ impl H264Decoder {
                 set_ref(&mut self.ref_cache, 0, 0, 4, 4, r0);
                 let (mx, my) = self.pred_motion(0, 4, r0);
                 let (dx, dy) = read_mvd(gb)?;
-                if std::env::var_os("H264_DUMP").is_some() && self.slice_type_nos == 0 && self.mb_y == 0 {
-                    eprintln!("  MV16 mb={}:{} pred=({mx},{my}) mvd=({dx},{dy})", self.mb_x, self.mb_y);
+                if std::env::var_os("H264_DUMP").is_some()
+                    && self.slice_type_nos == 0
+                    && self.mb_y == 0
+                {
+                    eprintln!(
+                        "  MV16 mb={}:{} pred=({mx},{my}) mvd=({dx},{dy})",
+                        self.mb_x, self.mb_y
+                    );
                 }
                 let (mx, my) = (mx + dx, my + dy);
                 self.fill_mv_rect(0, 0, 4, 4, mx, my);
@@ -1524,8 +1537,14 @@ impl H264Decoder {
                         let block = 4 * i + bw * j;
                         let (mx, my) = self.pred_motion(block, bw, refs8[i]);
                         let (dx, dy) = read_mvd(gb)?;
-                        if std::env::var_os("H264_DUMP").is_some() && self.slice_type_nos == 0 && self.mb_y == 0 {
-                            eprintln!("  MV8 mb={}:{} sub{i} blk{block} pred=({mx},{my}) mvd=({dx},{dy})", self.mb_x, self.mb_y);
+                        if std::env::var_os("H264_DUMP").is_some()
+                            && self.slice_type_nos == 0
+                            && self.mb_y == 0
+                        {
+                            eprintln!(
+                                "  MV8 mb={}:{} sub{i} blk{block} pred=({mx},{my}) mvd=({dx},{dy})",
+                                self.mb_x, self.mb_y
+                            );
                         }
                         let (mx, my) = (mx + dx, my + dy);
                         let g = SCAN8[block];
@@ -1544,7 +1563,10 @@ impl H264Decoder {
         cbp = GOLOMB_TO_INTER_CBP[cbp as usize] as u32;
         self.cbp = cbp;
         if std::env::var_os("H264_DUMP").is_some() {
-            eprintln!("  IEND mb={}:{} cbp={:#04x} pos={}", self.mb_x, self.mb_y, cbp, gb.index);
+            eprintln!(
+                "  IEND mb={}:{} cbp={:#04x} pos={}",
+                self.mb_x, self.mb_y, cbp, gb.index
+            );
         }
 
         self.decode_mb_residual(gb, mb_xy)?;
@@ -1782,7 +1804,9 @@ impl H264Decoder {
                 ref_list
                     .get(ri.max(0) as usize)
                     .and_then(|&k| refs.get(k))
-                    .ok_or_else(|| Error::InvalidData("inter MB references a missing picture".into()))
+                    .ok_or_else(|| {
+                        Error::InvalidData("inter MB references a missing picture".into())
+                    })
             };
             let cur = self.cur.as_mut().unwrap();
             for i in 0..16usize {
@@ -2337,7 +2361,11 @@ impl H264Decoder {
         // Sliding-window short-term marking (h264_refs.c, no MMCO): the
         // newest reference goes first; the oldest drops past
         // max_num_ref_frames. A non-reference picture is output only.
-        let max_refs = self.sps.as_ref().map(|s| s.ref_frame_count.max(1)).unwrap_or(1) as usize;
+        let max_refs = self
+            .sps
+            .as_ref()
+            .map(|s| s.ref_frame_count.max(1))
+            .unwrap_or(1) as usize;
         let keep = self.cur_is_ref;
         self.refs.insert(0, pic);
         let pic_idx = 0usize;
@@ -2406,9 +2434,13 @@ impl H264Decoder {
                 }
             }
             let want = if pred > cur_fn { pred - max_fn } else { pred };
-            let Some(pos) = list.iter().position(|&i| pic_num(self.refs[i].frame_num) == want)
+            let Some(pos) = list
+                .iter()
+                .position(|&i| pic_num(self.refs[i].frame_num) == want)
             else {
-                return Err(Error::InvalidData("reference picture missing during reorder".into()));
+                return Err(Error::InvalidData(
+                    "reference picture missing during reorder".into(),
+                ));
             };
             let r = list.remove(pos);
             list.insert(idx.min(list.len()), r);
@@ -3974,8 +4006,14 @@ fn pred8x8_avail(
             // (left[4..7]+2)>>2 bottom; top_dc mirrors it.
             match (t_ok, l_ok) {
                 (true, true) => {
-                    let dc0 = (top[0] as u32 + top[1] as u32 + top[2] as u32 + top[3] as u32
-                        + left[0] as u32 + left[1] as u32 + left[2] as u32 + left[3] as u32
+                    let dc0 = (top[0] as u32
+                        + top[1] as u32
+                        + top[2] as u32
+                        + top[3] as u32
+                        + left[0] as u32
+                        + left[1] as u32
+                        + left[2] as u32
+                        + left[3] as u32
                         + 4)
                         >> 3;
                     let s1 = top[4] as u32 + top[5] as u32 + top[6] as u32 + top[7] as u32;

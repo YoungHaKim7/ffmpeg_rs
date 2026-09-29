@@ -80,7 +80,6 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
-
     fn run_ffmpeg(&self, args: &[&str]) {
         let out = Command::new(self.ffmpeg)
             .args(["-hide_banner", "-loglevel", "error"])
