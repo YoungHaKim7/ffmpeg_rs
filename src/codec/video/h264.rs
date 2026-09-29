@@ -3780,22 +3780,73 @@ fn pred8x8_avail(
             }
         }
         2 => {
-            // DC (port space 2): C pred8x8l-style rounding — (sum+8)>>4
-            // both sides, (sum+4)>>3 single side.
-            let dc = match (t_ok, l_ok) {
+            // DC (port space 2) — C pred8x8_dc/left_dc/top_dc (h264pred
+            // _template.c): FOUR per-quadrant DCs when both sides are
+            // available; top-left = (left[0..3]+top[0..3]+4)>>3,
+            // top-right = (top[4..7]+2)>>2, bottom-left =
+            // (left[4..7]+2)>>2, bottom-right = (dc1+dc2+4)>>3.
+            // Single-side variants are PER-HALF-ROW/col, NOT one flat
+            // average: left_dc uses (left[0..3]+2)>>2 top /
+            // (left[4..7]+2)>>2 bottom; top_dc mirrors it.
+            match (t_ok, l_ok) {
                 (true, true) => {
-                    (top.iter().map(|&v| v as u32).sum::<u32>()
-                        + left.iter().map(|&v| v as u32).sum::<u32>()
-                        + 8)
-                        >> 4
+                    let dc0 = (top[0] as u32 + top[1] as u32 + top[2] as u32 + top[3] as u32
+                        + left[0] as u32 + left[1] as u32 + left[2] as u32 + left[3] as u32
+                        + 4)
+                        >> 3;
+                    let dc1 = (top[4] as u32 + top[5] as u32 + top[6] as u32 + top[7] as u32 + 2)
+                        >> 2;
+                    let dc2 =
+                        (left[4] as u32 + left[5] as u32 + left[6] as u32 + left[7] as u32 + 2)
+                            >> 2;
+                    // C averages the RAW sums (dc1/dc2 still hold
+                    // 4-sample sums at this point), not the /4 values.
+                    let dc3 = (dc1 * 4 + dc2 * 4 + 4) >> 3;
+                    for r in 0..8 {
+                        for c in 0..8 {
+                            let v = if r < 4 {
+                                if c < 4 { dc0 } else { dc1 }
+                            } else if c < 4 {
+                                dc2
+                            } else {
+                                dc3
+                            };
+                            dst[r * dstride + c] = v as u8;
+                        }
+                    }
                 }
-                (true, false) => (top.iter().map(|&v| v as u32).sum::<u32>() + 4) >> 3,
-                (false, true) => (left.iter().map(|&v| v as u32).sum::<u32>() + 4) >> 3,
-                (false, false) => 128,
-            };
-            for r in 0..8 {
-                for c in 0..8 {
-                    dst[r * dstride + c] = dc as u8;
+                (false, true) => {
+                    let dc0 =
+                        (left[0] as u32 + left[1] as u32 + left[2] as u32 + left[3] as u32 + 2)
+                            >> 2;
+                    let dc2 =
+                        (left[4] as u32 + left[5] as u32 + left[6] as u32 + left[7] as u32 + 2)
+                            >> 2;
+                    for r in 0..8 {
+                        let v = if r < 4 { dc0 } else { dc2 };
+                        for c in 0..8 {
+                            dst[r * dstride + c] = v as u8;
+                        }
+                    }
+                }
+                (true, false) => {
+                    let dc0 =
+                        (top[0] as u32 + top[1] as u32 + top[2] as u32 + top[3] as u32 + 2) >> 2;
+                    let dc1 =
+                        (top[4] as u32 + top[5] as u32 + top[6] as u32 + top[7] as u32 + 2) >> 2;
+                    for r in 0..8 {
+                        for c in 0..8 {
+                            let v = if c < 4 { dc0 } else { dc1 };
+                            dst[r * dstride + c] = v as u8;
+                        }
+                    }
+                }
+                (false, false) => {
+                    for r in 0..8 {
+                        for c in 0..8 {
+                            dst[r * dstride + c] = 128;
+                        }
+                    }
                 }
             }
         }
