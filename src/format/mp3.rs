@@ -602,7 +602,11 @@ mod tests {
         for _ in 0..8 {
             data.extend_from_slice(&frame());
         }
-        let path = std::env::temp_dir().join("ffmpeg_rs_mp3_gapless_test.mp3");
+        // pid-suffixed: concurrent suite runs must not share the file.
+        let path = std::env::temp_dir().join(format!(
+            "ffmpeg_rs_mp3_gapless_test_{}.mp3",
+            std::process::id()
+        ));
         std::fs::write(&path, &data).unwrap();
         let mut ictx = crate::format::InputFormatContext::open(
             path.to_str().unwrap(),

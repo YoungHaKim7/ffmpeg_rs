@@ -46,7 +46,17 @@ struct Fixture {
 impl Fixture {
     fn new(name: &str) -> Option<Fixture> {
         let ffmpeg = system_ffmpeg()?;
-        let dir = std::env::temp_dir().join(format!("ffmpeg_rs_golden_{name}"));
+        // Unique per process AND per instance: a fixed `ffmpeg_rs_golden_<name>`
+        // dir is shared by every concurrent run of the suite (nextest's
+        // process-per-test, or two checkouts/sessions testing at once), so one
+        // run's ffmpeg overwrote ref.raw/out.raw while another read it —
+        // intermittent half-length outputs. Removed again on drop.
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "ffmpeg_rs_golden_{name}_{}_{seq}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).ok()?;
         Some(Fixture {
             dir,
@@ -58,6 +68,18 @@ impl Fixture {
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // Keep the files when a test failed, so they can be inspected.
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
+impl Fixture {
 
     fn run_ffmpeg(&self, args: &[&str]) {
         let out = Command::new(self.ffmpeg)
