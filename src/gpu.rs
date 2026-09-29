@@ -110,10 +110,7 @@ impl ComputeGpu {
         )
         .map_err(|e| Error::Unsupported(format!("creating Vulkan device: {e}")))?;
         // Newer vulkano hands the created queues back as a Vec.
-        let queue = queues
-            .into_iter()
-            .next()
-            .expect("one queue was requested");
+        let queue = queues.into_iter().next().expect("one queue was requested");
 
         Ok(ComputeGpu {
             memory_allocator: Arc::new(StandardMemoryAllocator::new(&device, &Default::default())),

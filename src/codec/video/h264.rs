@@ -1796,9 +1796,14 @@ impl H264Decoder {
                 }
             }
             let mode = self.intra16x16_pred_mode;
+            let lt = if top_ok && left_ok {
+                pic.y[y0 - w - 1]
+            } else {
+                128
+            };
             let pic = self.cur.as_mut().unwrap();
             let mut mb_dst = [0u8; 256];
-            pred16x16_avail(mode, &mut mb_dst, &top, &left, top_ok, left_ok);
+            pred16x16_avail(mode, &mut mb_dst, &top, &left, top_ok, left_ok, lt);
             for r in 0..16 {
                 for c in 0..16 {
                     pic.y[y0 + r * w + c] = mb_dst[r * 16 + c];
@@ -1849,11 +1854,10 @@ impl H264Decoder {
                     pic.y[y0 + 15 * w + 15]
                 );
             }
-            // chroma residual (C gates the whole section on cbp & 0x30)
+            // chroma residual (C gates the whole section on cbp & 0x30;
+            // idct_add8's DC-only branch needs it too)
             if self.cbp & 0x30 != 0 {
                 self.apply_chroma_dc();
-            }
-            if self.cbp & 0x20 != 0 {
                 self.apply_chroma_ac(c0, w);
             }
             return Ok(());
@@ -1967,7 +1971,9 @@ impl H264Decoder {
         if self.cbp & 0x30 != 0 {
             self.apply_chroma_dc();
         }
-        if self.cbp & 0x20 != 0 {
+        // C's idct_add8 runs for cbp & 0x30 (ANY chroma bit) — DC-only
+        // blocks reach the pixels through its nnz==0/DC!=0 branch.
+        if self.cbp & 0x30 != 0 {
             self.apply_chroma_ac(c0, w);
         }
         Ok(())
@@ -2019,7 +2025,9 @@ impl H264Decoder {
         if self.cbp & 0x30 != 0 {
             self.apply_chroma_dc();
         }
-        if self.cbp & 0x20 != 0 {
+        // C's idct_add8 runs for cbp & 0x30 (ANY chroma bit) — DC-only
+        // blocks reach the pixels through its nnz==0/DC!=0 branch.
+        if self.cbp & 0x30 != 0 {
             self.apply_chroma_ac(c0, w);
         }
     }
@@ -2080,7 +2088,19 @@ impl H264Decoder {
             let base = 16 * (16 + 16 * ch);
             let mut block64 = [0i16; 64];
             block64.copy_from_slice(&self.mb[base..base + 64]);
+            if std::env::var_os("H264_DUMP").is_some() && self.mb_x == 1 && self.mb_y == 0 {
+                eprintln!(
+                    "  CDC ch{ch} raw a,b,c,d = {},{},{},{} q={q} qmul={qmul}",
+                    block64[0], block64[16], block64[32], block64[48]
+                );
+            }
             chroma_dc_dequant_idct(&mut block64, qmul);
+            if std::env::var_os("H264_DUMP").is_some() && self.mb_x == 1 && self.mb_y == 0 {
+                eprintln!(
+                    "  CDC ch{ch} out {},{},{},{}",
+                    block64[0], block64[16], block64[32], block64[48]
+                );
+            }
             self.mb[base..base + 64].copy_from_slice(&block64);
         }
     }
@@ -2947,7 +2967,7 @@ fn table_rows(prefix: &str, n_rows: usize, width: usize) -> Vec<(Vec<u8>, Vec<u8
 
 /// 16x16 luma intra prediction (mode 0=V,1=H,2=DC,3=plane). `top`/`left`
 /// have 16 samples; availability pre-applied (DC_128 etc. by caller).
-fn pred16x16(mode: i32, dst: &mut [u8], top: &[u8; 16], left: &[u8; 16]) {
+fn pred16x16(mode: i32, dst: &mut [u8], top: &[u8; 16], left: &[u8; 16], lt: u8) {
     match mode {
         0 => {
             for r in 0..16 {
@@ -2969,13 +2989,21 @@ fn pred16x16(mode: i32, dst: &mut [u8], top: &[u8; 16], left: &[u8; 16]) {
         }
         3 => {
             // plane prediction (spec 8.3.3.1.4)
+            // C pred16x16_plane: top[−1] / left[−1] are the top-left
+            // corner sample (the old top[6−i] underflowed at i=7).
             let mut h = 0i32;
-            for i in 0..8 {
-                h += (i as i32 + 1) * (top[8 + i] as i32 - top[6 - i] as i32);
+            for i in 0..8usize {
+                let lo = if i == 7 { lt as i32 } else { top[6 - i] as i32 };
+                h += (i as i32 + 1) * (top[8 + i] as i32 - lo);
             }
             let mut v = 0i32;
-            for i in 0..8 {
-                v += (i as i32 + 1) * (left[8 + i] as i32 - left[6 - i] as i32);
+            for i in 0..8usize {
+                let lo = if i == 7 {
+                    lt as i32
+                } else {
+                    left[6 - i] as i32
+                };
+                v += (i as i32 + 1) * (left[8 + i] as i32 - lo);
             }
             let a = 16 * (top[15] as i32 + left[15] as i32);
             let b = (5 * h + 32) >> 6;
@@ -3018,7 +3046,7 @@ fn pred8x8(mode: i32, dst: &mut [u8], top: &[u8; 8], left: &[u8; 8], lt: u8, lb:
                 dst[r * 8..r * 8 + 8].copy_from_slice(top);
             }
         }
-        3 => pred8x8_plane(dst, top, left, lt, lb),
+        3 => pred8x8_plane(dst, 8, top, left, lt, lb),
         _ => unreachable!(),
     }
 }
@@ -3027,30 +3055,32 @@ fn pred8x8(mode: i32, dst: &mut [u8], top: &[u8; 8], left: &[u8; 8], lt: u8, lb:
 /// extended by the top-LEFT sample at src0[-1]; V the left column plus
 /// two rows below the last (clamped to left[7] — C reads the MB below,
 /// which for edge MBs the border-fill already replicated).
-fn pred8x8_plane(dst: &mut [u8], top: &[u8; 8], left: &[u8; 8], lt: u8, lb: u8) {
+fn pred8x8_plane(dst: &mut [u8], dstride: usize, top: &[u8; 8], left: &[u8; 8], lt: u8, lb: u8) {
+    // h264pred_template.c pred8x8_plane: src0 = top row at x=3, src1/src2
+    // walk the left column down/up. top[−1] and left[−1] are BOTH the
+    // top-left corner sample; lb (below-left) is never read.
+    let _ = lb;
     let t = |i: i32| -> i32 {
         if i < 0 {
-            lt as i32 // border fill replicates the top-left leftward
+            lt as i32
         } else {
             top[i as usize] as i32
         }
     };
-    let l7 = left[7] as i32;
     let l = |i: i32| -> i32 {
-        if i > 7 {
-            l7
-        } else if i < 0 {
-            lb as i32 // left[-1]: one row below the top-left sample
+        if i < 0 {
+            lt as i32
         } else {
             left[i as usize] as i32
         }
     };
-    let mut h = t(1) - t(-1);
+    // H = top[4]-top[2] + 2*(top[5]-top[1]) + 3*(top[6]-top[0]) + 4*(top[7]-lt)
+    let mut h = t(4) - t(2);
     let mut v = l(4) - l(2);
     let mut k = 2i32;
     while k <= 4 {
-        h += k * (t(k) - t(-k));
-        v += k * (l(4 + k - 1) - l(4 - k - 1));
+        h += k * (t(3 + k) - t(3 - k));
+        v += k * (l(3 + k) - l(3 - k));
         k += 1;
     }
     let h = (17 * h + 16) >> 5;
@@ -3058,7 +3088,7 @@ fn pred8x8_plane(dst: &mut [u8], top: &[u8; 8], left: &[u8; 8], lt: u8, lb: u8) 
     let a = 16 * (l(7) + t(7) + 1) - 3 * (v + h);
     for y in 0..8i32 {
         for x in 0..8i32 {
-            dst[(y * 8 + x) as usize] = clip8((a + y * v + x * h) >> 5);
+            dst[(y as usize) * dstride + x as usize] = clip8((a + y * v + x * h) >> 5);
         }
     }
 }
@@ -3676,6 +3706,7 @@ fn pred16x16_avail(
     left: &[u8; 16],
     t_ok: bool,
     l_ok: bool,
+    lt: u8,
 ) {
     match mode {
         0 => {
@@ -3707,7 +3738,7 @@ fn pred16x16_avail(
                 dst[r * 16..r * 16 + 16].copy_from_slice(&[left[r]; 16]);
             }
         }
-        3 => pred16x16(3, dst, top, left),
+        3 => pred16x16(3, dst, top, left, lt),
         4 => {
             let dc = (left.iter().map(|&v| v as u32).sum::<u32>() + 8) / 16;
             for r in 0..16 {
@@ -3775,7 +3806,7 @@ fn pred8x8_avail(
                 }
             }
         }
-        3 => pred8x8_plane(dst, top, left, lt, lb),
+        3 => pred8x8_plane(dst, dstride, top, left, lt, lb),
         _ => {
             for r in 0..8 {
                 for c in 0..8 {
