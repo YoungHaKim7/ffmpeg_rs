@@ -92,7 +92,7 @@ impl AudioFrame {
         format: SampleFormat,
         ch_layout: ChannelLayout,
         nb_samples: usize,
-    ) -> Result<AudioFrame, crate::util::error::Error> {
+    ) -> Result<AudioFrame, crate::Error> {
         let arrays = samplefmt::samples_fill_arrays(ch_layout.nb_channels, nb_samples, format, 0)?;
         // The auto-align (align=0) rounds the SAMPLE count to 32; every
         // plane gets the same linesize (c's per-channel line_size).
@@ -130,10 +130,10 @@ impl AudioFrame {
         format: SampleFormat,
         ch_layout: ChannelLayout,
         nb_samples: usize,
-    ) -> Result<AudioFrame, crate::util::error::Error> {
+    ) -> Result<AudioFrame, crate::Error> {
         let arrays = samplefmt::samples_fill_arrays(ch_layout.nb_channels, nb_samples, format, 1)?;
         if buf.len() < arrays.buf_size {
-            return Err(crate::util::error::Error::BufferTooSmall);
+            return Err(crate::Error::BufferTooSmall);
         }
         let planes = arrays
             .plane_offsets

@@ -32,10 +32,8 @@ use crate::{
         packet::{Packet, PacketFlags},
         params::CodecId,
     },
-    util::{
-        error::{Error, Result},
-        rational::Rational,
-    },
+    fferror::{Error, Result},
+    util::rational::Rational,
 };
 
 use super::{

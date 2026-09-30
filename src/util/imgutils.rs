@@ -15,9 +15,9 @@
 //!   plain sum of plane sizes.
 
 use super::{
-    error::{Error, Result},
     pixdesc::{PixFmtDescriptor, descriptor},
     pixfmt::PixelFormat,
+    {Error, Result},
 };
 
 /// `AV_CEIL_RSHIFT(a, b)` — ceil(a / 2^b).

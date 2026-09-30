@@ -24,8 +24,9 @@
 //! unless `max_buffered_frames` is set).
 
 use crate::{
+    fferror::Error,
     log_warning,
-    util::{NOPTS, error::Error, frame::Frame, mathematics, rational::Rational},
+    util::{NOPTS, frame::Frame, mathematics, rational::Rational},
 };
 
 use super::{

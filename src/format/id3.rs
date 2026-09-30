@@ -5,7 +5,7 @@
 //! `ff_id3v2_read`-with-no-callbacks shape. `libavformat/aacdec.c` also
 //! meets ID3v2 tags *between* frames and re-syncs past them.
 
-use crate::util::error::{Error, Result};
+use crate::fferror::{Error, Result};
 
 use super::io::IoContext;
 

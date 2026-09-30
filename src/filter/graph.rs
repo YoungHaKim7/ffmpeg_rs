@@ -18,11 +18,11 @@
 //! `scale_sws_opts` survives as a plain field).
 
 use crate::{
+    fferror::{Error, Result},
     log_error, log_verbose,
     swscale::{ScaleAlgorithm, ScaleEngine},
     util::{
         color::{ColorRange, ColorSpace},
-        error::{Error, Result},
         frame::Frame,
         pixfmt::PixelFormat,
         rational::Rational,

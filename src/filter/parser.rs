@@ -85,8 +85,8 @@
 //!   `from_utf8_lossy` rather than panicking.
 
 use crate::{
+    fferror::{Error, Result},
     log_debug, log_error,
-    util::error::{Error, Result},
 };
 
 use super::{

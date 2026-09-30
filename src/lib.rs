@@ -108,6 +108,7 @@
 //! ```
 
 pub mod codec;
+pub mod fferror;
 pub mod fftools;
 pub mod filter;
 pub mod format;
@@ -119,11 +120,11 @@ pub mod util;
 
 // Crate-root re-exports mirroring how C includes libavutil headers:
 // `use crate::{Error, Result, Frame, PixelFormat, Rational}`.
+pub use fferror::{Error, Result};
 pub use filter::{FilterGraph, LinkId, NodeId};
 pub use util::{
     NOPTS,
     color::{ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTrc},
-    error::{Error, Result},
     frame::{Frame, FrameFlags, PictureType},
     imgutils, mathematics,
     pixfmt::PixelFormat,

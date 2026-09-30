@@ -19,9 +19,9 @@ use std::collections::VecDeque;
 
 use crate::{
     NOPTS,
+    fferror::Error,
     util::{
         color::{ColorRange, ColorSpace},
-        error::Error,
         frame::Frame,
         pixfmt::PixelFormat,
         rational::Rational,

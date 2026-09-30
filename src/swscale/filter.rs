@@ -64,9 +64,9 @@
 //! * MMX vertical-filter packing, FAST_BILINEAR `xInc ± 20` hacks
 //!   (`utils.c:1441-1451`), `emms_c()` — SIMD-only.
 
-use crate::util::{
-    color::ChromaLocation,
-    error::{Error, Result},
+use crate::{
+    fferror::{Error, Result},
+    util::color::ChromaLocation,
 };
 
 use super::ScaleAlgorithm;

@@ -26,10 +26,10 @@ use crate::{
         packet::{Packet, PacketFlags},
         params::{CodecId, FieldOrder},
     },
+    fferror::{Error, Result},
     imgutils, log_error,
     util::{
         color::{ChromaLocation, ColorRange},
-        error::{Error, Result},
         pixfmt::PixelFormat,
         rational::Rational,
     },

@@ -62,9 +62,10 @@
 mod expr;
 
 use crate::{
-    NOPTS, log_error, log_verbose,
+    NOPTS,
+    fferror::{Error, Result},
+    log_error, log_verbose,
     util::{
-        error::{Error, Result},
         frame::Frame,
         pixdesc::{self, PixFmtDescriptor},
         rational::Rational,

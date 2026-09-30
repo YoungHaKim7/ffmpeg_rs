@@ -43,19 +43,11 @@ mod picture;
 mod tables;
 mod vlc;
 
-use crate::{
-    codec::{
-        packet::Packet,
-        params::{CodecId, CodecParameters},
-        traits::Decoder,
-    },
-    util::error::{Error, Result},
-    util::frame::Frame,
-};
+use crate::fferror::{Error, Result};
 
 use decoder::H264Decoder;
 use picture::Picture;
-use vlc::{Cavlc, cavlc};
+use vlc::Cavlc;
 
 use deblock::{MbDeblock, PART_16X16};
 use tables::*;
@@ -1720,7 +1712,12 @@ fn type_mask_nnz(t: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::{
+        Frame,
+        codec::{
+            CodecId, CodecParameters, Packet, traits::Decoder, video::h264::decoder::H264Decoder,
+        },
+    };
 
     fn decode_file(path: &str) -> Vec<Frame> {
         let data = match std::fs::read(path) {

@@ -19,13 +19,9 @@
 //! inputs/outputs.
 
 use crate::{
+    fferror::{Error, Result},
     swscale::{ScaleAlgorithm, ScaleEngine},
-    util::{
-        error::{Error, Result},
-        log::Level,
-        pixfmt::PixelFormat,
-        rational::Rational,
-    },
+    util::{log::Level, pixfmt::PixelFormat, rational::Rational},
 };
 
 const USAGE: &str = "\

@@ -76,9 +76,9 @@ pub mod resample;
 pub mod version;
 
 use crate::{
+    fferror::{Error, Result},
     util::{
         channel_layout::{ChannelLayout, Order},
-        error::{Error, Result},
         samplefmt::SampleFormat,
     },
     {log_debug, log_error, log_verbose, log_warning},

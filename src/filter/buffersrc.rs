@@ -88,10 +88,11 @@
 use std::any::Any;
 
 use crate::{
-    NOPTS, log_debug, log_error, log_verbose, log_warning,
+    NOPTS,
+    fferror::{Error, Result},
+    log_debug, log_error, log_verbose, log_warning,
     util::{
         color::{ColorRange, ColorSpace},
-        error::{Error, Result},
         frame::Frame,
         pixfmt::PixelFormat,
         rational::Rational,

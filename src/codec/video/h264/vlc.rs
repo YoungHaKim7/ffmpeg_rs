@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use super::table_rows;
 use super::tables::*;
 use super::{Gb, LEVEL_TAB_BITS};
-use crate::util::error::{Error, Result};
+use crate::fferror::{Error, Result};
 
 pub(super) struct Vlc {
     max_len: u32,

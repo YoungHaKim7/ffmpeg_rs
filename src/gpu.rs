@@ -33,7 +33,7 @@ use vulkano::{
 
 pub(crate) mod usage;
 
-use crate::util::error::{Error, Result};
+use crate::fferror::{Error, Result};
 
 /// Everything a compute-only run needs; no winit, no surface.
 pub struct ComputeGpu {

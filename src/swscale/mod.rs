@@ -59,12 +59,14 @@
 pub mod filter;
 pub mod vulkan;
 
-use crate::util::{
-    color::{ChromaLocation, ColorRange},
-    error::{Error, Result},
-    frame::Frame,
-    pixdesc,
-    pixfmt::PixelFormat,
+use crate::{
+    fferror::{Error, Result},
+    util::{
+        color::{ChromaLocation, ColorRange},
+        frame::Frame,
+        pixdesc,
+        pixfmt::PixelFormat,
+    },
 };
 
 /// The packed-RGB outputs `scale` can emit.

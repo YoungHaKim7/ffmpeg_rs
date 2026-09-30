@@ -25,11 +25,8 @@ use crate::{
         packet::{Packet, PacketFlags},
         params::CodecId,
     },
-    util::{
-        channel_layout::ChannelLayout,
-        error::{Error, Result},
-        rational::Rational,
-    },
+    fferror::{Error, Result},
+    util::{channel_layout::ChannelLayout, rational::Rational},
 };
 
 use super::{

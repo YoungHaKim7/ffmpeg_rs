@@ -20,7 +20,10 @@
 //!   that the port's vflip output is always a private buffer (C may forward
 //!   a buffer whose stride is negative, which downstream C code accepts).
 
-use crate::util::{error::Result, frame::Frame, pixdesc, pixfmt::PixelFormat};
+use crate::{
+    fferror::Result,
+    util::{frame::Frame, pixdesc, pixfmt::PixelFormat},
+};
 
 use super::{
     filter::{FilterDef, FilterFlags, FilterImpl, PadDef, PadRef, filter_frame},
@@ -300,8 +303,9 @@ impl FilterImpl for VFlipContext {
 mod tests {
     use super::*;
     use crate::{
+        Error,
         filter::{filter_def, link::LinkId},
-        util::{error::Error, rational::Rational},
+        util::rational::Rational,
     };
 
     /// buffer(pix_fmt WxH, tb 1/25) → filter(args) → buffersink.

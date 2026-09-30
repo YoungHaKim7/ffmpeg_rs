@@ -65,12 +65,8 @@ use crate::{
         params::{CodecId, CodecParameters, MediaType},
         traits::{AudioDecoder, AudioEncoder},
     },
-    util::{
-        audio_frame::AudioFrame,
-        error::{Error, Result},
-        rational::Rational,
-        samplefmt::SampleFormat,
-    },
+    fferror::{Error, Result},
+    util::{audio_frame::AudioFrame, rational::Rational, samplefmt::SampleFormat},
 };
 
 /// One row of C's `codec_id_to_samplefmt[]` (`pcm.c:268-292`): codec →

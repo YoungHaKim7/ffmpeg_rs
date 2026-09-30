@@ -23,6 +23,7 @@ use crate::{
         rawvideo::{RawVideoDecoder, RawVideoEncoder},
         traits::{Decoder, Encoder},
     },
+    fferror::{Error, Result},
     filter::{FilterGraph, NodeId, buffersink},
     format::{
         demux::DemuxOptions,
@@ -32,7 +33,6 @@ use crate::{
     swscale::{ScaleAlgorithm, ScaleContext, ScaleEngine, ScaleOptions},
     util::{
         color::{ColorRange, ColorSpace},
-        error::{Error, Result},
         frame::Frame,
         imgutils, log, pixdesc,
         pixfmt::PixelFormat,

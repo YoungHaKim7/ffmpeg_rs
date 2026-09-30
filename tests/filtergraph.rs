@@ -73,10 +73,7 @@ fn frames_flow_through_the_graph_untouched() {
 
     // EOF: close propagates; the sink then reports Eof, not Again.
     g.close_source(src).unwrap();
-    assert!(matches!(
-        g.get_frame(sink),
-        Err(ffmpeg_rs::util::error::Error::Eof)
-    ));
+    assert!(matches!(g.get_frame(sink), Err(ffmpeg_rs::Error::Eof)));
 }
 
 #[test]

@@ -17,12 +17,9 @@ use crate::{
         packet::{Packet, PacketFlags},
         params::{CodecId, MediaType},
     },
+    fferror::{Error, Result},
     imgutils, log_error,
-    util::{
-        error::{Error, Result},
-        mathematics,
-        rational::Rational,
-    },
+    util::{mathematics, rational::Rational},
 };
 
 use super::{

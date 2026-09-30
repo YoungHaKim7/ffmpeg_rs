@@ -56,10 +56,10 @@
 //!   negotiation.
 
 use crate::{
+    fferror::{Error, Result},
     log_error, log_warning,
     util::{
         color::{ColorRange, ColorSpace},
-        error::{Error, Result},
         frame::Frame,
         pixfmt::PixelFormat,
         rational::Rational,

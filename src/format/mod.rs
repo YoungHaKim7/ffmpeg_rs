@@ -43,10 +43,8 @@ use crate::{
         packet::Packet,
         params::{CodecParameters, MediaType},
     },
-    util::{
-        error::{Error, Result},
-        rational::Rational,
-    },
+    fferror::{Error, Result},
+    util::rational::Rational,
 };
 
 pub use demux::{DemuxOptions, Demuxer, InputFormat, PROBE_SCORE_MAX};

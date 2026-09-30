@@ -3,7 +3,7 @@
 
 use crate::{
     codec::{packet::Packet, params::CodecId},
-    util::error::Result,
+    fferror::Result,
 };
 
 use super::{Stream, io::IoContext};

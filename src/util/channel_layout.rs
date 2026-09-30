@@ -62,7 +62,7 @@
 //! no ported caller produces such strings. Everything else follows
 //! `strtoull(base 0)` semantics exactly, including octal `"010"` = 8.
 
-use super::error::{Error, Result};
+use super::{Error, Result};
 
 /// `channel_layout_map[]` (`c:190-231`) — the 40 `(name, layout)` pairs
 /// **in C table order**. The order is behavior: `describe()` first-match

@@ -22,7 +22,7 @@ use std::{
     path::Path,
 };
 
-use crate::util::error::{Error, Result};
+use crate::fferror::{Error, Result};
 
 /// The `URLProtocol` callback set (aviobuf.c's ffurl layer).
 pub trait IoHandler {

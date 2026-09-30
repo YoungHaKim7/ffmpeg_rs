@@ -42,11 +42,8 @@ use crate::{
         params::{CodecId, CodecParameters, MediaType},
         traits::AudioDecoder,
     },
-    util::{
-        channel_layout::ChannelLayout,
-        error::{Error, Result},
-        samplefmt::SampleFormat,
-    },
+    fferror::{Error, Result},
+    util::{channel_layout::ChannelLayout, samplefmt::SampleFormat},
 };
 
 mod tables;

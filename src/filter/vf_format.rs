@@ -54,10 +54,10 @@
 //! them there.
 
 use crate::{
+    fferror::{Error, Result},
     log_error,
     util::{
         color::{ColorRange, ColorSpace},
-        error::{Error, Result},
         frame::Frame,
         pixfmt::PixelFormat,
     },

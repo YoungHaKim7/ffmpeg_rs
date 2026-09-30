@@ -53,9 +53,9 @@
 //!   bytes past the channel's base — the port guards with exactly that (for
 //!   planar planes, where `stride == bps`, this coincides with `stride*len`).
 
-use crate::util::{
-    error::{Error, Result},
-    samplefmt::SampleFormat,
+use crate::{
+    fferror::{Error, Result},
+    util::samplefmt::SampleFormat,
 };
 
 use super::AudioData;

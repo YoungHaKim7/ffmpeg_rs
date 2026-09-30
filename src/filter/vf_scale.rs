@@ -104,11 +104,12 @@
 pub(crate) mod expr;
 
 use crate::{
-    NOPTS, log_error, log_verbose, log_warning,
+    NOPTS,
+    fferror::{Error, Result},
+    log_error, log_verbose, log_warning,
     swscale::{self, ScaleAlgorithm, ScaleContext as SwsScaler, ScaleEngine, ScaleOptions},
     util::{
         color::{ChromaLocation, ColorRange, ColorSpace},
-        error::{Error, Result},
         frame::{Frame, FrameFlags},
         mathematics,
         pixdesc::{self, PixFmtFlags},

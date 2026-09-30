@@ -18,7 +18,8 @@
 
 use crate::{
     codec::{packet::Packet, params::CodecParameters},
-    util::{audio_frame::AudioFrame, error::Result, frame::Frame},
+    fferror::Result,
+    util::{audio_frame::AudioFrame, frame::Frame},
 };
 
 /// Decoder interface (`FFCodec` with `FF_CODEC_DECODE_CB`).

@@ -102,9 +102,9 @@
 //!   the rendered text is identical, including `%f` → `{:.6}`.
 
 use crate::{
+    fferror::{Error, Result},
     util::{
         channel_layout::{Channel, ChannelLayout, Order},
-        error::{Error, Result},
         samplefmt::SampleFormat,
     },
     {log_debug, log_error, log_verbose, log_warning},

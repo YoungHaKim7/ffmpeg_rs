@@ -50,7 +50,7 @@
 //!   convention). Results near `INT_MAX` succeed here where C fails; a
 //!   semantic widening, harmless on 64-bit.
 
-use super::error::{Error, Result};
+use super::{Error, Result};
 
 /// `enum AVSampleFormat` (`samplefmt.h:55-80`) — all 13 formats.
 ///

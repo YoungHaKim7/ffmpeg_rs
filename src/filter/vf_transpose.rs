@@ -54,14 +54,9 @@
 //! port's list = `PixelFormat::ALL` filtered by the log2 equality.
 
 use crate::{
+    fferror::{Error, Result},
     log_error, log_verbose, log_warning,
-    util::{
-        error::{Error, Result},
-        frame::Frame,
-        pixdesc,
-        pixfmt::PixelFormat,
-        rational::Rational,
-    },
+    util::{frame::Frame, pixdesc, pixfmt::PixelFormat, rational::Rational},
 };
 
 use super::vf_crop::{ceil_rshift, fill_max_pixsteps};

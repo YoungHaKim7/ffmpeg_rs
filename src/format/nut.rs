@@ -152,13 +152,9 @@ use crate::{
         packet::{Packet, PacketFlags},
         params::{CodecId, MediaType},
     },
+    fferror::{Error, Result},
     log_error, log_verbose, log_warning,
-    util::{
-        channel_layout::ChannelLayout,
-        error::{Error, Result},
-        pixfmt::PixelFormat,
-        rational::Rational,
-    },
+    util::{channel_layout::ChannelLayout, pixfmt::PixelFormat, rational::Rational},
 };
 
 use super::{

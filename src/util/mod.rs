@@ -20,7 +20,6 @@
 pub mod audio_frame;
 pub mod channel_layout;
 pub mod color;
-pub mod error;
 pub mod frame;
 pub mod imgutils;
 pub mod log;
@@ -30,7 +29,7 @@ pub mod pixfmt;
 pub mod rational;
 pub mod samplefmt;
 
-pub use error::{Error, Result};
+pub use crate::{Error, Result};
 pub use frame::{Frame, PictureType};
 pub use pixfmt::PixelFormat;
 pub use rational::Rational;

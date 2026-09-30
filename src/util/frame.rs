@@ -37,10 +37,10 @@ use std::sync::Arc;
 
 use super::{
     color::{ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTrc},
-    error::{Error, Result},
     imgutils,
     pixfmt::PixelFormat,
     rational::Rational,
+    {Error, Result},
 };
 
 /// `AV_NOPTS_VALUE` re-exported for frame users.

@@ -103,12 +103,8 @@ use crate::{
         params::{CodecId, CodecParameters, MediaType},
         traits::AudioDecoder,
     },
-    util::{
-        audio_frame::AudioFrame,
-        channel_layout::ChannelLayout,
-        error::{Error, Result},
-        samplefmt::SampleFormat,
-    },
+    fferror::{Error, Result},
+    util::{audio_frame::AudioFrame, channel_layout::ChannelLayout, samplefmt::SampleFormat},
 };
 
 static TABLES: std::sync::OnceLock<Tables> = std::sync::OnceLock::new();

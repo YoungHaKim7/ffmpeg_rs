@@ -34,11 +34,11 @@ use vulkano::{
 };
 
 use crate::{
+    fferror::{Error, Result},
     gpu::{self, ComputeGpu},
     shaders::scale_cs,
     util::{
         color::{ChromaLocation, ColorRange},
-        error::{Error, Result},
         frame::Frame,
         pixdesc,
     },

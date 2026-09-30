@@ -107,10 +107,10 @@ use crate::{
         packet::Packet,
         params::{CodecId, CodecParameters, MediaType},
     },
+    fferror::{Error, Result},
     log_error, log_warning,
     util::{
         channel_layout::{ChannelLayout, Order},
-        error::{Error, Result},
         rational::Rational,
     },
 };

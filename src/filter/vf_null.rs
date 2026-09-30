@@ -12,7 +12,7 @@
 //! has no Rust counterpart flag — ownership transfer IS the metadata-only
 //! semantics here.
 
-use crate::util::{error::Result, frame::Frame};
+use crate::{fferror::Result, util::frame::Frame};
 
 use super::{
     filter::{FilterDef, FilterFlags, FilterImpl, PadDef, filter_frame},

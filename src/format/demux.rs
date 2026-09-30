@@ -9,7 +9,8 @@
 
 use crate::{
     codec::packet::Packet,
-    util::{error::Result, pixfmt::PixelFormat, rational::Rational},
+    fferror::Result,
+    util::{pixfmt::PixelFormat, rational::Rational},
 };
 
 use super::{Stream, io::IoContext};

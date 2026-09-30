@@ -83,11 +83,13 @@
 //!   [`realloc_audio`] grows by doubling without the padding (invisible to
 //!   every caller — same reasoning as `AudioData`'s own doc in `mod.rs`).
 
-use crate::util::{
-    error::{Error, Result},
-    mathematics::{Rounding, rescale, rescale_rnd},
-    rational::Rational,
-    samplefmt::SampleFormat,
+use crate::{
+    fferror::{Error, Result},
+    util::{
+        mathematics::{Rounding, rescale, rescale_rnd},
+        rational::Rational,
+        samplefmt::SampleFormat,
+    },
 };
 
 use super::AudioData;

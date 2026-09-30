@@ -9,7 +9,7 @@ use crate::{
         params::{CodecId, CodecParameters, MediaType},
         traits::Decoder,
     },
-    util::error::{Error, Result},
+    fferror::{Error, Result},
     util::frame::Frame,
 };
 

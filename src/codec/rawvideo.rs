@@ -32,9 +32,9 @@ use crate::{
         params::{CodecId, CodecParameters, MediaType},
         traits::{Decoder, Encoder},
     },
+    fferror::{Error, Result},
     imgutils, log_error, mathematics,
     util::{
-        error::{Error, Result},
         frame::{Frame, FrameFlags, PictureType},
         rational::Rational,
     },
