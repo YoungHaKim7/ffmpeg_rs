@@ -625,7 +625,7 @@ impl H264Decoder {
                 let bxy = 4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
                 for c in 0..4 {
                     self.mv_cache[top0 + c] = pic.mv[bxy + c];
-                    self.ref_cache[top0 + c] = pic.ref_index[4 * top_xy + 2 + (c >> 1)];
+                    self.ref_cache[top0 + c] = pic.ref_pic[4 * top_xy + 2 + (c >> 1)] as i8;
                 }
             } else {
                 for c in 0..4 {
@@ -637,7 +637,7 @@ impl H264Decoder {
             if uses(self.n_topright) {
                 let bxy = 4 * (self.mb_x + 1) + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
                 self.mv_cache[tr] = pic.mv[bxy];
-                self.ref_cache[tr] = pic.ref_index[4 * (top_xy + 1) + 2];
+                self.ref_cache[tr] = pic.ref_pic[4 * (top_xy + 1) + 2] as i8;
             } else {
                 self.mv_cache[tr] = [0, 0];
                 self.ref_cache[tr] = fill_edge(self.n_topright);
@@ -646,7 +646,7 @@ impl H264Decoder {
             if uses(self.n_topleft) {
                 let bxy = 4 * (self.mb_x - 1) + 4 * (self.mb_y - 1) * b_stride + 3 + 3 * b_stride;
                 self.mv_cache[tl] = pic.mv[bxy];
-                self.ref_cache[tl] = pic.ref_index[4 * (top_xy - 1) + 3];
+                self.ref_cache[tl] = pic.ref_pic[4 * (top_xy - 1) + 3] as i8;
             } else {
                 self.mv_cache[tl] = [0, 0];
                 self.ref_cache[tl] = fill_edge(self.n_topleft);
@@ -658,7 +658,7 @@ impl H264Decoder {
                         + 3
                         + i * b_stride;
                     self.mv_cache[3 + 8 * (1 + i)] = pic.mv[bxy];
-                    self.ref_cache[3 + 8 * (1 + i)] = pic.ref_index[4 * left_xy + 1 + 2 * (i >> 1)];
+                    self.ref_cache[3 + 8 * (1 + i)] = pic.ref_pic[4 * left_xy + 1 + 2 * (i >> 1)] as i8;
                 } else if self.n_left != MB_UNAVAIL {
                     self.mv_cache[3 + 8 * (1 + i)] = [0, 0];
                     self.ref_cache[3 + 8 * (1 + i)] = -1;
@@ -1219,6 +1219,16 @@ impl H264Decoder {
             Part::P16x16 => {
                 let r0 = read_ref(gb)?;
                 let f0 = self.ref_frm(r0);
+                if std::env::var_os("H264_DUMP").is_some() && self.slice_frame_num == 1 {
+                    let i0 = SCAN8[0];
+                    eprintln!(
+                        "  P16 mb={}:{} r0={r0} f0={f0} L=({},{}) rL={} T=({},{}) rT={} C=({},{}) rC={}",
+                        self.mb_x, self.mb_y,
+                        self.mv_cache[i0 - 1][0], self.mv_cache[i0 - 1][1], self.ref_cache[i0 - 1],
+                        self.mv_cache[i0 - 8][0], self.mv_cache[i0 - 8][1], self.ref_cache[i0 - 8],
+                        self.mv_cache[i0 - 4][0], self.mv_cache[i0 - 4][1], self.ref_cache[i0 - 4]
+                    );
+                }
                 set_ref(&mut self.ref_cache, 0, 0, 4, 4, f0);
                 let (mx, my) = self.pred_motion(0, 4, f0);
                 let (dx, dy) = read_mvd(gb)?;
