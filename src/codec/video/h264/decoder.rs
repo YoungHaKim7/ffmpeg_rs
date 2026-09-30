@@ -3,100 +3,105 @@
 // ---------------------------------------------------------------------
 
 use crate::{
-    Error, Frame, PixelFormat,
+    PixelFormat,
     codec::{
-        CodecParameters,
+        packet::Packet,
+        params::{CodecId, CodecParameters, MediaType},
         traits::Decoder,
-        video::h264::{
-            CHROMA_DC, CHROMA_QP8, DC_PRED, Gb, I4_DC_128_PRED, I4_LEFT_DC_PRED, I4_TOP_DC_PRED,
-            LUMA_DC, MB_INTER, MB_INTRA4X4, MB_INTRA16X16, MB_PCM, MB_UNAVAIL, MbDeblock, Nal,
-            PART_16X16, Part, PlaneSel, Pps, SCAN8, Sps, ZIGZAG, chroma_dc_dequant_idct,
-            deblock::{self, PART_8X8, PART_8X16, PART_16X8},
-            decode_residual, idct_add, idct_dc_add, luma_dc_dequant_idct, mc_chroma, mc_luma,
-            mid_pred,
-            picture::Picture,
-            pred4x4, pred8x8_avail, pred16x16_avail, scan_shift1,
-            tables::{
-                CHROMA_DC_SCAN, GOLOMB_TO_INTER_CBP, GOLOMB_TO_INTRA4X4_CBP, GOLOMB_TO_PICT_TYPE,
-                I_MB_TYPE_INFO,
-            },
-            type_mask_nnz,
-        },
     },
+    util::error::{Error, Result},
+    util::frame::Frame,
+};
+
+use super::vlc::cavlc;
+use super::{
+    CHROMA_DC, CHROMA_QP8, DC_PRED, Gb, I4_DC_128_PRED, I4_LEFT_DC_PRED, I4_TOP_DC_PRED, LUMA_DC,
+    MB_INTER, MB_INTRA4X4, MB_INTRA16X16, MB_PCM, MB_UNAVAIL, MbDeblock, Nal, PART_16X16, Part,
+    PlaneSel, Pps, SCAN8, Sps, ZIGZAG, chroma_dc_dequant_idct, deblock,
+    deblock::{PART_8X8, PART_8X16, PART_16X8},
+    decode_residual, idct_add, idct_dc_add, luma_dc_dequant_idct, mc_chroma, mc_luma, mid_pred,
+    parse_pps, parse_sps,
+    picture::Picture,
+    pred4x4, pred8x8_avail, pred16x16_avail, scan_shift1, split_nals,
+    tables::{
+        CHROMA_DC_SCAN, GOLOMB_TO_INTER_CBP, GOLOMB_TO_INTRA4X4_CBP, GOLOMB_TO_PICT_TYPE,
+        I_MB_TYPE_INFO,
+    },
+    type_mask_nnz,
 };
 
 pub struct H264Decoder {
-    sps: Option<Sps>,
-    pps: Option<Pps>,
-    params: CodecParameters,
-    pending: std::collections::VecDeque<Frame>,
-    eof: bool,
+    pub(super) sps: Option<Sps>,
+    pub(super) pps: Option<Pps>,
+    pub(super) params: CodecParameters,
+    pub(super) pending: std::collections::VecDeque<Frame>,
+    pub(super) eof: bool,
     // picture state
-    cur: Option<Picture>,
+    pub(super) cur: Option<Picture>,
     /// Short-term reference DPB, newest first (sliding window of
     /// max_num_ref_frames; C's h264_refs.c without MMCO/long-term).
-    refs: Vec<Picture>,
+    pub(super) refs: Vec<Picture>,
     /// RefPicList0 for the current slice: indices into `refs`.
-    ref_list: Vec<usize>,
+    pub(super) ref_list: Vec<usize>,
     /// num_ref_idx_l0_active for the current slice (PPS default or the
     /// slice-header override).
     ref_count_l0: u32,
     /// Parsed ref_pic_list_modification ops (idc, value), applied after
     /// the previous picture enters the DPB.
-    reorder_ops: Vec<(u32, u32)>,
+    pub(super) reorder_ops: Vec<(u32, u32)>,
     /// frame_num from the slice header being decoded.
-    slice_frame_num: u32,
+    pub(super) slice_frame_num: u32,
     /// nal_ref_idc of the current picture (non-ref pictures stay out of
     /// the DPB).
-    cur_is_ref: bool,
+    pub(super) cur_is_ref: bool,
     /// P_8x8ref0 (mb_type 4): every sub-8x8 uses ref 0, no ref_idx.
     p8x8_ref0: bool,
-    got_mb: bool, // cur has decoded MBs (start-of-picture detection)
-    frame_num: u32,
+    pub(super) got_mb: bool, // cur has decoded MBs (start-of-picture detection)
+    pub(super) frame_num: u32,
     // slice state
-    slice_type_nos: u8, // 0=P, 2=I
-    qscale: i32,
-    chroma_qp: [i32; 2],
-    mb_skip_run: i64,
-    mb_x: usize,
-    mb_y: usize,
-    mb_width: usize,
-    mb_height: usize,
-    slice_num: usize,
-    slice_table: Vec<usize>,
-    prev_mb_skipped: bool,
+    pub(super) slice_type_nos: u8, // 0=P, 2=I
+    pub(super) qscale: i32,
+    pub(super) chroma_qp: [i32; 2],
+    pub(super) mb_skip_run: i64,
+    pub(super) mb_x: usize,
+    pub(super) mb_y: usize,
+    pub(super) mb_width: usize,
+    pub(super) mb_height: usize,
+    pub(super) slice_num: usize,
+    pub(super) slice_table: Vec<usize>,
+    pub(super) prev_mb_skipped: bool,
     /// Deblocking parameters of the slice being decoded.
-    slice_dbk: MbDeblock,
+    pub(super) slice_dbk: MbDeblock,
     /// Inter partition shape of the MB being decoded (PART_*).
-    cur_part: u8,
-    next_pic_id: u64,
+    pub(super) cur_part: u8,
+    pub(super) next_pic_id: u64,
     // per-MB scratch
-    mb: [i16; 48 * 16],
-    mb_luma_dc: [i16; 16],
+    pub(super) mb: [i16; 48 * 16],
+    pub(super) mb_luma_dc: [i16; 16],
     intra4x4_pred_mode_cache: [i8; 15 * 8],
-    nnz_cache: [u8; 15 * 8],
-    mv_cache: [[i16; 2]; 15 * 8],
-    ref_cache: [i8; 15 * 8],
-    top_samples_available: u16,
-    left_samples_available: u16,
-    topright_samples_available: u16,
+    pub(super) nnz_cache: [u8; 15 * 8],
+    pub(super) mv_cache: [[i16; 2]; 15 * 8],
+    pub(super) ref_cache: [i8; 15 * 8],
+    pub(super) top_samples_available: u16,
+    pub(super) left_samples_available: u16,
+    pub(super) topright_samples_available: u16,
     // neighbor types (0 = unavailable)
-    n_top: u32,
-    n_left: u32,
-    n_topleft: u32,
-    n_topright: u32,
+    pub(super) n_top: u32,
+    pub(super) n_left: u32,
+    pub(super) n_topleft: u32,
+    pub(super) n_topright: u32,
     // per-MB decoded info for reconstruction
-    mb_type: u32,
+    pub(super) mb_type: u32,
     intra16x16_pred_mode: i32,
-    chroma_pred_mode: i32,
-    cbp: u32,
+    pub(super) chroma_pred_mode: i32,
+    pub(super) cbp: u32,
     // inter info for this MB: per 4x4 mv/ref in cache; partitions kept
     // implicitly via mv/ref caches (write-back per 4x4).
-    intra_pcm: Vec<u8>,
-    frame_count: usize,
+    pub(super) intra_pcm: Vec<u8>,
+    pub(super) frame_count: usize,
     // applied crop
-    out_w: usize,
-    out_h: usize,
+    pub(super) out_w: usize,
+    pub(super) out_h: usize,
 }
 
 impl Default for H264Decoder {
@@ -342,7 +347,7 @@ impl H264Decoder {
     // ---------------- MB layer ----------------
 
     /// `pred_non_zero_count` (h264_cavlc.c:275).
-    fn pred_nnz(&self, n: usize) -> u32 {
+    pub(super) fn pred_nnz(&self, n: usize) -> u32 {
         let idx = SCAN8[n];
         let left = self.nnz_cache[idx - 1] as u32;
         let top = self.nnz_cache[idx - 8] as u32;

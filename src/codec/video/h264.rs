@@ -44,9 +44,18 @@ mod tables;
 mod vlc;
 
 use crate::{
-    codec::{traits::Decoder, video::h264::picture::Picture},
+    codec::{
+        packet::Packet,
+        params::{CodecId, CodecParameters},
+        traits::Decoder,
+    },
     util::error::{Error, Result},
+    util::frame::Frame,
 };
+
+use decoder::H264Decoder;
+use picture::Picture;
+use vlc::{Cavlc, cavlc};
 
 use deblock::{MbDeblock, PART_16X16};
 use tables::*;

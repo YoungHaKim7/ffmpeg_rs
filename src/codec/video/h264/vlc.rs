@@ -6,7 +6,14 @@
 // VLCs + level table (ff_h264_decode_init_vlc, h264_cavlc.c:329-380)
 // ---------------------------------------------------------------------
 
-struct Vlc {
+use std::sync::OnceLock;
+
+use super::table_rows;
+use super::tables::*;
+use super::{Gb, LEVEL_TAB_BITS};
+use crate::util::error::{Error, Result};
+
+pub(super) struct Vlc {
     max_len: u32,
     tab: Vec<u32>,
 }
@@ -27,7 +34,7 @@ impl Vlc {
         }
         Vlc { max_len, tab }
     }
-    fn get(&self, gb: &mut Gb) -> Result<u32> {
+    pub(super) fn get(&self, gb: &mut Gb) -> Result<u32> {
         let e = self.tab[gb.peek(self.max_len) as usize];
         let len = e >> 16;
         if len == 0 {
@@ -38,18 +45,18 @@ impl Vlc {
     }
 }
 
-struct Cavlc {
-    coeff_token: [Vlc; 4],
-    chroma_dc_coeff_token: Vlc,
-    total_zeros: Vec<Vlc>,  // index by total_coeff 1..15
-    chroma_dc_tz: Vec<Vlc>, // 1..3
-    run: Vec<Vlc>,          // 1..6
-    run7: Vlc,
+pub(super) struct Cavlc {
+    pub(super) coeff_token: [Vlc; 4],
+    pub(super) chroma_dc_coeff_token: Vlc,
+    pub(super) total_zeros: Vec<Vlc>,  // index by total_coeff 1..15
+    pub(super) chroma_dc_tz: Vec<Vlc>, // 1..3
+    pub(super) run: Vec<Vlc>,          // 1..6
+    pub(super) run7: Vlc,
     /// `cavlc_level_tab` (h264_cavlc.c:289): [suffix][peek8] = (code, len).
-    level_tab: Vec<[[i16; 2]; 256]>,
+    pub(super) level_tab: Vec<[[i16; 2]; 256]>,
 }
 
-fn cavlc() -> &'static Cavlc {
+pub(super) fn cavlc() -> &'static Cavlc {
     static T: OnceLock<Cavlc> = OnceLock::new();
     T.get_or_init(|| {
         let ct = table_rows("COEFF_TOKEN", 4, 68);
