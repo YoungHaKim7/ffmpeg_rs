@@ -13,21 +13,23 @@ use crate::{
     util::frame::Frame,
 };
 
-use super::vlc::cavlc;
 use super::{
-    CHROMA_DC, CHROMA_QP8, DC_PRED, Gb, I4_DC_128_PRED, I4_LEFT_DC_PRED, I4_TOP_DC_PRED, LUMA_DC,
-    MB_INTER, MB_INTRA4X4, MB_INTRA16X16, MB_PCM, MB_UNAVAIL, MbDeblock, Nal, PART_16X16, Part,
-    PlaneSel, Pps, SCAN8, Sps, ZIGZAG, chroma_dc_dequant_idct, deblock,
-    deblock::{PART_8X8, PART_8X16, PART_16X8},
-    decode_residual, idct_add, idct_dc_add, luma_dc_dequant_idct, mc_chroma, mc_luma, mid_pred,
-    parse_pps, parse_sps,
-    picture::Picture,
-    pred4x4, pred8x8_avail, pred16x16_avail, scan_shift1, split_nals,
-    tables::{
-        CHROMA_DC_SCAN, GOLOMB_TO_INTER_CBP, GOLOMB_TO_INTRA4X4_CBP, GOLOMB_TO_PICT_TYPE,
-        I_MB_TYPE_INFO,
+    vlc::cavlc,
+    {
+        CHROMA_DC, CHROMA_QP8, DC_PRED, Gb, I4_DC_128_PRED, I4_LEFT_DC_PRED, I4_TOP_DC_PRED,
+        LUMA_DC, MB_INTER, MB_INTRA4X4, MB_INTRA16X16, MB_PCM, MB_UNAVAIL, MbDeblock, Nal,
+        PART_16X16, Part, PlaneSel, Pps, SCAN8, Sps, ZIGZAG, chroma_dc_dequant_idct, deblock,
+        deblock::{PART_8X8, PART_8X16, PART_16X8},
+        decode_residual, idct_add, idct_dc_add, luma_dc_dequant_idct, mc_chroma, mc_luma, mid_pred,
+        parse_pps, parse_sps,
+        picture::Picture,
+        pred4x4, pred8x8_avail, pred16x16_avail, scan_shift1, split_nals,
+        tables::{
+            CHROMA_DC_SCAN, GOLOMB_TO_INTER_CBP, GOLOMB_TO_INTRA4X4_CBP, GOLOMB_TO_PICT_TYPE,
+            I_MB_TYPE_INFO,
+        },
+        type_mask_nnz,
     },
-    type_mask_nnz,
 };
 
 pub struct H264Decoder {
@@ -760,22 +762,22 @@ impl H264Decoder {
                 pic.mv[b_xy + r * b_stride + c] = self.mv_cache[SCAN8[0] + 8 * r + c];
             }
         }
-        pic.ref_index[4 * mb_xy] = self.ref_cache[SCAN8[0]];
-        pic.ref_index[4 * mb_xy + 1] = self.ref_cache[SCAN8[4]];
-        pic.ref_index[4 * mb_xy + 2] = self.ref_cache[SCAN8[8]];
-        pic.ref_index[4 * mb_xy + 3] = self.ref_cache[SCAN8[12]];
-        // C's ref2frm: the loop filter compares the referenced PICTURES.
+        // ref_cache is in PICTURE-ID space (C's ref2frm). Store the id
+        // directly for the loop filter, and recover the RAW ref_idx (the
+        // position of that picture in RefPicList0) for ref_index —
+        // pred_pskip_motion compares ref_index against raw 0.
         for (k, blk) in [0usize, 4, 8, 12].into_iter().enumerate() {
-            let ri = self.ref_cache[SCAN8[blk]];
-            let id = if ri < 0 {
+            let f = self.ref_cache[SCAN8[blk]];
+            self.cur.as_mut().unwrap().ref_pic[4 * mb_xy + k] = f as i32;
+            let raw = if f < 0 {
                 -1
             } else {
                 self.ref_list
-                    .get(ri as usize)
-                    .and_then(|&i| self.refs.get(i))
-                    .map_or(-1, |p| p.id as i32)
+                    .iter()
+                    .position(|&i| self.refs.get(i).is_some_and(|p| p.id as i8 == f))
+                    .map_or(-1, |p| p as i8)
             };
-            self.cur.as_mut().unwrap().ref_pic[4 * mb_xy + k] = id;
+            self.cur.as_mut().unwrap().ref_index[4 * mb_xy + k] = raw;
         }
     }
 
@@ -1598,13 +1600,20 @@ impl H264Decoder {
         }
 
         if self.mb_type == MB_INTER {
-            // MC per 4x4 block: ref_cache → RefPicList0 → DPB picture.
+            // MC per 4x4 block. ref_cache holds PICTURE IDS (C's ref2frm
+            // space) since the pred_motion unification — resolve the DPB
+            // picture by id; negative = no reference (use list0[0]).
             let refs = &self.refs;
-            let ref_list = &self.ref_list;
+            let fallback = self
+                .ref_list
+                .first()
+                .and_then(|&k| self.refs.get(k))
+                .map_or(0, |p| p.id);
             let pick = |ri: i8| -> Result<&Picture> {
-                ref_list
-                    .get(ri.max(0) as usize)
-                    .and_then(|&k| refs.get(k))
+                let want = if ri < 0 { fallback } else { ri as u64 };
+                refs.iter()
+                    .find(|p| p.id == want)
+                    .or_else(|| refs.first())
                     .ok_or_else(|| {
                         Error::InvalidData("inter MB references a missing picture".into())
                     })

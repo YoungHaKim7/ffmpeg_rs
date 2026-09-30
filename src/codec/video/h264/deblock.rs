@@ -17,9 +17,11 @@
 //! is an optimisation of this same computation; C falls back to
 //! `ff_h264_filter_mb` without it, which is what is ported here.
 
-use super::deblock_tables::{ALPHA_TABLE, BETA_TABLE, TC0_TABLE};
-use super::picture::Picture;
-use super::{CHROMA_QP8, MB_INTER, MB_INTRA4X4, MB_INTRA16X16, MB_PCM};
+use super::{
+    deblock_tables::{ALPHA_TABLE, BETA_TABLE, TC0_TABLE},
+    picture::Picture,
+    {CHROMA_QP8, MB_INTER, MB_INTRA4X4, MB_INTRA16X16, MB_PCM},
+};
 
 /// Inter partition shape of an MB, for the edge masks (C's
 /// `MB_TYPE_16x16 / 16x8 / 8x16 / 8x8` bits). P_Skip is 16x16.
