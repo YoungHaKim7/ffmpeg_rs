@@ -658,7 +658,8 @@ impl H264Decoder {
                         + 3
                         + i * b_stride;
                     self.mv_cache[3 + 8 * (1 + i)] = pic.mv[bxy];
-                    self.ref_cache[3 + 8 * (1 + i)] = pic.ref_pic[4 * left_xy + 1 + 2 * (i >> 1)] as i8;
+                    self.ref_cache[3 + 8 * (1 + i)] =
+                        pic.ref_pic[4 * left_xy + 1 + 2 * (i >> 1)] as i8;
                 } else if self.n_left != MB_UNAVAIL {
                     self.mv_cache[3 + 8 * (1 + i)] = [0, 0];
                     self.ref_cache[3 + 8 * (1 + i)] = -1;
@@ -962,10 +963,13 @@ impl H264Decoder {
                 [mid_pred(a[0], bm[0], c[0]), mid_pred(a[1], bm[1], c[1])]
             }
         };
+        // C: fill_rectangle(ref_cache, 4,4,8, 0) — frm of ref_idx 0, i.e.
+        // id space: RefPicList0[0]'s picture id.
+        let f0 = self.ref_frm(0);
         for r in 0..4 {
             for c in 0..4 {
                 self.mv_cache[SCAN8[0] + 8 * r + c] = mv;
-                self.ref_cache[SCAN8[0] + 8 * r + c] = 0;
+                self.ref_cache[SCAN8[0] + 8 * r + c] = f0;
             }
         }
     }
@@ -1219,14 +1223,25 @@ impl H264Decoder {
             Part::P16x16 => {
                 let r0 = read_ref(gb)?;
                 let f0 = self.ref_frm(r0);
-                if std::env::var_os("H264_DUMP").is_some() && self.slice_frame_num == 1 {
+                if std::env::var_os("H264_DUMP").is_some()
+                    && self.slice_frame_num == 5
+                    && self.mb_y == 7
+                    && self.mb_x <= 1
+                {
                     let i0 = SCAN8[0];
                     eprintln!(
                         "  P16 mb={}:{} r0={r0} f0={f0} L=({},{}) rL={} T=({},{}) rT={} C=({},{}) rC={}",
-                        self.mb_x, self.mb_y,
-                        self.mv_cache[i0 - 1][0], self.mv_cache[i0 - 1][1], self.ref_cache[i0 - 1],
-                        self.mv_cache[i0 - 8][0], self.mv_cache[i0 - 8][1], self.ref_cache[i0 - 8],
-                        self.mv_cache[i0 - 4][0], self.mv_cache[i0 - 4][1], self.ref_cache[i0 - 4]
+                        self.mb_x,
+                        self.mb_y,
+                        self.mv_cache[i0 - 1][0],
+                        self.mv_cache[i0 - 1][1],
+                        self.ref_cache[i0 - 1],
+                        self.mv_cache[i0 - 8][0],
+                        self.mv_cache[i0 - 8][1],
+                        self.ref_cache[i0 - 8],
+                        self.mv_cache[i0 - 4][0],
+                        self.mv_cache[i0 - 4][1],
+                        self.ref_cache[i0 - 4]
                     );
                 }
                 set_ref(&mut self.ref_cache, 0, 0, 4, 4, f0);
@@ -1402,8 +1417,12 @@ impl H264Decoder {
             self.nnz_cache[SCAN8[i]] = 0;
         }
         self.pred_pskip_motion();
+        // C fills ref_cache with ref2frm[0] (= reference 0); in the port's
+        // id space that's the id of RefPicList0[0]. A raw 0 here poisons
+        // every later neighbour comparison (0 is not a picture id).
+        let f0 = self.ref_frm(0);
         for i in 0..16usize {
-            self.ref_cache[SCAN8[i]] = 0;
+            self.ref_cache[SCAN8[i]] = f0;
         }
         self.write_back_motion(mb_xy);
         let pic = self.cur.as_mut().unwrap();
