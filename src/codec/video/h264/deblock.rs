@@ -421,7 +421,7 @@ fn filter_mb_dir(
     cqp: [i32; 2],
     a: i32,
     b: i32,
-    cbp: u8,
+    cbp: u16,
     part: u8,
     d: MbDeblock,
 ) {

@@ -14,6 +14,10 @@ pub(crate) struct Picture {
     pub nnz: Vec<[u8; 48]>,
     pub mv: Vec<[i16; 2]>,  // b_stride = mb_w*4 (+1 padding row)
     pub ref_index: Vec<i8>, // 4 per MB
+    /// |mvd| per 4x4 (CABAC mvd_cache borders, h264_mvpred.h:838) — the
+    /// b_stride grid like `mv`; only the bottom row / right column of
+    /// each MB are ever read back.
+    pub mvd: Vec<[u8; 2]>,
     pub(crate) qscale: Vec<u8>,
     /// intra4x4 modes: bottom row (4) + right column (4) per MB — C's
     /// `mb2br`-indexed `intra4x4_pred_mode` slots the caches read.
@@ -25,10 +29,14 @@ pub(crate) struct Picture {
     pub id: u64,
     /// Per 8x8 (4 per MB): id of the referenced picture, -1 = none.
     pub ref_pic: Vec<i32>,
-    /// Per MB: coded_block_pattern (C's `cbp_table`), inter partition
-    /// shape, and the slice's deblocking parameters.
-    pub(crate) cbp: Vec<u8>,
+    /// Per MB: coded_block_pattern (C's `cbp_table`; CABAC ORs the
+    /// DC-coded bits 0x40/0x80/0x100 into it — h264_cabac.c:1707),
+    /// inter partition shape, RAW chroma pred mode (CABAC ctx) and the
+    /// P_Skip flag (CABAC skip ctx), plus the slice's deblocking params.
+    pub(crate) cbp: Vec<u16>,
     pub(crate) part: Vec<u8>,
+    pub(crate) chroma_pred: Vec<u8>,
+    pub(crate) skip: Vec<bool>,
     pub(crate) dbk: Vec<MbDeblock>,
 }
 
@@ -47,6 +55,7 @@ impl Picture {
             nnz: vec![[0; 48]; mb_w * mb_h + 1],
             mv: vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
             ref_index: vec![-1; (mb_w * 4 + 1) * (mb_h * 4 + 1)],
+            mvd: vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
             qscale: vec![0; mb_w * mb_h + 1],
             mb_i4x4: vec![[-1; 8]; mb_w * mb_h + 1],
             frame_num: 0,
@@ -54,6 +63,8 @@ impl Picture {
             ref_pic: vec![-1; 4 * (mb_w * mb_h + 1)],
             cbp: vec![0; mb_w * mb_h + 1],
             part: vec![PART_16X16; mb_w * mb_h + 1],
+            chroma_pred: vec![0; mb_w * mb_h + 1],
+            skip: vec![false; mb_w * mb_h + 1],
             dbk: vec![MbDeblock::default(); mb_w * mb_h + 1],
         }
     }

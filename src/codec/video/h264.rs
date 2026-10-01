@@ -36,6 +36,8 @@
 
 use std::sync::OnceLock;
 
+mod cabac;
+mod cabac_tables;
 mod deblock;
 mod deblock_tables;
 mod decoder;
@@ -343,8 +345,11 @@ struct Pps {
     deblocking_filter_parameters_present: bool,
     constrained_intra_pred: bool,
     redundant_pic_cnt_present: bool,
-    /// PPS chroma_qp_index_offset (get_chroma_qp adds it, clamped 0..51).
-    chroma_qp_offset: i32,
+    /// entropy_coding_mode_flag: CABAC slices (Phase B).
+    cabac: bool,
+    /// chroma_qp_index_offset[0/1] (the second from the PPS tail;
+    /// defaults to the first when absent — h264_ps.c:800-812).
+    chroma_qp_offset: [i32; 2],
     /// `dequant4_coeff[i][q][x]` (init_dequant4_coeff_table, h264_ps.c:617)
     /// with the default all-16 scaling matrix (custom lists gate Unsupported).
     dequant4_full: Vec<[[u32; 16]; 52]>,
@@ -471,9 +476,8 @@ fn parse_pps(rbsp: &[u8], sps_ok: bool) -> Result<Pps> {
     if !sps_ok || sps_id != 0 {
         return Err(Error::InvalidData("PPS references unknown SPS".into()));
     }
-    if gb.read_bit() == 1 {
-        return Err(Error::Unsupported("CABAC (CAVLC only)".into()));
-    }
+    // entropy_coding_mode_flag — CABAC slices (Phase B).
+    let cabac = gb.read_bit() == 1;
     let pic_order_present = gb.read_bit() == 1;
     if gb.ue()? + 1 > 1 {
         return Err(Error::Unsupported("FMO (slice groups)".into()));
@@ -487,9 +491,27 @@ fn parse_pps(rbsp: &[u8], sps_ok: bool) -> Result<Pps> {
     let init_qp = gb.se()? + 26;
     let _init_qs = gb.se()?;
     let chroma_qp_off = gb.se()?;
+    if !(-12..=12).contains(&chroma_qp_off) {
+        return Err(Error::InvalidData("chroma_qp_index_offset".into()));
+    }
     let deblocking_present = gb.read_bit() == 1;
     let constrained_intra_pred = gb.read_bit() == 1;
     let redundant_pic_cnt_present = gb.read_bit() == 1;
+    // PPS tail (h264_ps.c:795-812): present when any data remains past
+    // the trailing stop bit.
+    let mut chroma_qp_off2 = chroma_qp_off;
+    if gb.more_rbsp_data() {
+        if gb.read_bit() == 1 {
+            return Err(Error::Unsupported("8x8 transform (High profile)".into()));
+        }
+        if gb.read_bit() == 1 {
+            return Err(Error::Unsupported("scaling matrices".into()));
+        }
+        chroma_qp_off2 = gb.se()?;
+        if !(-12..=12).contains(&chroma_qp_off2) {
+            return Err(Error::InvalidData("second chroma_qp_index_offset".into()));
+        }
+    }
     let mut pps = Pps {
         pic_order_present,
         ref_count,
@@ -497,7 +519,8 @@ fn parse_pps(rbsp: &[u8], sps_ok: bool) -> Result<Pps> {
         deblocking_filter_parameters_present: deblocking_present,
         constrained_intra_pred,
         redundant_pic_cnt_present,
-        chroma_qp_offset: chroma_qp_off,
+        cabac,
+        chroma_qp_offset: [chroma_qp_off, chroma_qp_off2],
         dequant4_full: vec![[[0u32; 16]; 52]; 6],
     };
     pps.build_dequant();

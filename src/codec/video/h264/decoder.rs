@@ -14,6 +14,8 @@ use crate::{
 };
 
 use super::{
+    cabac::Cabac,
+    cabac_tables::{CTX_INIT_I, CTX_INIT_PB_0, CTX_INIT_PB_1, CTX_INIT_PB_2},
     vlc::cavlc,
     {
         CHROMA_DC, CHROMA_QP8, DC_PRED, Gb, I4_DC_128_PRED, I4_LEFT_DC_PRED, I4_TOP_DC_PRED,
@@ -96,10 +98,26 @@ pub struct H264Decoder {
     pub(super) mb_type: u32,
     intra16x16_pred_mode: i32,
     pub(super) chroma_pred_mode: i32,
+    /// RAW chroma pred mode as decoded (0..3, C's chroma_pred_mode_table).
+    chroma_pred_raw: u8,
     pub(super) cbp: u32,
+    /// P_Skip flag of the MB being decoded (CABAC skip ctx + IS_SKIP).
+    cur_skip: bool,
     // inter info for this MB: per 4x4 mv/ref in cache; partitions kept
     // implicitly via mv/ref caches (write-back per 4x4).
     pub(super) intra_pcm: Vec<u8>,
+    // ---- CABAC (Phase B) ----
+    /// Context states (sl->cabac_state, 1024 entries).
+    cabac_state: Box<[u8; 1024]>,
+    /// cabac_init_idc of the slice being decoded (P/B only).
+    cabac_init_idc: usize,
+    /// last_qscale_diff of the slice (mb_qp_delta ctx).
+    last_qscale_diff: i32,
+    /// |mvd| cache (list 0), scan8 layout — CABAC mvd ctx.
+    mvd_cache: [[u8; 2]; 15 * 8],
+    /// fill_decode_caches CABAC section (h264_mvpred.h:736-750).
+    left_cbp: u16,
+    top_cbp: u16,
     pub(super) frame_count: usize,
     // applied crop
     pub(super) out_w: usize,
@@ -160,7 +178,15 @@ impl H264Decoder {
             mb_type: 0,
             intra16x16_pred_mode: 0,
             chroma_pred_mode: 0,
+            chroma_pred_raw: 0,
             cbp: 0,
+            cur_skip: false,
+            cabac_state: Box::new([0; 1024]),
+            cabac_init_idc: 0,
+            last_qscale_diff: 0,
+            mvd_cache: [[0; 2]; 15 * 8],
+            left_cbp: 0,
+            top_cbp: 0,
             intra_pcm: Vec::new(),
             frame_count: 0,
             out_w: 0,
@@ -291,6 +317,16 @@ impl H264Decoder {
                 return Err(Error::Unsupported("MMCO".into()));
             }
         }
+        // cabac_init_idc (h264_slice.c:1876): P/B slices of a CABAC PPS,
+        // between dec_ref_pic_marking and slice_qp_delta.
+        if self.slice_type_nos != 2 && pps.cabac {
+            let idc = gb.ue()?;
+            if idc > 2 {
+                return Err(Error::InvalidData("cabac_init_idc overflow".into()));
+            }
+            self.cabac_init_idc = idc as usize;
+        }
+        self.last_qscale_diff = 0;
         if std::env::var_os("H264_DUMP").is_some() {
             eprintln!("  H3 post-marking pos={}", gb.index);
         }
@@ -306,17 +342,20 @@ impl H264Decoder {
             return Err(Error::InvalidData(format!("QP {qp} out of range")));
         }
         self.qscale = qp;
-        let off = self.pps.as_ref().map(|p| p.chroma_qp_offset).unwrap_or(0);
-        let cqp = CHROMA_QP8[(qp + off).clamp(0, 51) as usize] as i32;
-        self.chroma_qp[0] = cqp;
-        self.chroma_qp[1] = cqp;
+        let off = self
+            .pps
+            .as_ref()
+            .map(|p| p.chroma_qp_offset)
+            .unwrap_or([0, 0]);
+        self.chroma_qp[0] = CHROMA_QP8[(qp + off[0]).clamp(0, 51) as usize] as i32;
+        self.chroma_qp[1] = CHROMA_QP8[(qp + off[1]).clamp(0, 51) as usize] as i32;
 
         // Deblocking (h264_slice.c:1900-1928): C keeps the idc with 0/1
         // swapped (1 = on, 0 = off, 2 = on but not across slice edges) and
         // the offsets doubled.
         let mut dbk = MbDeblock {
             mode: 1,
-            cqp_off: [pps.chroma_qp_offset; 2],
+            cqp_off: pps.chroma_qp_offset,
             ..MbDeblock::default()
         };
         if pps.deblocking_filter_parameters_present {
@@ -484,9 +523,10 @@ impl H264Decoder {
         Ok(mm)
     }
 
-    /// fill_decode_neighbors + fill_decode_caches, frame-only path
-    /// (h264_mvpred.h:487/539, the non-MBAFF branches).
-    fn fill_decode_caches(&mut self, mb_type: u32) {
+    /// fill_decode_neighbors (h264_mvpred.h:487) — the frame-only type
+    /// computation, split out so CABAC syntax elements that run BEFORE
+    /// fill_decode_caches (mb_skip_run, mb_type) see the neighbor types.
+    fn fill_decode_neighbors(&mut self) {
         let mb_xy = self.mb_x + self.mb_y * self.mb_width;
         let top_xy = mb_xy as isize - self.mb_width as isize;
         let top_ok = self.mb_y > 0;
@@ -518,6 +558,13 @@ impl H264Decoder {
         self.n_left = l;
         self.n_topleft = tl;
         self.n_topright = tr;
+    }
+
+    /// fill_decode_neighbors + fill_decode_caches, frame-only path
+    /// (h264_mvpred.h:487/539, the non-MBAFF branches).
+    fn fill_decode_caches(&mut self, mb_type: u32) {
+        self.fill_decode_neighbors();
+        let mb_xy = self.mb_x + self.mb_y * self.mb_width;
 
         // ---- intra sample availability (the frame-only branches) ----
         let constrained = self.pps.as_ref().unwrap().constrained_intra_pred;
@@ -668,6 +715,63 @@ impl H264Decoder {
                     self.ref_cache[3 + 8 * (1 + i)] = -2;
                 }
             }
+
+            // ---- CABAC caches (h264_mvpred.h:836-869) ----
+            // mvd borders: the top MB's bottom row / left MB's right
+            // column of |mvd| values (C stores only the br 4x4 per MB —
+            // the port keeps the full b_stride grid, same cells read).
+            {
+                let top_xy = self.mb_x + self.mb_y.saturating_sub(1) * self.mb_width;
+                let left_xy = self.mb_x.saturating_sub(1) + self.mb_y * self.mb_width;
+                let top0 = SCAN8[0] - 8;
+                if uses(self.n_top) {
+                    let bxy = 4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
+                    for c in 0..4 {
+                        self.mvd_cache[top0 + c] = pic.mvd[bxy + c];
+                    }
+                } else {
+                    for c in 0..4 {
+                        self.mvd_cache[top0 + c] = [0, 0];
+                    }
+                }
+                for i in 0..4 {
+                    if uses(self.n_left) {
+                        let bxy = 4 * self.mb_x.saturating_sub(1)
+                            + 4 * self.mb_y * b_stride
+                            + 3
+                            + i * b_stride;
+                        self.mvd_cache[3 + 8 * (1 + i)] = pic.mvd[bxy];
+                    } else {
+                        self.mvd_cache[3 + 8 * (1 + i)] = [0, 0];
+                    }
+                }
+                // AV_ZERO16(mvd_cache[2 + 8*0]) / [2 + 8*2]
+                self.mvd_cache[SCAN8[0] + 2] = [0, 0];
+                self.mvd_cache[SCAN8[0] + 2 + 16] = [0, 0];
+                let _ = (top_xy, left_xy);
+            }
+        }
+
+        // ---- CABAC cbp contexts (h264_mvpred.h:736-750) ----
+        if self.pps.as_ref().is_some_and(|p| p.cabac) {
+            let is_intra_cur =
+                mb_type == MB_INTRA4X4 || mb_type == MB_INTRA16X16 || mb_type == MB_PCM;
+            let pic = self.cur.as_ref().unwrap();
+            let top_xy = self.mb_x + self.mb_y.saturating_sub(1) * self.mb_width;
+            let left_xy = self.mb_x.saturating_sub(1) + self.mb_y * self.mb_width;
+            if self.n_top != 0 {
+                self.top_cbp = pic.cbp[top_xy];
+            } else {
+                self.top_cbp = if is_intra_cur { 0x7CF } else { 0x00F };
+            }
+            if self.n_left != 0 {
+                // frame left_block {0,1,2,3}: keep the left 8x8's luma
+                // bits 1/3 plus chroma/DC bits 4..10.
+                let cbp = pic.cbp[left_xy];
+                self.left_cbp = (cbp & 0x7F0) | (cbp & 2) | (cbp & 8);
+            } else {
+                self.left_cbp = if is_intra_cur { 0x7CF } else { 0x00F };
+            }
         }
     }
 
@@ -761,6 +865,11 @@ impl H264Decoder {
         for r in 0..4 {
             for c in 0..4 {
                 pic.mv[b_xy + r * b_stride + c] = self.mv_cache[SCAN8[0] + 8 * r + c];
+                // CABAC mvd table (write_back_motion_list, h264_mvpred.h:
+                // 106-117): C keeps only the MB's br 4x4 (bottom row +
+                // right column is all the borders ever read); the port's
+                // full-grid store covers the same cells.
+                pic.mvd[b_xy + r * b_stride + c] = self.mvd_cache[SCAN8[0] + 8 * r + c];
             }
         }
         // ref_cache is in PICTURE-ID space (C's ref2frm). Store the id
@@ -783,8 +892,10 @@ impl H264Decoder {
     }
 
     /// Per-MB state kept in the picture after decoding: qscale (0 for
-    /// PCM — C's `qscale_table`, the running slice QP is untouched), cbp,
-    /// partition shape and the slice's deblocking parameters.
+    /// PCM — C's `qscale_table`, the running slice QP is untouched), cbp
+    /// (CABAC ORs the DC-coded bits in during the residual), partition
+    /// shape, raw chroma pred mode + skip flag (CABAC contexts) and the
+    /// slice's deblocking parameters.
     fn record_mb(&mut self, mb_xy: usize) {
         let pcm = self.mb_type == MB_PCM;
         let pic = self.cur.as_mut().unwrap();
@@ -792,9 +903,11 @@ impl H264Decoder {
         pic.cbp[mb_xy] = if self.cbp == u32::MAX {
             0
         } else {
-            self.cbp as u8
+            self.cbp as u16
         };
         pic.part[mb_xy] = self.cur_part;
+        pic.chroma_pred[mb_xy] = self.chroma_pred_raw;
+        pic.skip[mb_xy] = self.cur_skip;
         pic.dbk[mb_xy] = self.slice_dbk;
         self.slice_table[mb_xy] = self.slice_num;
     }
@@ -1413,8 +1526,16 @@ impl H264Decoder {
         // C: a skipped MB carries no residual (cbp 0, all nnz 0) — without
         // this, hl_decode_mb re-adds the PREVIOUS MB's stale coefficients.
         self.cbp = 0;
+        self.cur_skip = true;
+        self.chroma_pred_raw = 0;
         for i in 0..48usize {
             self.nnz_cache[SCAN8[i]] = 0;
+        }
+        // write_back_motion_list zeroes the mvd table for IS_SKIP MBs.
+        for r in 0..4 {
+            for c in 0..4 {
+                self.mvd_cache[SCAN8[0] + 8 * r + c] = [0, 0];
+            }
         }
         self.pred_pskip_motion();
         // C fills ref_cache with ref2frm[0] (= reference 0); in the port's
@@ -1448,10 +1569,13 @@ impl H264Decoder {
             if !(0..=51).contains(&self.qscale) {
                 return Err(Error::InvalidData("dquant out of range".into()));
             }
-            let off = self.pps.as_ref().map(|p| p.chroma_qp_offset).unwrap_or(0);
-            let cqp = CHROMA_QP8[(self.qscale + off).clamp(0, 51) as usize] as i32;
-            self.chroma_qp[0] = cqp;
-            self.chroma_qp[1] = cqp;
+            let off = self
+                .pps
+                .as_ref()
+                .map(|p| p.chroma_qp_offset)
+                .unwrap_or([0, 0]);
+            self.chroma_qp[0] = CHROMA_QP8[(self.qscale + off[0]).clamp(0, 51) as usize] as i32;
+            self.chroma_qp[1] = CHROMA_QP8[(self.qscale + off[1]).clamp(0, 51) as usize] as i32;
         }
         self.mb = [0; 48 * 16];
 
@@ -1600,6 +1724,831 @@ impl H264Decoder {
         }
 
         self.write_back_non_zero_count(mb_xy);
+        Ok(())
+    }
+
+    // ---------------- CABAC MB decode (h264_cabac.c:1920) ----------------
+
+    /// `ff_h264_init_cabac_states` (h264_cabac.c:1262).
+    fn init_cabac_states(&mut self) {
+        let slice_qp = self.qscale.clamp(0, 51);
+        let table: &[[i8; 2]; 1024] = if self.slice_type_nos == 2 {
+            &CTX_INIT_I
+        } else {
+            match self.cabac_init_idc {
+                0 => &CTX_INIT_PB_0,
+                1 => &CTX_INIT_PB_1,
+                _ => &CTX_INIT_PB_2,
+            }
+        };
+        for i in 0..1024usize {
+            let mut pre = 2 * (((table[i][0] as i32 * slice_qp) >> 4) + table[i][1] as i32) - 127;
+            pre ^= pre >> 31; // abs
+            if pre > 124 {
+                pre = 124 + (pre & 1);
+            }
+            self.cabac_state[i] = pre as u8;
+        }
+    }
+
+    /// `decode_cabac_mb_skip` (h264_cabac.c:1336), frame path. C's ctx
+    /// tests slice_table + IS_SKIP at mba = mb_xy-1 / mbb = mb_xy-stride
+    /// with NO mb_x guard (a row-start MB sees the previous row's last
+    /// MB as its "left") — ported verbatim.
+    fn cabac_mb_skip(&mut self, cab: &mut Cabac) -> u32 {
+        let mb_xy = self.mb_x + self.mb_y * self.mb_width;
+        let mba = mb_xy as isize - 1;
+        let mbb = mb_xy as isize - self.mb_width as isize;
+        let in_slice = |xy: isize| -> bool {
+            xy >= 0
+                && (xy as usize) < self.slice_table.len()
+                && self.slice_table[xy as usize] == self.slice_num
+        };
+        let mut ctx = 0usize;
+        {
+            let pic = self.cur.as_ref().unwrap();
+            if in_slice(mba) && !pic.skip[mba as usize] {
+                ctx += 1;
+            }
+            if in_slice(mbb) && !pic.skip[mbb as usize] {
+                ctx += 1;
+            }
+        }
+        cab.get(&mut self.cabac_state[11 + ctx])
+    }
+
+    /// `decode_cabac_intra_mb_type` (h264_cabac.c:1304) — returns the
+    /// ff_h264_i_mb_type_info row (0=I4x4, 1..24=I16x16, 25=PCM).
+    fn cabac_intra_mb_type(
+        &mut self,
+        cab: &mut Cabac,
+        ctx_base: usize,
+        intra_slice: bool,
+    ) -> Result<usize> {
+        let mut base = ctx_base;
+        if intra_slice {
+            let mut ctx = 0usize;
+            if matches!(self.n_left, MB_INTRA16X16 | MB_PCM) {
+                ctx += 1;
+            }
+            if matches!(self.n_top, MB_INTRA16X16 | MB_PCM) {
+                ctx += 1;
+            }
+            if cab.get(&mut self.cabac_state[base + ctx]) == 0 {
+                return Ok(0); // I4x4
+            }
+            base += 2;
+        } else if cab.get(&mut self.cabac_state[base]) == 0 {
+            return Ok(0); // I4x4
+        }
+        // pcm_flag rides on a terminate bin (spec 9.3.2.4).
+        if cab.terminate() != 0 {
+            return Ok(25); // PCM
+        }
+        let is = intra_slice as usize;
+        let mut mb_type = 1usize; // I16x16
+        mb_type += 12 * cab.get(&mut self.cabac_state[base + 1]) as usize;
+        if cab.get(&mut self.cabac_state[base + 2]) == 1 {
+            mb_type += 4 + 4 * cab.get(&mut self.cabac_state[base + 2 + is]) as usize;
+        }
+        mb_type += 2 * cab.get(&mut self.cabac_state[base + 3 + is]) as usize;
+        mb_type += cab.get(&mut self.cabac_state[base + 3 + 2 * is]) as usize;
+        Ok(mb_type)
+    }
+
+    /// `decode_cabac_mb_intra4x4_pred_mode` (h264_cabac.c:1373).
+    fn cabac_intra4x4_pred_mode(&mut self, cab: &mut Cabac, pred_mode: i8) -> i8 {
+        if cab.get(&mut self.cabac_state[68]) == 1 {
+            return pred_mode;
+        }
+        let mut mode = 0i8;
+        mode += cab.get(&mut self.cabac_state[69]) as i8;
+        mode += 2 * cab.get(&mut self.cabac_state[69]) as i8;
+        mode += 4 * cab.get(&mut self.cabac_state[69]) as i8;
+        mode + (mode >= pred_mode) as i8
+    }
+
+    /// `decode_cabac_mb_chroma_pre_mode` (h264_cabac.c:1387) — RAW mode
+    /// 0..3 (the port's check_intra_pred_mode remaps afterwards).
+    fn cabac_chroma_pre_mode(&mut self, cab: &mut Cabac) -> u32 {
+        let mb_xy = self.mb_x + self.mb_y * self.mb_width;
+        let left_xy = mb_xy.wrapping_sub(1);
+        let top_xy = mb_xy.wrapping_sub(self.mb_width);
+        let mut ctx = 0usize;
+        {
+            let pic = self.cur.as_ref().unwrap();
+            if self.n_left != 0 && pic.chroma_pred[left_xy] != 0 {
+                ctx += 1;
+            }
+            if self.n_top != 0 && pic.chroma_pred[top_xy] != 0 {
+                ctx += 2;
+            }
+        }
+        if cab.get(&mut self.cabac_state[64 + ctx]) == 0 {
+            return 0;
+        }
+        if cab.get(&mut self.cabac_state[64 + 3]) == 0 {
+            return 1;
+        }
+        if cab.get(&mut self.cabac_state[64 + 3]) == 0 {
+            return 2;
+        }
+        3
+    }
+
+    /// `decode_cabac_mb_cbp_luma` (h264_cabac.c:1412).
+    fn cabac_cbp_luma(&mut self, cab: &mut Cabac) -> u32 {
+        let (cbp_a, cbp_b) = (self.left_cbp, self.top_cbp);
+        let mut cbp = 0u32;
+        let mut ctx = ((cbp_a & 0x02) == 0) as usize + 2 * ((cbp_b & 0x04) == 0) as usize;
+        cbp += cab.get(&mut self.cabac_state[73 + ctx]) as u32;
+        ctx = (cbp & 0x01 == 0) as usize + 2 * ((cbp_b & 0x08) == 0) as usize;
+        cbp += (cab.get(&mut self.cabac_state[73 + ctx]) as u32) << 1;
+        ctx = ((cbp_a & 0x08) == 0) as usize + 2 * (cbp & 0x01 == 0) as usize;
+        cbp += (cab.get(&mut self.cabac_state[73 + ctx]) as u32) << 2;
+        ctx = (cbp & 0x04 == 0) as usize + 2 * (cbp & 0x02 == 0) as usize;
+        cbp += (cab.get(&mut self.cabac_state[73 + ctx]) as u32) << 3;
+        cbp
+    }
+
+    /// `decode_cabac_mb_cbp_chroma` (h264_cabac.c:1429).
+    fn cabac_cbp_chroma(&mut self, cab: &mut Cabac) -> u32 {
+        let cbp_a = (self.left_cbp >> 4) & 0x03;
+        let cbp_b = (self.top_cbp >> 4) & 0x03;
+        let mut ctx = 0usize;
+        if cbp_a > 0 {
+            ctx += 1;
+        }
+        if cbp_b > 0 {
+            ctx += 2;
+        }
+        if cab.get(&mut self.cabac_state[77 + ctx]) == 0 {
+            return 0;
+        }
+        ctx = 4;
+        if cbp_a == 2 {
+            ctx += 1;
+        }
+        if cbp_b == 2 {
+            ctx += 2;
+        }
+        1 + cab.get(&mut self.cabac_state[77 + ctx]) as u32
+    }
+
+    /// `decode_cabac_p_mb_sub_type` (h264_cabac.c:1449): 0=sub8x8,
+    /// 1=sub8x4, 2=sub4x8, 3=sub4x4.
+    fn cabac_p_mb_sub_type(&mut self, cab: &mut Cabac) -> u32 {
+        if cab.get(&mut self.cabac_state[21]) == 1 {
+            return 0; // 8x8
+        }
+        if cab.get(&mut self.cabac_state[22]) == 0 {
+            return 1; // 8x4
+        }
+        if cab.get(&mut self.cabac_state[23]) == 1 {
+            return 2; // 4x8
+        }
+        3 // 4x4
+    }
+
+    /// picture-id (this port's ref_cache space) → RAW ref_idx (position
+    /// in RefPicList0). C's ref_cache is raw ref_idx and the ctx test is
+    /// `refa > 0`; the port carries picture ids, so convert for the ctx.
+    fn id_to_raw(&self, id: i8) -> i8 {
+        if id < 0 {
+            return id; // -1 unused / -2 unavailable — both fail > 0
+        }
+        self.ref_list
+            .iter()
+            .position(|&k| self.refs.get(k).is_some_and(|p| p.id as i8 == id))
+            .map_or(-1, |p| p as i8)
+    }
+
+    /// `decode_cabac_mb_ref` (h264_cabac.c:1477), P slice.
+    fn cabac_mb_ref(&mut self, cab: &mut Cabac, n: usize) -> Result<i8> {
+        let refa = self.id_to_raw(self.ref_cache[SCAN8[n] - 1]);
+        let refb = self.id_to_raw(self.ref_cache[SCAN8[n] - 8]);
+        let mut ctx = 0usize;
+        if refa > 0 {
+            ctx += 1;
+        }
+        if refb > 0 {
+            ctx += 2;
+        }
+        let mut r = 0i8;
+        while cab.get(&mut self.cabac_state[54 + ctx]) == 1 {
+            r += 1;
+            ctx = (ctx >> 2) + 4;
+            if r >= 32 {
+                return Err(Error::InvalidData("cabac ref overflow".into()));
+            }
+        }
+        Ok(r)
+    }
+
+    /// `decode_cabac_mb_mvd` (h264_cabac.c:1506): returns (mvd, |mvd|
+    /// capped at 70 — C's *mvda for the mvd_cache).
+    fn cabac_mb_mvd(&mut self, cab: &mut Cabac, ctxbase: usize, amvd: i32) -> Result<(i32, u8)> {
+        // C: ctxbase + ((amvd-3)>>31) + ((amvd-33)>>31) + 2.
+        let ctx = ctxbase + 2 + (amvd >= 3) as usize + (amvd >= 33) as usize;
+        if cab.get(&mut self.cabac_state[ctx]) == 0 {
+            return Ok((0, 0));
+        }
+        let mut mvd = 1i32;
+        let mut ctx = ctxbase + 3;
+        while mvd < 9 && cab.get(&mut self.cabac_state[ctx]) == 1 {
+            if mvd < 4 {
+                ctx += 1;
+            }
+            mvd += 1;
+        }
+        if mvd >= 9 {
+            let mut k = 3i32;
+            while cab.bypass() == 1 {
+                mvd += 1 << k;
+                k += 1;
+                if k > 24 {
+                    return Err(Error::InvalidData("cabac mvd overflow".into()));
+                }
+            }
+            loop {
+                // C's `while (k--)`: test-then-decrement, body sees k-1.
+                let t = k;
+                k -= 1;
+                if t == 0 {
+                    break;
+                }
+                mvd += (cab.bypass() as i32) << k;
+            }
+        }
+        let abs = mvd.min(70) as u8;
+        Ok((cab.bypass_sign(-mvd), abs))
+    }
+
+    /// DECODE_CABAC_MB_MVD (h264_cabac.c:1543): both components + the
+    /// mvd_cache amvd sums (list 0).
+    fn cabac_mvd_xy(&mut self, cab: &mut Cabac, n: usize) -> Result<(i32, i32, u8, u8)> {
+        let idx = SCAN8[n];
+        let amvd0 = self.mvd_cache[idx - 1][0] as i32 + self.mvd_cache[idx - 8][0] as i32;
+        let amvd1 = self.mvd_cache[idx - 1][1] as i32 + self.mvd_cache[idx - 8][1] as i32;
+        let (mxd, mpx) = self.cabac_mb_mvd(cab, 40, amvd0)?;
+        let (myd, mpy) = self.cabac_mb_mvd(cab, 47, amvd1)?;
+        Ok((mxd, myd, mpx, mpy))
+    }
+
+    /// Fill an |mvd| rectangle in the cache (fill_rectangle, 2-byte cells).
+    fn fill_mvd_rect(&mut self, x: usize, y: usize, w: usize, h: usize, px: u8, py: u8) {
+        for r in 0..h {
+            for c in 0..w {
+                self.mvd_cache[SCAN8[0] + 8 * (y + r) + (x + c)] = [px, py];
+            }
+        }
+    }
+
+    /// `get_cabac_cbf_ctx` (h264_cabac.c:1558).
+    fn cabac_cbf_ctx(&self, cat: usize, idx: usize, is_dc: bool) -> usize {
+        static BASE_CTX: [usize; 14] = [
+            85, 89, 93, 97, 101, 1012, 460, 464, 468, 1016, 472, 476, 480, 1020,
+        ];
+        let (nza, nzb) = if is_dc {
+            if cat == 3 {
+                let i = idx - CHROMA_DC;
+                (
+                    (self.left_cbp >> (6 + i)) & 1,
+                    (self.top_cbp >> (6 + i)) & 1,
+                )
+            } else {
+                let i = idx - LUMA_DC;
+                (
+                    (self.left_cbp >> (8 + i)) & 1,
+                    (self.top_cbp >> (8 + i)) & 1,
+                )
+            }
+        } else {
+            (
+                self.nnz_cache[SCAN8[idx] - 1] as u16,
+                self.nnz_cache[SCAN8[idx] - 8] as u16,
+            )
+        };
+        let mut ctx = 0usize;
+        if nza > 0 {
+            ctx += 1;
+        }
+        if nzb > 0 {
+            ctx += 2;
+        }
+        BASE_CTX[cat] + ctx
+    }
+
+    /// `decode_cabac_mb_dqp` (h264_cabac.c:2399).
+    fn cabac_mb_dqp(&mut self, cab: &mut Cabac) -> Result<()> {
+        if cab.get(&mut self.cabac_state[60 + (self.last_qscale_diff != 0) as usize]) == 1 {
+            let mut val = 1i32;
+            let mut ctx = 2usize;
+            while cab.get(&mut self.cabac_state[60 + ctx]) == 1 {
+                ctx = 3;
+                val += 1;
+                if val > 2 * 51 {
+                    return Err(Error::InvalidData("cabac dqp overflow".into()));
+                }
+            }
+            let val = if val & 1 != 0 {
+                (val + 1) >> 1
+            } else {
+                -((val + 1) >> 1)
+            };
+            self.last_qscale_diff = val;
+            self.qscale += val;
+            if self.qscale < 0 {
+                self.qscale += 52;
+            } else if self.qscale > 51 {
+                self.qscale -= 52;
+            }
+            if !(0..=51).contains(&self.qscale) {
+                return Err(Error::InvalidData("dquant out of range".into()));
+            }
+            let off = self
+                .pps
+                .as_ref()
+                .map(|p| p.chroma_qp_offset)
+                .unwrap_or([0, 0]);
+            self.chroma_qp[0] = CHROMA_QP8[(self.qscale + off[0]).clamp(0, 51) as usize] as i32;
+            self.chroma_qp[1] = CHROMA_QP8[(self.qscale + off[1]).clamp(0, 51) as usize] as i32;
+        } else {
+            self.last_qscale_diff = 0;
+        }
+        Ok(())
+    }
+
+    /// `decode_cabac_residual_internal` (h264_cabac.c:1590) — the 420
+    /// frame subset: cats 0-4, no 8x8/422. `qmul == None` is C's is_dc.
+    /// The coded_block_flag (decode_cabac_residual_{dc,nondc}) is folded
+    /// in at the top.
+    #[allow(clippy::too_many_arguments)]
+    fn cabac_residual(
+        &mut self,
+        cab: &mut Cabac,
+        mb_xy: usize,
+        block: &mut [i16],
+        cat: usize,
+        n: usize,
+        scan: &[u8; 16],
+        qmul: Option<&[u32; 16]>,
+        max_coeff: usize,
+    ) -> Result<()> {
+        // significant_coeff_flag_offset / last_coeff_flag_offset /
+        // coeff_abs_level_m1_offset, MB_FIELD = 0 row (h264_cabac.c:1597).
+        static SIG_OFF: [usize; 14] = [
+            105, 120, 134, 149, 152, 402, 484, 499, 513, 660, 528, 543, 557, 718,
+        ];
+        static LAST_OFF: [usize; 14] = [
+            166, 181, 195, 210, 213, 417, 572, 587, 601, 690, 616, 631, 645, 748,
+        ];
+        static ABSM1_OFF: [usize; 14] = [
+            227, 237, 247, 257, 266, 426, 952, 962, 972, 708, 982, 992, 1002, 766,
+        ];
+        static L1_CTX: [usize; 8] = [1, 2, 3, 4, 0, 0, 0, 0];
+        static GT1_CTX: [usize; 8] = [5, 5, 5, 5, 6, 7, 8, 9];
+        static TRANS0: [usize; 8] = [1, 2, 3, 3, 4, 5, 6, 7];
+        static TRANS1: [usize; 8] = [4, 4, 4, 4, 5, 6, 7, 7];
+
+        let is_dc = qmul.is_none();
+
+        // coded_block_flag
+        let ctx = self.cabac_cbf_ctx(cat, n, is_dc);
+        if cab.get(&mut self.cabac_state[ctx]) == 0 {
+            self.nnz_cache[SCAN8[n]] = 0;
+            return Ok(());
+        }
+
+        // significance map: positions 0..max_coeff-2 explicit, the final
+        // scan position is significant by elimination when the walk
+        // exhausts (DECODE_SIGNIFICANCE, h264_cabac.c:1669).
+        let mut index = [0usize; 64];
+        let mut coeff_count = 0usize;
+        let sig_base = SIG_OFF[cat];
+        let last_base = LAST_OFF[cat];
+        let mut last = 0usize;
+        while last < max_coeff - 1 {
+            if cab.get(&mut self.cabac_state[sig_base + last]) == 1 {
+                index[coeff_count] = last;
+                coeff_count += 1;
+                if cab.get(&mut self.cabac_state[last_base + last]) == 1 {
+                    last = max_coeff; // break marker
+                    break;
+                }
+            }
+            last += 1;
+        }
+        if last == max_coeff - 1 {
+            index[coeff_count] = last;
+            coeff_count += 1;
+        }
+
+        // nnz + DC-coded cbp bits (C ORs into cbp_table during decode;
+        // the port ORs into self.cbp — record_mb persists it after).
+        self.nnz_cache[SCAN8[n]] = coeff_count as u8;
+        if is_dc {
+            if cat == 3 {
+                self.cbp |= 0x40 << (n - CHROMA_DC);
+            } else {
+                self.cbp |= 0x100 << (n - LUMA_DC);
+            }
+        }
+        let _ = mb_xy;
+
+        // STORE_BLOCK (h264_cabac.c:1722) — reverse scan order.
+        let abs_base = ABSM1_OFF[cat];
+        let mut node_ctx = 0usize;
+        while coeff_count > 0 {
+            coeff_count -= 1;
+            let j = scan[index[coeff_count]] as usize;
+            let ctx = L1_CTX[node_ctx] + abs_base;
+            let v = if cab.get(&mut self.cabac_state[ctx]) == 0 {
+                node_ctx = TRANS0[node_ctx];
+                match qmul {
+                    None => cab.bypass_sign(-1),
+                    Some(q) => (cab.bypass_sign(-(q[j] as i32)) + 32) >> 6,
+                }
+            } else {
+                let ctx = GT1_CTX[node_ctx] + abs_base;
+                node_ctx = TRANS1[node_ctx];
+                let mut coeff_abs = 2u32;
+                while coeff_abs < 15 && cab.get(&mut self.cabac_state[ctx]) == 1 {
+                    coeff_abs += 1;
+                }
+                if coeff_abs >= 15 {
+                    let mut jk = 0usize;
+                    while cab.bypass() == 1 && jk < 16 + 7 {
+                        jk += 1;
+                    }
+                    coeff_abs = 1;
+                    while jk > 0 {
+                        jk -= 1;
+                        coeff_abs = coeff_abs + coeff_abs + cab.bypass() as u32;
+                    }
+                    coeff_abs += 14;
+                }
+                match qmul {
+                    None => cab.bypass_sign(-(coeff_abs as i32)),
+                    Some(q) => {
+                        ((cab.bypass_sign(-(coeff_abs as i32)) as i64 * q[j] as i64 + 32) >> 6)
+                            as i32
+                    }
+                }
+            };
+            block[j] = v as i16;
+        }
+        Ok(())
+    }
+
+    /// The residual tail of `ff_h264_decode_mb_cabac` (h264_cabac.c:2436)
+    /// for 420: luma (+ intra16 DC) then chroma DC/AC.
+    fn decode_mb_residual_cabac(&mut self, cab: &mut Cabac, mb_xy: usize) -> Result<()> {
+        self.mb = [0; 48 * 16];
+        let scan: [u8; 16] = ZIGZAG;
+        let scan1 = scan_shift1();
+        // ff_h264_chroma_dc_scan {0,16,32,48} into the 64-slot region.
+        let mut scan_cdc = [0u8; 16];
+        scan_cdc[..4].copy_from_slice(&CHROMA_DC_SCAN);
+
+        // ---- luma ----
+        if self.mb_type == MB_INTRA16X16 {
+            self.mb_luma_dc = [0; 16];
+            let mut dc = [0i16; 16];
+            self.cabac_residual(cab, mb_xy, &mut dc, 0, LUMA_DC, &scan, None, 16)?;
+            self.mb_luma_dc = dc;
+            if self.cbp & 15 != 0 {
+                let qm = *self.pps.as_ref().unwrap().dequant(0, self.qscale as usize);
+                for i in 0..16usize {
+                    let mut blk = [0i16; 16];
+                    self.cabac_residual(cab, mb_xy, &mut blk, 1, i, &scan1, Some(&qm), 15)?;
+                    // scan+1 writes positions 1..15 (DC slot = the scatter)
+                    self.mb[i * 16 + 1..(i + 1) * 16].copy_from_slice(&blk[1..16]);
+                }
+            } else {
+                for i in 0..16usize {
+                    self.nnz_cache[SCAN8[i]] = 0;
+                }
+            }
+        } else if self.cbp & 15 != 0 {
+            let cqm = if self.mb_type == MB_INTRA4X4 || self.mb_type == MB_PCM {
+                0
+            } else {
+                3
+            };
+            let qm = *self
+                .pps
+                .as_ref()
+                .unwrap()
+                .dequant(cqm, self.qscale as usize);
+            for i8x8 in 0..4usize {
+                if self.cbp & (1 << i8x8) != 0 {
+                    for i4x4 in 0..4usize {
+                        let index = i4x4 + 4 * i8x8;
+                        let mut blk = [0i16; 16];
+                        self.cabac_residual(cab, mb_xy, &mut blk, 2, index, &scan, Some(&qm), 16)?;
+                        self.mb[index * 16..(index + 1) * 16].copy_from_slice(&blk);
+                    }
+                } else {
+                    for i4x4 in 0..4usize {
+                        self.nnz_cache[SCAN8[4 * i8x8 + i4x4]] = 0;
+                    }
+                }
+            }
+        } else {
+            for i in 0..16usize {
+                self.nnz_cache[SCAN8[i]] = 0;
+            }
+        }
+
+        // ---- chroma DC ----
+        if self.cbp & 0x30 != 0 {
+            for ch in 0..2usize {
+                let mut dc64 = [0i16; 64];
+                self.cabac_residual(cab, mb_xy, &mut dc64, 3, CHROMA_DC + ch, &scan_cdc, None, 4)?;
+                let base = 16 * (16 + 16 * ch);
+                for s in [0usize, 16, 32, 48] {
+                    self.mb[base + s] = dc64[s];
+                }
+            }
+        }
+        // ---- chroma AC ----
+        if self.cbp & 0x20 != 0 {
+            for ch in 0..2usize {
+                let set = ch
+                    + 1
+                    + if self.mb_type == MB_INTRA4X4
+                        || self.mb_type == MB_INTRA16X16
+                        || self.mb_type == MB_PCM
+                    {
+                        0
+                    } else {
+                        3
+                    };
+                let qm = *self
+                    .pps
+                    .as_ref()
+                    .unwrap()
+                    .dequant(set, self.chroma_qp[ch] as usize);
+                for i4 in 0..4usize {
+                    let block_idx = 16 + 16 * ch + i4;
+                    let index = 16 * (16 + 16 * ch) + 16 * i4;
+                    let mut blk = [0i16; 16];
+                    self.cabac_residual(cab, mb_xy, &mut blk, 4, block_idx, &scan1, Some(&qm), 15)?;
+                    self.mb[index + 1..index + 16].copy_from_slice(&blk[1..16]);
+                }
+            }
+        } else {
+            for ch in 0..2usize {
+                for i in 0..4usize {
+                    self.nnz_cache[SCAN8[16 + 16 * ch + i]] = 0;
+                    self.nnz_cache[SCAN8[20 + 16 * ch + i]] = 0;
+                }
+            }
+        }
+
+        self.write_back_non_zero_count(mb_xy);
+        Ok(())
+    }
+
+    /// `ff_h264_decode_mb_cabac` (h264_cabac.c:1920), the frame I/P 420
+    /// subset: no B/direct/weighting/MBAFF/8x8 (all gated Unsupported).
+    /// Skip and PCM MBs are fully handled here (record_mb included); the
+    /// caller runs hl_decode_mb + end_of_slice afterwards either way.
+    fn decode_mb_cabac(&mut self, cab: &mut Cabac) -> Result<()> {
+        let mb_xy = self.mb_x + self.mb_y * self.mb_width;
+        self.cur_skip = false;
+        self.chroma_pred_raw = 0;
+
+        // ---- mb_skip_flag (P slices) ----
+        if self.slice_type_nos != 2 && self.cabac_mb_skip(cab) == 1 {
+            self.decode_mb_skip(mb_xy);
+            self.last_qscale_diff = 0;
+            return Ok(());
+        }
+        self.prev_mb_skipped = false;
+        self.fill_decode_neighbors();
+
+        // ---- mb_type ----
+        let part = if self.slice_type_nos == 0 {
+            if cab.get(&mut self.cabac_state[14]) == 0 {
+                // P-type (no P_8x8ref0 in CABAC)
+                let mt = if cab.get(&mut self.cabac_state[15]) == 0 {
+                    3 * cab.get(&mut self.cabac_state[16]) as usize // 0 / 3 (P_8x8)
+                } else {
+                    2 - cab.get(&mut self.cabac_state[17]) as usize // 1 (16x8) / 2 (8x16)
+                };
+                match mt {
+                    0 => Part::P16x16,
+                    1 => Part::P16x8,
+                    2 => Part::P8x16,
+                    _ => Part::P8x8,
+                }
+            } else {
+                Part::Intra(self.cabac_intra_mb_type(cab, 17, false)?)
+            }
+        } else {
+            Part::Intra(self.cabac_intra_mb_type(cab, 3, true)?)
+        };
+
+        // ---- intra PCM (before fill_decode_caches, C order) ----
+        if let Part::Intra(25) = part {
+            let ptr = cab.pcm_ptr();
+            let data = cab.data_from(ptr);
+            if data.len() < 384 {
+                return Err(Error::InvalidData("not enough data for intra PCM".into()));
+            }
+            self.intra_pcm = data[..384].to_vec();
+            *cab = Cabac::new(cab.data_from(ptr + 384))?;
+            self.mb_type = MB_PCM;
+            self.cbp = 0xf7ef; // C: cbp_table[mb_xy] = 0xf7ef
+            self.cur_part = PART_16X16;
+            let pic = self.cur.as_mut().unwrap();
+            pic.nnz[mb_xy] = [16; 48];
+            pic.mb_type[mb_xy] = MB_PCM;
+            self.record_mb(mb_xy);
+            return Ok(());
+        }
+
+        // ---- port type/cbp/pred-mode mapping (the CAVLC table logic) ----
+        match part {
+            Part::Intra(row) => {
+                let row = row as usize;
+                let (mbt, cbp, pred) = (
+                    I_MB_TYPE_INFO[row * 3],
+                    I_MB_TYPE_INFO[row * 3 + 1],
+                    I_MB_TYPE_INFO[row * 3 + 2] as i32,
+                );
+                let mbt = match mbt {
+                    0 => MB_INTRA4X4,
+                    25 => MB_PCM,
+                    _ => MB_INTRA16X16,
+                };
+                self.mb_type = mbt as u32;
+                self.cbp = if cbp == 255 { u32::MAX } else { cbp as u32 };
+                // C's 16x16 pred namespace (0=DC,1=H,2=V,3=plane) → port.
+                self.intra16x16_pred_mode = match pred {
+                    0 => 2,
+                    1 => 1,
+                    2 => 0,
+                    _ => 3,
+                };
+            }
+            _ => {
+                self.mb_type = MB_INTER;
+                self.cbp = 0;
+            }
+        }
+
+        self.fill_decode_caches(self.mb_type);
+        let pic = self.cur.as_mut().unwrap();
+        pic.mb_type[mb_xy] = self.mb_type;
+
+        // ---- intra prediction modes ----
+        if self.mb_type == MB_INTRA4X4 || self.mb_type == MB_INTRA16X16 {
+            if self.mb_type == MB_INTRA4X4 {
+                for i in 0..16usize {
+                    let pred = self.pred_intra_mode(i);
+                    let mode = self.cabac_intra4x4_pred_mode(cab, pred);
+                    self.intra4x4_pred_mode_cache[SCAN8[i]] = mode;
+                }
+                self.write_back_intra_pred_mode(mb_xy);
+                self.check_intra4x4_pred_mode()?;
+            } else {
+                self.intra16x16_pred_mode =
+                    self.check_intra_pred_mode(self.intra16x16_pred_mode, false)?;
+            }
+            let raw = self.cabac_chroma_pre_mode(cab);
+            self.chroma_pred_raw = raw as u8;
+            self.chroma_pred_mode = self.check_intra_pred_mode(raw as i32, true)?;
+        } else {
+            // ---- inter: partitions, refs, mvds ----
+            self.cur_part = match part {
+                Part::P16x8 => PART_16X8,
+                Part::P8x16 => PART_8X16,
+                Part::P8x8 => PART_8X8,
+                _ => PART_16X16,
+            };
+            self.p8x8_ref0 = false;
+            let set_ref = |s: &mut Self, x: usize, y: usize, w: usize, h: usize, r: i8| {
+                for yy in 0..h {
+                    for xx in 0..w {
+                        s.ref_cache[SCAN8[0] + 8 * (y + yy) + (x + xx)] = r;
+                    }
+                }
+            };
+            let rc = self.ref_count_l0;
+            let read_ref = |s: &mut Self, cab: &mut Cabac, n: usize| -> Result<i8> {
+                if rc <= 1 {
+                    return Ok(0);
+                }
+                let r = s.cabac_mb_ref(cab, n)?;
+                if r as u32 >= rc {
+                    return Err(Error::InvalidData(format!("reference {r} overflow")));
+                }
+                Ok(r)
+            };
+            match part {
+                Part::P16x16 => {
+                    let r0 = read_ref(self, cab, 0)?;
+                    let f0 = self.ref_frm(r0);
+                    set_ref(self, 0, 0, 4, 4, f0);
+                    let (mx, my) = self.pred_motion(0, 4, f0);
+                    let (mxd, myd, mpx, mpy) = self.cabac_mvd_xy(cab, 0)?;
+                    let (mx, my) = (mx + mxd as i16, my + myd as i16);
+                    self.fill_mv_rect(0, 0, 4, 4, mx, my);
+                    self.fill_mvd_rect(0, 0, 4, 4, mpx, mpy);
+                }
+                Part::P16x8 => {
+                    let mut r = [0i8; 2];
+                    for n in 0..2usize {
+                        let rn = read_ref(self, cab, 8 * n)?;
+                        r[n] = self.ref_frm(rn);
+                        set_ref(self, 0, 2 * n, 4, 2, r[n]);
+                    }
+                    for n in 0..2usize {
+                        let (mx, my) = self.pred_16x8_motion(n, r[n]);
+                        let (mxd, myd, mpx, mpy) = self.cabac_mvd_xy(cab, 8 * n)?;
+                        let (mx, my) = (mx + mxd as i16, my + myd as i16);
+                        self.fill_mv_rect(0, 2 * n, 4, 2, mx, my);
+                        self.fill_mvd_rect(0, 2 * n, 4, 2, mpx, mpy);
+                    }
+                }
+                Part::P8x16 => {
+                    let mut r = [0i8; 2];
+                    for n in 0..2usize {
+                        let rn = read_ref(self, cab, 4 * n)?;
+                        r[n] = self.ref_frm(rn);
+                        set_ref(self, 2 * n, 0, 2, 4, r[n]);
+                    }
+                    for n in 0..2usize {
+                        let (mx, my) = self.pred_8x16_motion(n, r[n]);
+                        let (mxd, myd, mpx, mpy) = self.cabac_mvd_xy(cab, 4 * n)?;
+                        let (mx, my) = (mx + mxd as i16, my + myd as i16);
+                        self.fill_mv_rect(2 * n, 0, 2, 4, mx, my);
+                        self.fill_mvd_rect(2 * n, 0, 2, 4, mpx, mpy);
+                    }
+                }
+                Part::P8x8 | Part::Intra(_) => {
+                    // sub_mb_types first, then per-quadrant refs, then mvds.
+                    let mut subs = [0u32; 4];
+                    for sub in subs.iter_mut() {
+                        *sub = self.cabac_p_mb_sub_type(cab);
+                    }
+                    let mut refs8 = [0i8; 4];
+                    for i in 0..4usize {
+                        let raw = read_ref(self, cab, 4 * i)?;
+                        refs8[i] = self.ref_frm(raw);
+                        set_ref(self, 2 * (i & 1), 2 * (i >> 1), 2, 2, refs8[i]);
+                    }
+                    for (i, &sub) in subs.iter().enumerate() {
+                        let (bw, bh, count) = match sub {
+                            0 => (2usize, 2usize, 1usize),
+                            1 => (2, 1, 2),
+                            2 => (1, 2, 2),
+                            _ => (1, 1, 4),
+                        };
+                        for j in 0..count {
+                            let block = 4 * i + bw * j;
+                            let (mx, my) = self.pred_motion(block, bw, refs8[i]);
+                            let (mxd, myd, mpx, mpy) = self.cabac_mvd_xy(cab, block)?;
+                            let (mx, my) = (mx + mxd as i16, my + myd as i16);
+                            let g = SCAN8[block];
+                            let (gx, gy) = ((g & 7) - 4, (g >> 3) - 1);
+                            self.fill_mv_rect(gx, gy, bw, bh, mx, my);
+                            self.fill_mvd_rect(gx, gy, bw, bh, mpx, mpy);
+                        }
+                    }
+                }
+            }
+            self.write_back_motion(mb_xy);
+        }
+
+        // ---- cbp ----
+        if self.mb_type != MB_INTRA16X16 {
+            let mut cbp = self.cabac_cbp_luma(cab);
+            cbp |= self.cabac_cbp_chroma(cab) << 4;
+            self.cbp = cbp;
+        }
+
+        // ---- residual ----
+        if self.cbp != 0 || self.mb_type == MB_INTRA16X16 {
+            self.cabac_mb_dqp(cab)?;
+            self.decode_mb_residual_cabac(cab, mb_xy)?;
+        } else {
+            for i in 0..16usize {
+                self.nnz_cache[SCAN8[i]] = 0;
+            }
+            for ch in 0..2usize {
+                for i in 0..4usize {
+                    self.nnz_cache[SCAN8[16 + 16 * ch + i]] = 0;
+                    self.nnz_cache[SCAN8[20 + 16 * ch + i]] = 0;
+                }
+            }
+            self.last_qscale_diff = 0;
+        }
+
+        self.record_mb(mb_xy);
         Ok(())
     }
 
@@ -2191,6 +3140,55 @@ impl H264Decoder {
 
         let mb_num = self.mb_width * self.mb_height;
         let mut mb_abs = first_mb;
+        if self.pps.as_ref().is_some_and(|p| p.cabac) {
+            // C's CABAC slice loop (h264_slice.c:2701-2782): align, init
+            // the engine + states, per MB decode → hl_decode_mb →
+            // end_of_slice (terminate bin).
+            gb.align();
+            let start = gb.index / 8;
+            let bytes = ((gb.left() + 7) / 8) as usize;
+            let end = (start + bytes).min(nal.rbsp.len());
+            let mut cab = Cabac::new(&nal.rbsp[start..end])?;
+            self.init_cabac_states();
+            if std::env::var_os("H264_DUMP").is_some() {
+                let _ = std::fs::write("/tmp/cabac_slice.bin", &nal.rbsp[start..end]);
+                eprintln!(
+                    "CABAC-INIT start={start} bytes={} qp={} nos={} idc={}",
+                    end - start,
+                    self.qscale,
+                    self.slice_type_nos,
+                    self.cabac_init_idc
+                );
+            }
+            loop {
+                if mb_abs >= next_slice_idx || mb_abs >= mb_num {
+                    break;
+                }
+                self.mb_x = mb_abs % self.mb_width;
+                self.mb_y = mb_abs / self.mb_width;
+                self.decode_mb_cabac(&mut cab).map_err(|e| {
+                    eprintln!(
+                        "H264DBG: CABAC MB err slice#{} kind={} first_mb={first_mb} at mb({},{}) bytes={}: {e}",
+                        self.slice_num,
+                        nal.kind,
+                        self.mb_x,
+                        self.mb_y,
+                        cab.bytestream
+                    );
+                    e
+                })?;
+                self.hl_decode_mb(mb_abs)?;
+                let eos = cab.terminate() != 0;
+                if cab.overread() {
+                    return Err(Error::InvalidData("cabac slice overread".into()));
+                }
+                mb_abs += 1;
+                if eos {
+                    break;
+                }
+            }
+            return Ok(true);
+        }
         // C's CAVLC slice loop (h264_slice.c:2784): decode MB, advance,
         // finish at end-of-picture; stop on exhausted bits ONLY when no
         // skip run is pending — an all-skip slice has zero bits left for
