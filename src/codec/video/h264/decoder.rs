@@ -906,6 +906,10 @@ impl H264Decoder {
             self.cbp as u16
         };
         pic.part[mb_xy] = self.cur_part;
+        eprintln!(
+            "  REC mb_xy={mb_xy} x={} y={} cp={} cbp={:#x}",
+            self.mb_x, self.mb_y, self.chroma_pred_raw, self.cbp
+        );
         pic.chroma_pred[mb_xy] = self.chroma_pred_raw;
         pic.skip[mb_xy] = self.cur_skip;
         pic.dbk[mb_xy] = self.slice_dbk;
@@ -1835,14 +1839,31 @@ impl H264Decoder {
         let left_xy = mb_xy.wrapping_sub(1);
         let top_xy = mb_xy.wrapping_sub(self.mb_width);
         let mut ctx = 0usize;
+        let (pic_chroma_l, pic_chroma_t);
         {
             let pic = self.cur.as_ref().unwrap();
-            if self.n_left != 0 && pic.chroma_pred[left_xy] != 0 {
+            pic_chroma_l = if self.n_left != 0 {
+                pic.chroma_pred[left_xy]
+            } else {
+                255
+            };
+            pic_chroma_t = if self.n_top != 0 {
+                pic.chroma_pred[top_xy]
+            } else {
+                255
+            };
+            if pic_chroma_l != 0 && pic_chroma_l != 255 {
                 ctx += 1;
             }
-            if self.n_top != 0 && pic.chroma_pred[top_xy] != 0 {
-                ctx += 2;
+            if pic_chroma_t != 0 && pic_chroma_t != 255 {
+                ctx += 1;
             }
+        }
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!(
+                "  cpred_ctx={ctx} (L={pic_chroma_l} T={pic_chroma_t}) mb={}",
+                self.mb_x
+            );
         }
         if cab.get(&mut self.cabac_state[64 + ctx]) == 0 {
             return 0;
@@ -1948,8 +1969,10 @@ impl H264Decoder {
     /// `decode_cabac_mb_mvd` (h264_cabac.c:1506): returns (mvd, |mvd|
     /// capped at 70 — C's *mvda for the mvd_cache).
     fn cabac_mb_mvd(&mut self, cab: &mut Cabac, ctxbase: usize, amvd: i32) -> Result<(i32, u8)> {
-        // C: ctxbase + ((amvd-3)>>31) + ((amvd-33)>>31) + 2.
-        let ctx = ctxbase + 2 + (amvd >= 3) as usize + (amvd >= 33) as usize;
+        // C: ctxbase + ((amvd-3)>>31) + ((amvd-33)>>31) + 2 — the sign
+        // shifts contribute -1 while amvd is BELOW the threshold:
+        // amvd<3 → base+0, 3..32 → base+1, ≥33 → base+2.
+        let ctx = ctxbase + 2 - (amvd < 3) as usize - (amvd < 33) as usize;
         if cab.get(&mut self.cabac_state[ctx]) == 0 {
             return Ok((0, 0));
         }
@@ -1989,6 +2012,14 @@ impl H264Decoder {
     fn cabac_mvd_xy(&mut self, cab: &mut Cabac, n: usize) -> Result<(i32, i32, u8, u8)> {
         let idx = SCAN8[n];
         let amvd0 = self.mvd_cache[idx - 1][0] as i32 + self.mvd_cache[idx - 8][0] as i32;
+        eprintln!(
+            "    mvd-ctx idx={idx} a=({},{}) b=({},{}) amvd=({amvd0},{}",
+            self.mvd_cache[idx - 1][0],
+            self.mvd_cache[idx - 1][1],
+            self.mvd_cache[idx - 8][0],
+            self.mvd_cache[idx - 8][1],
+            self.mvd_cache[idx - 1][1] as i32 + self.mvd_cache[idx - 8][1] as i32
+        );
         let amvd1 = self.mvd_cache[idx - 1][1] as i32 + self.mvd_cache[idx - 8][1] as i32;
         let (mxd, mpx) = self.cabac_mb_mvd(cab, 40, amvd0)?;
         let (myd, mpy) = self.cabac_mb_mvd(cab, 47, amvd1)?;
@@ -2147,6 +2178,12 @@ impl H264Decoder {
         // nnz + DC-coded cbp bits (C ORs into cbp_table during decode;
         // the port ORs into self.cbp — record_mb persists it after).
         self.nnz_cache[SCAN8[n]] = coeff_count as u8;
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!(
+                "  RES cat={cat} n={n} max={max_coeff} cc={coeff_count} q={}",
+                self.qscale
+            );
+        }
         if is_dc {
             if cat == 3 {
                 self.cbp |= 0x40 << (n - CHROMA_DC);
@@ -2371,6 +2408,9 @@ impl H264Decoder {
         }
 
         // ---- port type/cbp/pred-mode mapping (the CAVLC table logic) ----
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!("CMB {} {} type={:?} cbp-tail", self.mb_x, self.mb_y, part);
+        }
         match part {
             Part::Intra(row) => {
                 let row = row as usize;
@@ -2410,6 +2450,9 @@ impl H264Decoder {
                 for i in 0..16usize {
                     let pred = self.pred_intra_mode(i);
                     let mode = self.cabac_intra4x4_pred_mode(cab, pred);
+                    if std::env::var_os("H264_DUMP").is_some() {
+                        eprintln!("  i4x4 {pred} {mode}");
+                    }
                     self.intra4x4_pred_mode_cache[SCAN8[i]] = mode;
                 }
                 self.write_back_intra_pred_mode(mb_xy);
@@ -2420,6 +2463,9 @@ impl H264Decoder {
             }
             let raw = self.cabac_chroma_pre_mode(cab);
             self.chroma_pred_raw = raw as u8;
+            if std::env::var_os("H264_DUMP").is_some() {
+                eprintln!("  chroma_pred={raw}");
+            }
             self.chroma_pred_mode = self.check_intra_pred_mode(raw as i32, true)?;
         } else {
             // ---- inter: partitions, refs, mvds ----
@@ -2454,8 +2500,22 @@ impl H264Decoder {
                     let f0 = self.ref_frm(r0);
                     set_ref(self, 0, 0, 4, 4, f0);
                     let (mx, my) = self.pred_motion(0, 4, f0);
-                    let (mxd, myd, mpx, mpy) = self.cabac_mvd_xy(cab, 0)?;
+                    let (mxd, myd, mpx, mpy) = {
+                        if std::env::var_os("H264_DUMP").is_some() {
+                            eprintln!(
+                                "  pre-mvd eng r={} low={:08x} bs={} st42={}",
+                                cab.range, cab.low, cab.bytestream, self.cabac_state[42]
+                            );
+                        }
+                        self.cabac_mvd_xy(cab, 0)?
+                    };
                     let (mx, my) = (mx + mxd as i16, my + myd as i16);
+                    if std::env::var_os("H264_DUMP").is_some() {
+                        eprintln!(
+                            "  mv16 ref={r0} mv=({mx},{my}) mvd=({mxd},{myd}) eng r={} low={:08x} bs={} st42={}",
+                            cab.range, cab.low, cab.bytestream, self.cabac_state[42]
+                        );
+                    }
                     self.fill_mv_rect(0, 0, 4, 4, mx, my);
                     self.fill_mvd_rect(0, 0, 4, 4, mpx, mpy);
                 }
@@ -2530,10 +2590,16 @@ impl H264Decoder {
             cbp |= self.cabac_cbp_chroma(cab) << 4;
             self.cbp = cbp;
         }
+        if std::env::var_os("H264_DUMP").is_some() {
+            eprintln!("  cbp={:#04x}", self.cbp);
+        }
 
         // ---- residual ----
         if self.cbp != 0 || self.mb_type == MB_INTRA16X16 {
             self.cabac_mb_dqp(cab)?;
+            if std::env::var_os("H264_DUMP").is_some() {
+                eprintln!("  qscale={}", self.qscale);
+            }
             self.decode_mb_residual_cabac(cab, mb_xy)?;
         } else {
             for i in 0..16usize {
@@ -3151,13 +3217,13 @@ impl H264Decoder {
             let mut cab = Cabac::new(&nal.rbsp[start..end])?;
             self.init_cabac_states();
             if std::env::var_os("H264_DUMP").is_some() {
-                let _ = std::fs::write("/tmp/cabac_slice.bin", &nal.rbsp[start..end]);
                 eprintln!(
-                    "CABAC-INIT start={start} bytes={} qp={} nos={} idc={}",
-                    end - start,
+                    "CABACSTART qp={} start={start} bytes={} nos={} idc={} rc0={}",
                     self.qscale,
+                    end - start,
                     self.slice_type_nos,
-                    self.cabac_init_idc
+                    self.cabac_init_idc,
+                    self.ref_count_l0
                 );
             }
             loop {

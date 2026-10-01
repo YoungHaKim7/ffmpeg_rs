@@ -121,6 +121,7 @@ const I4_DC_128_PRED: i8 = 11;
 const LEVEL_TAB_BITS: u32 = 8;
 
 /// MB partition shape (`ff_h264_p_mb_type_info` + the intra path).
+#[derive(Debug)]
 enum Part {
     Intra(usize),
     P16x16,
