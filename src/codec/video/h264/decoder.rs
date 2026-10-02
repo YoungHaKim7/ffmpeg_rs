@@ -379,9 +379,16 @@ impl H264Decoder {
             }
         }
         self.slice_dbk = dbk;
+        // New-picture detection per C (ff_h264_queue_decode_slice,
+        // h264_slice.c:2190): ONLY a first_mb==0 slice starts a new
+        // picture — later slices of a multi-slice picture (IDR included)
+        // continue the current one. The frame_num change is a port-level
+        // safety net for stream breaks.
         Ok((
             first_mb,
-            frame_num != self.frame_num || nal.kind == 5 || first_mb == 0 && self.got_mb,
+            frame_num != self.frame_num
+                || (nal.kind == 5 && first_mb == 0)
+                || (first_mb == 0 && self.got_mb),
         ))
     }
 
@@ -617,6 +624,14 @@ impl H264Decoder {
         }
 
         // ---- nnz cache ----
+        // C (h264_mvpred.h:698/725): for CABAC INTER macroblocks an
+        // unavailable neighbor contributes 0 (never 64) — the coded_
+        // block_flag ctx then sees "no coefficients" instead of "all".
+        let nnz_unavail = if self.pps.as_ref().is_some_and(|p| p.cabac) && !is_intra {
+            0u8
+        } else {
+            64
+        };
         {
             let pic = self.cur.as_ref().unwrap();
             let b_stride = self.mb_width * 4 + 1;
@@ -628,7 +643,11 @@ impl H264Decoder {
                     self.nnz_cache[4 + 10 * 8 + c] = nnz[36 + c];
                 }
             } else {
-                let v = if self.n_top != MB_UNAVAIL { 0u8 } else { 64 };
+                let v = if self.n_top != MB_UNAVAIL {
+                    0u8
+                } else {
+                    nnz_unavail
+                };
                 for c in 0..4 {
                     self.nnz_cache[4 + c] = v;
                     self.nnz_cache[4 + 5 * 8 + c] = v;
@@ -644,7 +663,11 @@ impl H264Decoder {
                     self.nnz_cache[3 + 8 * 6 + 8 * i] = nnz[[17usize, 21][i]];
                     self.nnz_cache[3 + 8 * 11 + 8 * i] = nnz[[33usize, 37][i]];
                 } else {
-                    let v = if self.n_left != MB_UNAVAIL { 0u8 } else { 64 };
+                    let v = if self.n_left != MB_UNAVAIL {
+                        0u8
+                    } else {
+                        nnz_unavail
+                    };
                     self.nnz_cache[3 + 8 * 1 + 2 * 8 * i] = v;
                     self.nnz_cache[3 + 8 * 2 + 2 * 8 * i] = v;
                     self.nnz_cache[3 + 8 * 6 + 8 * i] = v;
@@ -906,10 +929,6 @@ impl H264Decoder {
             self.cbp as u16
         };
         pic.part[mb_xy] = self.cur_part;
-        eprintln!(
-            "  REC mb_xy={mb_xy} x={} y={} cp={} cbp={:#x}",
-            self.mb_x, self.mb_y, self.chroma_pred_raw, self.cbp
-        );
         pic.chroma_pred[mb_xy] = self.chroma_pred_raw;
         pic.skip[mb_xy] = self.cur_skip;
         pic.dbk[mb_xy] = self.slice_dbk;
@@ -1760,9 +1779,23 @@ impl H264Decoder {
     /// with NO mb_x guard (a row-start MB sees the previous row's last
     /// MB as its "left") — ported verbatim.
     fn cabac_mb_skip(&mut self, cab: &mut Cabac) -> u32 {
+        // C computes mba/mbb with RAW mb_xy arithmetic over mb_stride =
+        // mb_width+1: at a row start, mba = mb_xy-1 lands in the PADDING
+        // column (slice_table there is never this slice → no ctx), and
+        // for the top row mbb goes negative. The port's flat mb_xy must
+        // guard explicitly instead of wrapping to the previous row's
+        // last MB.
         let mb_xy = self.mb_x + self.mb_y * self.mb_width;
-        let mba = mb_xy as isize - 1;
-        let mbb = mb_xy as isize - self.mb_width as isize;
+        let mba = if self.mb_x > 0 {
+            Some(mb_xy as isize - 1)
+        } else {
+            None
+        };
+        let mbb = if self.mb_y > 0 {
+            Some(mb_xy as isize - self.mb_width as isize)
+        } else {
+            None
+        };
         let in_slice = |xy: isize| -> bool {
             xy >= 0
                 && (xy as usize) < self.slice_table.len()
@@ -1771,10 +1804,10 @@ impl H264Decoder {
         let mut ctx = 0usize;
         {
             let pic = self.cur.as_ref().unwrap();
-            if in_slice(mba) && !pic.skip[mba as usize] {
+            if mba.is_some_and(|xy| in_slice(xy) && !pic.skip[xy as usize]) {
                 ctx += 1;
             }
-            if in_slice(mbb) && !pic.skip[mbb as usize] {
+            if mbb.is_some_and(|xy| in_slice(xy) && !pic.skip[xy as usize]) {
                 ctx += 1;
             }
         }
@@ -1839,31 +1872,14 @@ impl H264Decoder {
         let left_xy = mb_xy.wrapping_sub(1);
         let top_xy = mb_xy.wrapping_sub(self.mb_width);
         let mut ctx = 0usize;
-        let (pic_chroma_l, pic_chroma_t);
         {
             let pic = self.cur.as_ref().unwrap();
-            pic_chroma_l = if self.n_left != 0 {
-                pic.chroma_pred[left_xy]
-            } else {
-                255
-            };
-            pic_chroma_t = if self.n_top != 0 {
-                pic.chroma_pred[top_xy]
-            } else {
-                255
-            };
-            if pic_chroma_l != 0 && pic_chroma_l != 255 {
+            if self.n_left != 0 && pic.chroma_pred[left_xy] != 0 {
                 ctx += 1;
             }
-            if pic_chroma_t != 0 && pic_chroma_t != 255 {
+            if self.n_top != 0 && pic.chroma_pred[top_xy] != 0 {
                 ctx += 1;
             }
-        }
-        if std::env::var_os("H264_DUMP").is_some() {
-            eprintln!(
-                "  cpred_ctx={ctx} (L={pic_chroma_l} T={pic_chroma_t}) mb={}",
-                self.mb_x
-            );
         }
         if cab.get(&mut self.cabac_state[64 + ctx]) == 0 {
             return 0;
@@ -2359,6 +2375,9 @@ impl H264Decoder {
 
         // ---- mb_skip_flag (P slices) ----
         if self.slice_type_nos != 2 && self.cabac_mb_skip(cab) == 1 {
+            if std::env::var_os("H264_DUMP").is_some() {
+                eprintln!("CMB {} {} SKIP", self.mb_x, self.mb_y);
+            }
             self.decode_mb_skip(mb_xy);
             self.last_qscale_diff = 0;
             return Ok(());
@@ -3201,6 +3220,9 @@ impl H264Decoder {
         self.slice_num += 1;
         self.slice_dbk.slice = self.slice_num;
         self.build_ref_list()?;
+        // C resets the skip run per SLICE (decode_slice, h264_slice.c:2681)
+        // — a later slice of the same picture starts with a fresh run.
+        self.mb_skip_run = -1;
         // (frame_num kept from header for next comparison)
         self.got_mb = true;
 
