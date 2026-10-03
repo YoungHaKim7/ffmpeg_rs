@@ -334,6 +334,13 @@ struct Sps {
     log2_max_frame_num: u32,
     poc_type: u8,
     log2_max_poc_lsb: u32,
+    /// poc_type 1: delta_pic_order_always_zero_flag +
+    /// offset_for_non_ref_pic + offset_for_top_to_bottom_field +
+    /// offset_for_ref_frame[] (C's poc_cycle_length = the count).
+    delta_pic_order_always_zero: bool,
+    offset_for_non_ref_pic: i32,
+    offset_for_top_to_bottom: i32,
+    offset_for_ref_frame: Vec<i32>,
     ref_frame_count: u32,
     mb_width: usize,
     mb_height: usize,
@@ -343,6 +350,11 @@ struct Sps {
     crop_right: u32,
     crop_top: u32,
     crop_bottom: u32,
+    /// VUI bitstream_restriction: num_reorder_frames (C:
+    /// sps.num_reorder_frames; absent → the decoder grows the reorder
+    /// buffer heuristically).
+    bitstream_restriction: bool,
+    num_reorder_frames: usize,
 }
 
 #[derive(Clone)]
@@ -422,6 +434,7 @@ fn parse_sps(rbsp: &[u8]) -> Result<Sps> {
 
     let poc_type = gb.ue()? as u8;
     let log2_max_poc_lsb;
+    let (dpaz, off_non_ref, off_top2bot, off_ref);
     match poc_type {
         0 => {
             let t = gb.ue()?;
@@ -429,9 +442,29 @@ fn parse_sps(rbsp: &[u8]) -> Result<Sps> {
                 return Err(Error::InvalidData("log2_max_poc_lsb".into()));
             }
             log2_max_poc_lsb = t + 4;
+            (dpaz, off_non_ref, off_top2bot, off_ref) = (false, 0, 0, Vec::new());
         }
-        1 => return Err(Error::Unsupported("POC type 1".into())),
-        2 => log2_max_poc_lsb = 0,
+        1 => {
+            // POC type 1 (spec 7.3.2.1.1): the offsets feed
+            // ff_h264_init_poc's expected-POC arithmetic.
+            dpaz = gb.read_bit() == 1;
+            off_non_ref = gb.se()?;
+            off_top2bot = gb.se()?;
+            let cycle = gb.ue()?;
+            if cycle > 255 {
+                return Err(Error::InvalidData("poc cycle too long".into()));
+            }
+            let mut offs = Vec::with_capacity(cycle as usize);
+            for _ in 0..cycle {
+                offs.push(gb.se()?);
+            }
+            off_ref = offs;
+            log2_max_poc_lsb = 0;
+        }
+        2 => {
+            log2_max_poc_lsb = 0;
+            (dpaz, off_non_ref, off_top2bot, off_ref) = (false, 0, 0, Vec::new());
+        }
         _ => return Err(Error::InvalidData("illegal POC type".into())),
     }
 
@@ -458,13 +491,75 @@ fn parse_sps(rbsp: &[u8]) -> Result<Sps> {
         (0, 0, 0, 0)
     };
     let _vui = gb.read_bit();
-    // VUI is the final SPS member; nothing follows — skipped safely.
+    // VUI (spec Appendix E) — parse through to bitstream_restriction,
+    // which carries num_reorder_frames (the reorder depth for output
+    // ordering). Everything else is skipped field-by-field.
+    let (mut bsr, mut nrf) = (false, 0usize);
+    if _vui == 1 {
+        if gb.read_bit() == 1 {
+            let _aspect_idc = gb.read(8);
+            if gb.read_bit() == 1 {
+                let _sar_w = gb.ue()?;
+                let _sar_h = gb.ue()?;
+            }
+        }
+        if gb.read_bit() == 1 {
+            let _overscan = gb.read(1);
+        }
+        if gb.read_bit() == 1 {
+            let _vs_type = gb.read(3);
+            let _full_range = gb.read(1);
+            if gb.read_bit() == 1 {
+                let _color_desc = gb.read(8);
+                let _matrix = gb.read(16);
+            }
+        }
+        if gb.read_bit() == 1 {
+            let _chroma_loc = gb.ue()?;
+        }
+        if gb.read_bit() == 1 {
+            let _num_units = gb.ue()?;
+            let _scale = gb.ue()?;
+            if gb.read_bit() == 1 {
+                let _fixed = gb.read(1);
+            }
+        }
+        let nal_hrd = gb.read_bit() == 1;
+        let vcl_hrd = gb.read_bit() == 1;
+        if nal_hrd || vcl_hrd {
+            let cpb_cnt = gb.ue()? + 1;
+            for _ in 0..cpb_cnt {
+                let _bit_rate = gb.ue()?;
+                let _cpb_size = gb.ue()?;
+            }
+            let _cei = gb.read(1);
+        }
+        let _pic_struct_present = gb.read_bit() == 1;
+        bsr = gb.read_bit() == 1;
+        if bsr {
+            let _mvs_over_bounds = gb.read(1);
+            let _max_bytes = gb.ue()?;
+            let _max_bits = gb.ue()?;
+            let _log2_max_mv_h = gb.ue()?;
+            let _log2_max_mv_v = gb.ue()?;
+            let n = gb.ue()?;
+            if n > 16 {
+                return Err(Error::InvalidData("num_reorder_frames".into()));
+            }
+            nrf = n as usize;
+            let _max_dec_buf = gb.ue()?;
+        }
+    }
 
     Ok(Sps {
         profile_idc,
         log2_max_frame_num,
         poc_type,
         log2_max_poc_lsb,
+        delta_pic_order_always_zero: dpaz,
+        offset_for_non_ref_pic: off_non_ref,
+        offset_for_top_to_bottom: off_top2bot,
+        offset_for_ref_frame: off_ref,
         ref_frame_count,
         mb_width,
         mb_height,
@@ -474,6 +569,8 @@ fn parse_sps(rbsp: &[u8]) -> Result<Sps> {
         crop_right: cr,
         crop_top: ct,
         crop_bottom: cb,
+        bitstream_restriction: bsr,
+        num_reorder_frames: nrf,
     })
 }
 

@@ -84,8 +84,9 @@ pub struct H264Decoder {
     pub(super) mb_luma_dc: [i16; 16],
     intra4x4_pred_mode_cache: [i8; 15 * 8],
     pub(super) nnz_cache: [u8; 15 * 8],
-    pub(super) mv_cache: [[i16; 2]; 15 * 8],
-    pub(super) ref_cache: [i8; 15 * 8],
+    /// Per-list motion caches (C's mv_cache[2] etc; list 1 = B only).
+    pub(super) mv_cache: [[[i16; 2]; 15 * 8]; 2],
+    pub(super) ref_cache: [[i8; 15 * 8]; 2],
     pub(super) top_samples_available: u16,
     pub(super) left_samples_available: u16,
     pub(super) topright_samples_available: u16,
@@ -113,8 +114,8 @@ pub struct H264Decoder {
     cabac_init_idc: usize,
     /// last_qscale_diff of the slice (mb_qp_delta ctx).
     last_qscale_diff: i32,
-    /// |mvd| cache (list 0), scan8 layout — CABAC mvd ctx.
-    mvd_cache: [[u8; 2]; 15 * 8],
+    /// |mvd| cache per list, scan8 layout — CABAC mvd ctx.
+    mvd_cache: [[[u8; 2]; 15 * 8]; 2],
     /// fill_decode_caches CABAC section (h264_mvpred.h:736-750).
     left_cbp: u16,
     top_cbp: u16,
@@ -166,8 +167,8 @@ impl H264Decoder {
             mb_luma_dc: [0; 16],
             intra4x4_pred_mode_cache: [-1; 120],
             nnz_cache: [0; 120],
-            mv_cache: [[0, 0]; 120],
-            ref_cache: [-2; 120],
+            mv_cache: [[[0, 0]; 120], [[0, 0]; 120]],
+            ref_cache: [[-2; 120], [-2; 120]],
             top_samples_available: 0,
             left_samples_available: 0,
             topright_samples_available: 0,
@@ -184,7 +185,7 @@ impl H264Decoder {
             cabac_state: Box::new([0; 1024]),
             cabac_init_idc: 0,
             last_qscale_diff: 0,
-            mvd_cache: [[0; 2]; 15 * 8],
+            mvd_cache: [[[0; 2]; 15 * 8], [[0; 2]; 15 * 8]],
             left_cbp: 0,
             top_cbp: 0,
             intra_pcm: Vec::new(),
@@ -693,32 +694,32 @@ impl H264Decoder {
             if uses(self.n_top) {
                 let bxy = 4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
                 for c in 0..4 {
-                    self.mv_cache[top0 + c] = pic.mv[bxy + c];
-                    self.ref_cache[top0 + c] = pic.ref_pic[4 * top_xy + 2 + (c >> 1)] as i8;
+                    self.mv_cache[0][top0 + c] = pic.mv[0][bxy + c];
+                    self.ref_cache[0][top0 + c] = pic.ref_pic[0][4 * top_xy + 2 + (c >> 1)] as i8;
                 }
             } else {
                 for c in 0..4 {
-                    self.mv_cache[top0 + c] = [0, 0];
-                    self.ref_cache[top0 + c] = fill_edge(self.n_top);
+                    self.mv_cache[0][top0 + c] = [0, 0];
+                    self.ref_cache[0][top0 + c] = fill_edge(self.n_top);
                 }
             }
             let tr = SCAN8[0] - 8 + 4;
             if uses(self.n_topright) {
                 let bxy = 4 * (self.mb_x + 1) + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
-                self.mv_cache[tr] = pic.mv[bxy];
-                self.ref_cache[tr] = pic.ref_pic[4 * (top_xy + 1) + 2] as i8;
+                self.mv_cache[0][tr] = pic.mv[0][bxy];
+                self.ref_cache[0][tr] = pic.ref_pic[0][4 * (top_xy + 1) + 2] as i8;
             } else {
-                self.mv_cache[tr] = [0, 0];
-                self.ref_cache[tr] = fill_edge(self.n_topright);
+                self.mv_cache[0][tr] = [0, 0];
+                self.ref_cache[0][tr] = fill_edge(self.n_topright);
             }
             let tl = SCAN8[0] - 8 - 1;
             if uses(self.n_topleft) {
                 let bxy = 4 * (self.mb_x - 1) + 4 * (self.mb_y - 1) * b_stride + 3 + 3 * b_stride;
-                self.mv_cache[tl] = pic.mv[bxy];
-                self.ref_cache[tl] = pic.ref_pic[4 * (top_xy - 1) + 3] as i8;
+                self.mv_cache[0][tl] = pic.mv[0][bxy];
+                self.ref_cache[0][tl] = pic.ref_pic[0][4 * (top_xy - 1) + 3] as i8;
             } else {
-                self.mv_cache[tl] = [0, 0];
-                self.ref_cache[tl] = fill_edge(self.n_topleft);
+                self.mv_cache[0][tl] = [0, 0];
+                self.ref_cache[0][tl] = fill_edge(self.n_topleft);
             }
             for i in 0..4 {
                 if uses(self.n_left) {
@@ -726,15 +727,15 @@ impl H264Decoder {
                         + 4 * self.mb_y * b_stride
                         + 3
                         + i * b_stride;
-                    self.mv_cache[3 + 8 * (1 + i)] = pic.mv[bxy];
-                    self.ref_cache[3 + 8 * (1 + i)] =
-                        pic.ref_pic[4 * left_xy + 1 + 2 * (i >> 1)] as i8;
+                    self.mv_cache[0][3 + 8 * (1 + i)] = pic.mv[0][bxy];
+                    self.ref_cache[0][3 + 8 * (1 + i)] =
+                        pic.ref_pic[0][4 * left_xy + 1 + 2 * (i >> 1)] as i8;
                 } else if self.n_left != MB_UNAVAIL {
-                    self.mv_cache[3 + 8 * (1 + i)] = [0, 0];
-                    self.ref_cache[3 + 8 * (1 + i)] = -1;
+                    self.mv_cache[0][3 + 8 * (1 + i)] = [0, 0];
+                    self.ref_cache[0][3 + 8 * (1 + i)] = -1;
                 } else {
-                    self.mv_cache[3 + 8 * (1 + i)] = [0, 0];
-                    self.ref_cache[3 + 8 * (1 + i)] = -2;
+                    self.mv_cache[0][3 + 8 * (1 + i)] = [0, 0];
+                    self.ref_cache[0][3 + 8 * (1 + i)] = -2;
                 }
             }
 
@@ -747,11 +748,11 @@ impl H264Decoder {
                 if uses(self.n_top) {
                     let bxy = 4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
                     for c in 0..4 {
-                        self.mvd_cache[top0 + c] = pic.mvd[bxy + c];
+                        self.mvd_cache[0][top0 + c] = pic.mvd[0][bxy + c];
                     }
                 } else {
                     for c in 0..4 {
-                        self.mvd_cache[top0 + c] = [0, 0];
+                        self.mvd_cache[0][top0 + c] = [0, 0];
                     }
                 }
                 for i in 0..4 {
@@ -760,14 +761,14 @@ impl H264Decoder {
                             + 4 * self.mb_y * b_stride
                             + 3
                             + i * b_stride;
-                        self.mvd_cache[3 + 8 * (1 + i)] = pic.mvd[bxy];
+                        self.mvd_cache[0][3 + 8 * (1 + i)] = pic.mvd[0][bxy];
                     } else {
-                        self.mvd_cache[3 + 8 * (1 + i)] = [0, 0];
+                        self.mvd_cache[0][3 + 8 * (1 + i)] = [0, 0];
                     }
                 }
                 // AV_ZERO16(mvd_cache[2 + 8*0]) / [2 + 8*2]
-                self.mvd_cache[SCAN8[0] + 2] = [0, 0];
-                self.mvd_cache[SCAN8[0] + 2 + 16] = [0, 0];
+                self.mvd_cache[0][SCAN8[0] + 2] = [0, 0];
+                self.mvd_cache[0][SCAN8[0] + 2 + 16] = [0, 0];
             }
         }
 
@@ -883,12 +884,12 @@ impl H264Decoder {
         let pic = self.cur.as_mut().unwrap();
         for r in 0..4 {
             for c in 0..4 {
-                pic.mv[b_xy + r * b_stride + c] = self.mv_cache[SCAN8[0] + 8 * r + c];
+                pic.mv[0][b_xy + r * b_stride + c] = self.mv_cache[0][SCAN8[0] + 8 * r + c];
                 // CABAC mvd table (write_back_motion_list, h264_mvpred.h:
                 // 106-117): C keeps only the MB's br 4x4 (bottom row +
                 // right column is all the borders ever read); the port's
                 // full-grid store covers the same cells.
-                pic.mvd[b_xy + r * b_stride + c] = self.mvd_cache[SCAN8[0] + 8 * r + c];
+                pic.mvd[0][b_xy + r * b_stride + c] = self.mvd_cache[0][SCAN8[0] + 8 * r + c];
             }
         }
         // ref_cache is in PICTURE-ID space (C's ref2frm). Store the id
@@ -896,8 +897,8 @@ impl H264Decoder {
         // position of that picture in RefPicList0) for ref_index —
         // pred_pskip_motion compares ref_index against raw 0.
         for (k, blk) in [0usize, 4, 8, 12].into_iter().enumerate() {
-            let f = self.ref_cache[SCAN8[blk]];
-            self.cur.as_mut().unwrap().ref_pic[4 * mb_xy + k] = f as i32;
+            let f = self.ref_cache[0][SCAN8[blk]];
+            self.cur.as_mut().unwrap().ref_pic[0][4 * mb_xy + k] = f as i32;
             let raw = if f < 0 {
                 -1
             } else {
@@ -906,7 +907,7 @@ impl H264Decoder {
                     .position(|&i| self.refs.get(i).is_some_and(|p| p.id as i8 == f))
                     .map_or(-1, |p| p as i8)
             };
-            self.cur.as_mut().unwrap().ref_index[4 * mb_xy + k] = raw;
+            self.cur.as_mut().unwrap().ref_index[0][4 * mb_xy + k] = raw;
         }
     }
 
@@ -935,21 +936,21 @@ impl H264Decoder {
 
     /// `fetch_diagonal_mv` frame path.
     fn fetch_diagonal_mv(&self, i: usize, part_width: usize) -> (i8, [i16; 2]) {
-        let tr = self.ref_cache[i - 8 + part_width];
+        let tr = self.ref_cache[0][i - 8 + part_width];
         if tr != -2 {
-            (tr, self.mv_cache[i - 8 + part_width])
+            (tr, self.mv_cache[0][i - 8 + part_width])
         } else {
-            (self.ref_cache[i - 8 - 1], self.mv_cache[i - 8 - 1])
+            (self.ref_cache[0][i - 8 - 1], self.mv_cache[0][i - 8 - 1])
         }
     }
 
     /// `pred_motion`.
     fn pred_motion(&self, n: usize, part_width: usize, r: i8) -> (i16, i16) {
         let idx = SCAN8[n];
-        let left_ref = self.ref_cache[idx - 1];
-        let a = self.mv_cache[idx - 1];
-        let top_ref = self.ref_cache[idx - 8];
-        let b = self.mv_cache[idx - 8];
+        let left_ref = self.ref_cache[0][idx - 1];
+        let a = self.mv_cache[0][idx - 1];
+        let top_ref = self.ref_cache[0][idx - 8];
+        let b = self.mv_cache[0][idx - 8];
         let (diag_ref, c) = self.fetch_diagonal_mv(idx, part_width);
         let match_count = (diag_ref == r) as i32 + (top_ref == r) as i32 + (left_ref == r) as i32;
         let mid3 = |x: i16, y: i16, z: i16| -> i16 {
@@ -983,14 +984,14 @@ impl H264Decoder {
     /// `pred_16x8_motion` (n = 0 top half, 1 bottom half).
     fn pred_16x8_motion(&self, n: usize, r: i8) -> (i16, i16) {
         if n == 0 {
-            let top_ref = self.ref_cache[SCAN8[0] - 8];
-            let b = self.mv_cache[SCAN8[0] - 8];
+            let top_ref = self.ref_cache[0][SCAN8[0] - 8];
+            let b = self.mv_cache[0][SCAN8[0] - 8];
             if top_ref == r {
                 return (b[0], b[1]);
             }
         } else {
-            let left_ref = self.ref_cache[SCAN8[8] - 1];
-            let a = self.mv_cache[SCAN8[8] - 1];
+            let left_ref = self.ref_cache[0][SCAN8[8] - 1];
+            let a = self.mv_cache[0][SCAN8[8] - 1];
             if left_ref == r {
                 return (a[0], a[1]);
             }
@@ -1002,8 +1003,8 @@ impl H264Decoder {
     /// `pred_8x16_motion` (n = 0 left half, 1 right half).
     fn pred_8x16_motion(&self, n: usize, r: i8) -> (i16, i16) {
         if n == 0 {
-            let left_ref = self.ref_cache[SCAN8[0] - 1];
-            let a = self.mv_cache[SCAN8[0] - 1];
+            let left_ref = self.ref_cache[0][SCAN8[0] - 1];
+            let a = self.mv_cache[0][SCAN8[0] - 1];
             if left_ref == r {
                 return (a[0], a[1]);
             }
@@ -1034,8 +1035,8 @@ impl H264Decoder {
             // A: left
             let (left_ref, a) = if self.n_left == MB_INTER {
                 let xy = mx_ - 1 + my_ * mw;
-                let r = pic.ref_index[4 * xy + 1];
-                let a = pic.mv[b_xy(mx_ - 1, my_) + 3];
+                let r = pic.ref_index[0][4 * xy + 1];
+                let a = pic.mv[0][b_xy(mx_ - 1, my_) + 3];
                 if r == 0 && a == zero {
                     break 'pred zero;
                 }
@@ -1048,8 +1049,8 @@ impl H264Decoder {
             // B: top
             let (top_ref, bm) = if self.n_top == MB_INTER {
                 let xy = mx_ + (my_ - 1) * mw;
-                let r = pic.ref_index[4 * xy + 2];
-                let bm = pic.mv[b_xy(mx_, my_ - 1) + 3 * b_stride];
+                let r = pic.ref_index[0][4 * xy + 2];
+                let bm = pic.mv[0][b_xy(mx_, my_ - 1) + 3 * b_stride];
                 if r == 0 && bm == zero {
                     break 'pred zero;
                 }
@@ -1063,16 +1064,16 @@ impl H264Decoder {
             let (diag_ref, c) = if self.n_topright == MB_INTER {
                 let xy = mx_ + 1 + (my_ - 1) * mw;
                 (
-                    pic.ref_index[4 * xy + 2],
-                    pic.mv[b_xy(mx_ + 1, my_ - 1) + 3 * b_stride],
+                    pic.ref_index[0][4 * xy + 2],
+                    pic.mv[0][b_xy(mx_ + 1, my_ - 1) + 3 * b_stride],
                 )
             } else if self.n_topright != MB_UNAVAIL {
                 (NOT_USED, zero)
             } else if self.n_topleft == MB_INTER {
                 let xy = mx_ - 1 + (my_ - 1) * mw;
                 (
-                    pic.ref_index[4 * xy + 3],
-                    pic.mv[b_xy(mx_ - 1, my_ - 1) + 3 + 3 * b_stride],
+                    pic.ref_index[0][4 * xy + 3],
+                    pic.mv[0][b_xy(mx_ - 1, my_ - 1) + 3 + 3 * b_stride],
                 )
             } else if self.n_topleft != MB_UNAVAIL {
                 (NOT_USED, zero)
@@ -1100,8 +1101,8 @@ impl H264Decoder {
         let f0 = self.ref_frm(0);
         for r in 0..4 {
             for c in 0..4 {
-                self.mv_cache[SCAN8[0] + 8 * r + c] = mv;
-                self.ref_cache[SCAN8[0] + 8 * r + c] = f0;
+                self.mv_cache[0][SCAN8[0] + 8 * r + c] = mv;
+                self.ref_cache[0][SCAN8[0] + 8 * r + c] = f0;
             }
         }
     }
@@ -1365,18 +1366,18 @@ impl H264Decoder {
                         "  P16 mb={}:{} r0={r0} f0={f0} L=({},{}) rL={} T=({},{}) rT={} C=({},{}) rC={}",
                         self.mb_x,
                         self.mb_y,
-                        self.mv_cache[i0 - 1][0],
-                        self.mv_cache[i0 - 1][1],
-                        self.ref_cache[i0 - 1],
-                        self.mv_cache[i0 - 8][0],
-                        self.mv_cache[i0 - 8][1],
-                        self.ref_cache[i0 - 8],
-                        self.mv_cache[i0 - 4][0],
-                        self.mv_cache[i0 - 4][1],
-                        self.ref_cache[i0 - 4]
+                        self.mv_cache[0][i0 - 1][0],
+                        self.mv_cache[0][i0 - 1][1],
+                        self.ref_cache[0][i0 - 1],
+                        self.mv_cache[0][i0 - 8][0],
+                        self.mv_cache[0][i0 - 8][1],
+                        self.ref_cache[0][i0 - 8],
+                        self.mv_cache[0][i0 - 4][0],
+                        self.mv_cache[0][i0 - 4][1],
+                        self.ref_cache[0][i0 - 4]
                     );
                 }
-                set_ref(&mut self.ref_cache, 0, 0, 4, 4, f0);
+                set_ref(&mut self.ref_cache[0], 0, 0, 4, 4, f0);
                 let (mx, my) = self.pred_motion(0, 4, f0);
                 let (dx, dy) = read_mvd(gb)?;
                 if std::env::var_os("H264_DUMP").is_some()
@@ -1395,7 +1396,7 @@ impl H264Decoder {
                 let mut r = [0i8; 2];
                 for (n, rn) in r.iter_mut().enumerate() {
                     *rn = self.ref_frm(read_ref(gb)?);
-                    set_ref(&mut self.ref_cache, 0, 2 * n, 4, 2, *rn);
+                    set_ref(&mut self.ref_cache[0], 0, 2 * n, 4, 2, *rn);
                 }
                 for n in 0..2usize {
                     let (mx, my) = self.pred_16x8_motion(n, r[n]);
@@ -1408,7 +1409,7 @@ impl H264Decoder {
                 let mut r = [0i8; 2];
                 for (n, rn) in r.iter_mut().enumerate() {
                     *rn = self.ref_frm(read_ref(gb)?);
-                    set_ref(&mut self.ref_cache, 2 * n, 0, 2, 4, *rn);
+                    set_ref(&mut self.ref_cache[0], 2 * n, 0, 2, 4, *rn);
                 }
                 for n in 0..2usize {
                     let (mx, my) = self.pred_8x16_motion(n, r[n]);
@@ -1433,7 +1434,7 @@ impl H264Decoder {
                 for (i, ri) in refs8.iter_mut().enumerate() {
                     let raw = if self.p8x8_ref0 { 0 } else { read_ref(gb)? };
                     *ri = self.ref_frm(raw);
-                    set_ref(&mut self.ref_cache, 2 * (i & 1), 2 * (i >> 1), 2, 2, *ri);
+                    set_ref(&mut self.ref_cache[0], 2 * (i & 1), 2 * (i >> 1), 2, 2, *ri);
                 }
                 for (i, &sub) in subs.iter().enumerate() {
                     // sub: 0=sub8x8(1 part), 1=sub8x4(2), 2=sub4x8(2), 3=sub4x4(4)
@@ -1454,15 +1455,15 @@ impl H264Decoder {
                             let idx = SCAN8[block];
                             eprintln!(
                                 "  NB blk{block} idx{idx} L=({},{}) rL={} T=({},{}) rT={} C=({},{}) rC={}",
-                                self.mv_cache[idx - 1][0],
-                                self.mv_cache[idx - 1][1],
-                                self.ref_cache[idx - 1],
-                                self.mv_cache[idx - 8][0],
-                                self.mv_cache[idx - 8][1],
-                                self.ref_cache[idx - 8],
-                                self.mv_cache[idx - 8 + bw][0],
-                                self.mv_cache[idx - 8 + bw][1],
-                                self.ref_cache[idx - 8 + bw]
+                                self.mv_cache[0][idx - 1][0],
+                                self.mv_cache[0][idx - 1][1],
+                                self.ref_cache[0][idx - 1],
+                                self.mv_cache[0][idx - 8][0],
+                                self.mv_cache[0][idx - 8][1],
+                                self.ref_cache[0][idx - 8],
+                                self.mv_cache[0][idx - 8 + bw][0],
+                                self.mv_cache[0][idx - 8 + bw][1],
+                                self.ref_cache[0][idx - 8 + bw]
                             );
                         }
                         let (mx, my) = self.pred_motion(block, bw, refs8[i]);
@@ -1530,7 +1531,7 @@ impl H264Decoder {
                 // (x, y) are 4x4-grid coords; cache is 8 wide with the
                 // MB's top-left cell at SCAN8[0]. (Raster→SCAN8 would
                 // mis-place partitions: SCAN8 is quadrant-ordered.)
-                self.mv_cache[SCAN8[0] + 8 * (y + r) + (x + c)] = [mx, my];
+                self.mv_cache[0][SCAN8[0] + 8 * (y + r) + (x + c)] = [mx, my];
             }
         }
     }
@@ -1553,7 +1554,7 @@ impl H264Decoder {
         // write_back_motion_list zeroes the mvd table for IS_SKIP MBs.
         for r in 0..4 {
             for c in 0..4 {
-                self.mvd_cache[SCAN8[0] + 8 * r + c] = [0, 0];
+                self.mvd_cache[0][SCAN8[0] + 8 * r + c] = [0, 0];
             }
         }
         self.pred_pskip_motion();
@@ -1562,7 +1563,7 @@ impl H264Decoder {
         // every later neighbour comparison (0 is not a picture id).
         let f0 = self.ref_frm(0);
         for i in 0..16usize {
-            self.ref_cache[SCAN8[i]] = f0;
+            self.ref_cache[0][SCAN8[i]] = f0;
         }
         self.write_back_motion(mb_xy);
         let pic = self.cur.as_mut().unwrap();
@@ -1958,8 +1959,8 @@ impl H264Decoder {
 
     /// `decode_cabac_mb_ref` (h264_cabac.c:1477), P slice.
     fn cabac_mb_ref(&mut self, cab: &mut Cabac, n: usize) -> Result<i8> {
-        let refa = self.id_to_raw(self.ref_cache[SCAN8[n] - 1]);
-        let refb = self.id_to_raw(self.ref_cache[SCAN8[n] - 8]);
+        let refa = self.id_to_raw(self.ref_cache[0][SCAN8[n] - 1]);
+        let refb = self.id_to_raw(self.ref_cache[0][SCAN8[n] - 8]);
         let mut ctx = 0usize;
         if refa > 0 {
             ctx += 1;
@@ -2023,8 +2024,8 @@ impl H264Decoder {
     /// mvd_cache amvd sums (list 0).
     fn cabac_mvd_xy(&mut self, cab: &mut Cabac, n: usize) -> Result<(i32, i32, u8, u8)> {
         let idx = SCAN8[n];
-        let amvd0 = self.mvd_cache[idx - 1][0] as i32 + self.mvd_cache[idx - 8][0] as i32;
-        let amvd1 = self.mvd_cache[idx - 1][1] as i32 + self.mvd_cache[idx - 8][1] as i32;
+        let amvd0 = self.mvd_cache[0][idx - 1][0] as i32 + self.mvd_cache[0][idx - 8][0] as i32;
+        let amvd1 = self.mvd_cache[0][idx - 1][1] as i32 + self.mvd_cache[0][idx - 8][1] as i32;
         let (mxd, mpx) = self.cabac_mb_mvd(cab, 40, amvd0)?;
         let (myd, mpy) = self.cabac_mb_mvd(cab, 47, amvd1)?;
         Ok((mxd, myd, mpx, mpy))
@@ -2034,7 +2035,7 @@ impl H264Decoder {
     fn fill_mvd_rect(&mut self, x: usize, y: usize, w: usize, h: usize, px: u8, py: u8) {
         for r in 0..h {
             for c in 0..w {
-                self.mvd_cache[SCAN8[0] + 8 * (y + r) + (x + c)] = [px, py];
+                self.mvd_cache[0][SCAN8[0] + 8 * (y + r) + (x + c)] = [px, py];
             }
         }
     }
@@ -2484,7 +2485,7 @@ impl H264Decoder {
             let set_ref = |s: &mut Self, x: usize, y: usize, w: usize, h: usize, r: i8| {
                 for yy in 0..h {
                     for xx in 0..w {
-                        s.ref_cache[SCAN8[0] + 8 * (y + yy) + (x + xx)] = r;
+                        s.ref_cache[0][SCAN8[0] + 8 * (y + yy) + (x + xx)] = r;
                     }
                 }
             };
@@ -2655,8 +2656,8 @@ impl H264Decoder {
             };
             let cur = self.cur.as_mut().unwrap();
             for i in 0..16usize {
-                let mv = self.mv_cache[SCAN8[i]];
-                let prev = pick(self.ref_cache[SCAN8[i]])?;
+                let mv = self.mv_cache[0][SCAN8[i]];
+                let prev = pick(self.ref_cache[0][SCAN8[i]])?;
                 // scan8 (quadrant) order → pixel position, C's block_offset.
                 let grid = SCAN8[i];
                 let bc = ((grid & 7) - 4) as i32;
@@ -2677,8 +2678,8 @@ impl H264Decoder {
             for r in 0..4usize {
                 for c in 0..4usize {
                     // raster block (r, c) ↔ cache cell SCAN8[0] + 8r + c
-                    let mv = self.mv_cache[SCAN8[0] + 8 * r + c];
-                    let prev = pick(self.ref_cache[SCAN8[0] + 8 * r + c])?;
+                    let mv = self.mv_cache[0][SCAN8[0] + 8 * r + c];
+                    let prev = pick(self.ref_cache[0][SCAN8[0] + 8 * r + c])?;
                     let bx = self.mb_x as i32 * 16 + 4 * c as i32;
                     let by = self.mb_y as i32 * 16 + 4 * r as i32;
                     let mut cb = [0u8; 16];

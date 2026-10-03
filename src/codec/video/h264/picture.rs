@@ -12,23 +12,31 @@ pub(crate) struct Picture {
     pub(crate) cr: Vec<u8>,
     pub mb_type: Vec<u32>,
     pub nnz: Vec<[u8; 48]>,
-    pub mv: Vec<[i16; 2]>,  // b_stride = mb_w*4 (+1 padding row)
-    pub ref_index: Vec<i8>, // 4 per MB
-    /// |mvd| per 4x4 (CABAC mvd_cache borders, h264_mvpred.h:838) — the
-    /// b_stride grid like `mv`; only the bottom row / right column of
-    /// each MB are ever read back.
-    pub mvd: Vec<[u8; 2]>,
+    /// Per-list MVs on the b_stride grid (C's motion_val[2]; list 1 only
+    /// written for B pictures).
+    pub mv: [Vec<[i16; 2]>; 2],
+    /// Per-list RAW ref_idx, 4 per MB (C's ref_index[2]).
+    pub ref_index: [Vec<i8>; 2],
+    /// |mvd| per 4x4 per list (CABAC mvd_cache borders, h264_mvpred.h:
+    /// 838) — the b_stride grid like `mv`; only the bottom row / right
+    /// column of each MB are ever read back.
+    pub mvd: [Vec<[u8; 2]>; 2],
     pub(crate) qscale: Vec<u8>,
     /// intra4x4 modes: bottom row (4) + right column (4) per MB — C's
     /// `mb2br`-indexed `intra4x4_pred_mode` slots the caches read.
     pub mb_i4x4: Vec<[i8; 8]>,
     /// frame_num of this picture (PicNum derivation for the ref list).
     pub(crate) frame_num: u32,
+    /// Picture order count (top field for frame pictures).
+    pub(crate) poc: i32,
+    /// IDR (AV_FRAME_FLAG_KEY) — the reorder buffer flushes on it.
+    pub(crate) key: bool,
     /// Unique id — the deblocking filter compares references by picture
     /// identity (C's `ref2frm`), not by per-slice ref_idx.
     pub id: u64,
-    /// Per 8x8 (4 per MB): id of the referenced picture, -1 = none.
-    pub ref_pic: Vec<i32>,
+    /// Per-list per 8x8 (4 per MB): id of the referenced picture, -1 =
+    /// none (C's ref2frm-mapped ref_pic).
+    pub ref_pic: [Vec<i32>; 2],
     /// Per MB: coded_block_pattern (C's `cbp_table`; CABAC ORs the
     /// DC-coded bits 0x40/0x80/0x100 into it — h264_cabac.c:1707),
     /// inter partition shape, RAW chroma pred mode (CABAC ctx) and the
@@ -53,14 +61,28 @@ impl Picture {
             cr: vec![0u8; (w / 2) * (h / 2)],
             mb_type: vec![0; mb_w * mb_h + 1],
             nnz: vec![[0; 48]; mb_w * mb_h + 1],
-            mv: vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
-            ref_index: vec![-1; (mb_w * 4 + 1) * (mb_h * 4 + 1)],
-            mvd: vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
+            mv: [
+                vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
+                vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
+            ],
+            ref_index: [
+                vec![-1; (mb_w * 4 + 1) * (mb_h * 4 + 1)],
+                vec![-1; (mb_w * 4 + 1) * (mb_h * 4 + 1)],
+            ],
+            mvd: [
+                vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
+                vec![[0, 0]; b_stride * (mb_h * 4 + 1)],
+            ],
             qscale: vec![0; mb_w * mb_h + 1],
             mb_i4x4: vec![[-1; 8]; mb_w * mb_h + 1],
             frame_num: 0,
+            poc: 0,
+            key: false,
             id: 0,
-            ref_pic: vec![-1; 4 * (mb_w * mb_h + 1)],
+            ref_pic: [
+                vec![-1; 4 * (mb_w * mb_h + 1)],
+                vec![-1; 4 * (mb_w * mb_h + 1)],
+            ],
             cbp: vec![0; mb_w * mb_h + 1],
             part: vec![PART_16X16; mb_w * mb_h + 1],
             chroma_pred: vec![0; mb_w * mb_h + 1],

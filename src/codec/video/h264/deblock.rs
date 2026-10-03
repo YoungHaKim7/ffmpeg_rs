@@ -337,24 +337,24 @@ fn filter_mb(pic: &mut Picture, mb_w: usize, mb_x: usize, mb_y: usize) {
             let t = top_xy.unwrap();
             let b = bxy(mb_x, mb_y - 1) + 3 * b_stride;
             for i in 0..4 {
-                c.mv[4 + i] = pic.mv[b + i];
-                c.refs[4 + i] = pic.ref_pic[4 * t + 2 + (i >> 1)];
+                c.mv[4 + i] = pic.mv[0][b + i];
+                c.refs[4 + i] = pic.ref_pic[0][4 * t + 2 + (i >> 1)];
             }
         }
         if left_type == MB_INTER {
             let l = left_xy.unwrap();
             let b = bxy(mb_x - 1, mb_y) + 3;
             for i in 0..4 {
-                c.mv[3 + 8 * (1 + i)] = pic.mv[b + i * b_stride];
-                c.refs[3 + 8 * (1 + i)] = pic.ref_pic[4 * l + 1 + 2 * (i >> 1)];
+                c.mv[3 + 8 * (1 + i)] = pic.mv[0][b + i * b_stride];
+                c.refs[3 + 8 * (1 + i)] = pic.ref_pic[0][4 * l + 1 + 2 * (i >> 1)];
             }
         }
         let b = bxy(mb_x, mb_y);
         for r in 0..4 {
             for col in 0..4 {
                 let k = 12 + 8 * r + col;
-                c.mv[k] = pic.mv[b + r * b_stride + col];
-                c.refs[k] = pic.ref_pic[4 * mb_xy + 2 * (r >> 1) + (col >> 1)];
+                c.mv[k] = pic.mv[0][b + r * b_stride + col];
+                c.refs[k] = pic.ref_pic[0][4 * mb_xy + 2 * (r >> 1) + (col >> 1)];
             }
         }
         let nnz = &pic.nnz[mb_xy];
