@@ -571,7 +571,6 @@ impl H264Decoder {
     /// (h264_mvpred.h:487/539, the non-MBAFF branches).
     fn fill_decode_caches(&mut self, mb_type: u32) {
         self.fill_decode_neighbors();
-        let mb_xy = self.mb_x + self.mb_y * self.mb_width;
 
         // ---- intra sample availability (the frame-only branches) ----
         let constrained = self.pps.as_ref().unwrap().constrained_intra_pred;
@@ -744,8 +743,6 @@ impl H264Decoder {
             // column of |mvd| values (C stores only the br 4x4 per MB —
             // the port keeps the full b_stride grid, same cells read).
             {
-                let top_xy = self.mb_x + self.mb_y.saturating_sub(1) * self.mb_width;
-                let left_xy = self.mb_x.saturating_sub(1) + self.mb_y * self.mb_width;
                 let top0 = SCAN8[0] - 8;
                 if uses(self.n_top) {
                     let bxy = 4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
@@ -771,7 +768,6 @@ impl H264Decoder {
                 // AV_ZERO16(mvd_cache[2 + 8*0]) / [2 + 8*2]
                 self.mvd_cache[SCAN8[0] + 2] = [0, 0];
                 self.mvd_cache[SCAN8[0] + 2 + 16] = [0, 0];
-                let _ = (top_xy, left_xy);
             }
         }
 
@@ -2028,14 +2024,6 @@ impl H264Decoder {
     fn cabac_mvd_xy(&mut self, cab: &mut Cabac, n: usize) -> Result<(i32, i32, u8, u8)> {
         let idx = SCAN8[n];
         let amvd0 = self.mvd_cache[idx - 1][0] as i32 + self.mvd_cache[idx - 8][0] as i32;
-        eprintln!(
-            "    mvd-ctx idx={idx} a=({},{}) b=({},{}) amvd=({amvd0},{}",
-            self.mvd_cache[idx - 1][0],
-            self.mvd_cache[idx - 1][1],
-            self.mvd_cache[idx - 8][0],
-            self.mvd_cache[idx - 8][1],
-            self.mvd_cache[idx - 1][1] as i32 + self.mvd_cache[idx - 8][1] as i32
-        );
         let amvd1 = self.mvd_cache[idx - 1][1] as i32 + self.mvd_cache[idx - 8][1] as i32;
         let (mxd, mpx) = self.cabac_mb_mvd(cab, 40, amvd0)?;
         let (myd, mpy) = self.cabac_mb_mvd(cab, 47, amvd1)?;
@@ -2134,7 +2122,6 @@ impl H264Decoder {
     fn cabac_residual(
         &mut self,
         cab: &mut Cabac,
-        mb_xy: usize,
         block: &mut [i16],
         cat: usize,
         n: usize,
@@ -2207,7 +2194,6 @@ impl H264Decoder {
                 self.cbp |= 0x100 << (n - LUMA_DC);
             }
         }
-        let _ = mb_xy;
 
         // STORE_BLOCK (h264_cabac.c:1722) — reverse scan order.
         let abs_base = ABSM1_OFF[cat];
@@ -2268,13 +2254,13 @@ impl H264Decoder {
         if self.mb_type == MB_INTRA16X16 {
             self.mb_luma_dc = [0; 16];
             let mut dc = [0i16; 16];
-            self.cabac_residual(cab, mb_xy, &mut dc, 0, LUMA_DC, &scan, None, 16)?;
+            self.cabac_residual(cab, &mut dc, 0, LUMA_DC, &scan, None, 16)?;
             self.mb_luma_dc = dc;
             if self.cbp & 15 != 0 {
                 let qm = *self.pps.as_ref().unwrap().dequant(0, self.qscale as usize);
                 for i in 0..16usize {
                     let mut blk = [0i16; 16];
-                    self.cabac_residual(cab, mb_xy, &mut blk, 1, i, &scan1, Some(&qm), 15)?;
+                    self.cabac_residual(cab, &mut blk, 1, i, &scan1, Some(&qm), 15)?;
                     // scan+1 writes positions 1..15 (DC slot = the scatter)
                     self.mb[i * 16 + 1..(i + 1) * 16].copy_from_slice(&blk[1..16]);
                 }
@@ -2299,7 +2285,7 @@ impl H264Decoder {
                     for i4x4 in 0..4usize {
                         let index = i4x4 + 4 * i8x8;
                         let mut blk = [0i16; 16];
-                        self.cabac_residual(cab, mb_xy, &mut blk, 2, index, &scan, Some(&qm), 16)?;
+                        self.cabac_residual(cab, &mut blk, 2, index, &scan, Some(&qm), 16)?;
                         self.mb[index * 16..(index + 1) * 16].copy_from_slice(&blk);
                     }
                 } else {
@@ -2318,7 +2304,7 @@ impl H264Decoder {
         if self.cbp & 0x30 != 0 {
             for ch in 0..2usize {
                 let mut dc64 = [0i16; 64];
-                self.cabac_residual(cab, mb_xy, &mut dc64, 3, CHROMA_DC + ch, &scan_cdc, None, 4)?;
+                self.cabac_residual(cab, &mut dc64, 3, CHROMA_DC + ch, &scan_cdc, None, 4)?;
                 let base = 16 * (16 + 16 * ch);
                 for s in [0usize, 16, 32, 48] {
                     self.mb[base + s] = dc64[s];
@@ -2347,7 +2333,7 @@ impl H264Decoder {
                     let block_idx = 16 + 16 * ch + i4;
                     let index = 16 * (16 + 16 * ch) + 16 * i4;
                     let mut blk = [0i16; 16];
-                    self.cabac_residual(cab, mb_xy, &mut blk, 4, block_idx, &scan1, Some(&qm), 15)?;
+                    self.cabac_residual(cab, &mut blk, 4, block_idx, &scan1, Some(&qm), 15)?;
                     self.mb[index + 1..index + 16].copy_from_slice(&blk[1..16]);
                 }
             }
@@ -2519,22 +2505,8 @@ impl H264Decoder {
                     let f0 = self.ref_frm(r0);
                     set_ref(self, 0, 0, 4, 4, f0);
                     let (mx, my) = self.pred_motion(0, 4, f0);
-                    let (mxd, myd, mpx, mpy) = {
-                        if std::env::var_os("H264_DUMP").is_some() {
-                            eprintln!(
-                                "  pre-mvd eng r={} low={:08x} bs={} st42={}",
-                                cab.range, cab.low, cab.bytestream, self.cabac_state[42]
-                            );
-                        }
-                        self.cabac_mvd_xy(cab, 0)?
-                    };
+                    let (mxd, myd, mpx, mpy) = self.cabac_mvd_xy(cab, 0)?;
                     let (mx, my) = (mx + mxd as i16, my + myd as i16);
-                    if std::env::var_os("H264_DUMP").is_some() {
-                        eprintln!(
-                            "  mv16 ref={r0} mv=({mx},{my}) mvd=({mxd},{myd}) eng r={} low={:08x} bs={} st42={}",
-                            cab.range, cab.low, cab.bytestream, self.cabac_state[42]
-                        );
-                    }
                     self.fill_mv_rect(0, 0, 4, 4, mx, my);
                     self.fill_mvd_rect(0, 0, 4, 4, mpx, mpy);
                 }

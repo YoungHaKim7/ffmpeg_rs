@@ -1,15 +1,16 @@
 //! H.264 decoder — port of FFmpeg's native `ff_h264_decoder`,
-//! **baseline-profile subset**: CAVLC entropy coding, frame pictures,
-//! I/P slices, intra (4x4/16x16/PCM) and inter (16x16/16x8/8x16/8x8
-//! partitions) macroblocks, 6-tap luma / bilinear chroma motion
-//! compensation, multiple short-term reference pictures (sliding window +
-//! list modification), and the in-loop **deblocking filter**
-//! ([`deblock`]). Acceptance: bit-exact vs default `ffmpeg` output.
+//! **main-profile I/P subset**: CAVLC **and CABAC** entropy coding,
+//! frame pictures, I/P slices (multi-slice pictures), intra
+//! (4x4/16x16/PCM) and inter (16x16/16x8/8x16/8x8 partitions)
+//! macroblocks, 6-tap luma / bilinear chroma motion compensation,
+//! multiple short-term reference pictures (sliding window + list
+//! modification), and the in-loop **deblocking filter** ([`deblock`]).
+//! Acceptance: bit-exact vs default `ffmpeg` output.
 //!
-//! Gated `Unsupported` (degrade honestly, like AAC's ER objects): CABAC,
-//! B slices + direct mode + weighted prediction (baseline excludes them),
-//! MBAFF/field pictures, 8x8 transform, FMO, SP/SI slices, chroma
-//! 422/444, bit depths > 8, custom scaling matrices, MMCO/long-term refs.
+//! Gated `Unsupported` (degrade honestly, like AAC's ER objects): B
+//! slices + direct mode + weighted prediction (Phase C), MBAFF/field
+//! pictures, 8x8 transform + scaling matrices (Phase D), FMO, SP/SI
+//! slices, chroma 422/444, bit depths > 8, MMCO/long-term refs (Phase E).
 //!
 //! ## C → Rust map
 //!
@@ -21,6 +22,10 @@
 //! | `ff_h264_decode_picture_parameter_set` (h264_ps.c:698) + `init_dequant4_coeff_table` (617) | [`parse_pps`] |
 //! | `h264_slice_header_parse` (h264_slice.c:1718) | [`H264Decoder::parse_slice_header`] |
 //! | `ff_h264_decode_mb_cavlc` (h264_cavlc.c:682) + `decode_residual` (405) + `cavlc_level_tab` (289) | [`H264Decoder::decode_mb_cavlc`] / [`decode_residual`] |
+//! | `get_cabac_*` engine (cabac_functions.h, CABAC_BITS=16) | [`cabac::Cabac`] |
+//! | `ff_h264_cabac_tables` + `cabac_context_init_{I,PB}` (cabac.c, h264_cabac.c) | `cabac_tables` (via `tools/extract_cabac_tables.py`) |
+//! | `ff_h264_init_cabac_states` (h264_cabac.c:1262) | [`H264Decoder::init_cabac_states`] |
+//! | `ff_h264_decode_mb_cabac` (h264_cabac.c:1920) + `decode_cabac_residual_internal` (1590) | [`H264Decoder::decode_mb_cabac`] / `cabac_residual` |
 //! | `fill_decode_neighbors`/`_caches` (h264_mvpred.h:487/539) | [`H264Decoder::fill_decode_caches`] — frame-only path |
 //! | `pred_motion`/`pred_16x8`/`pred_8x16`/`pred_pskip` + `fetch_diagonal_mv` (h264_mvpred.h) | same names |
 //! | `pred4x4*`/`pred16x16*`/`pred8x8*` (h264pred_template.c) | [`pred4x4`] / [`pred16x16`] / [`pred8x8`] |
@@ -31,8 +36,10 @@
 //! | deblocking (`h264_loopfilter.c` + `h264dsp_template.c` filters) | [`deblock::filter_picture`] |
 //!
 //! Output: `PixelFormat::Yuv420p` frames, SPS-cropped, decode order.
-//! The generator for `tables.rs` (extracted CAVLC/h264data tables) is
-//! the python script documented in that file's header.
+//! The generators for `tables.rs` (CAVLC/h264data) and `cabac_tables.rs`
+//! (CABAC) are the python scripts documented in those files' headers;
+//! the bit-exactness fixtures and C-side reference traces come from
+//! `tools/h264dbg/`.
 
 use std::sync::OnceLock;
 
