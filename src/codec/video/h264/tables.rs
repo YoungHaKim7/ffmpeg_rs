@@ -269,3 +269,52 @@ pub static QUANT_REM6: [u8; 88] = [
 
 /// `ff_h264_chroma_dc_scan[4]` (h264data.c:54) — resolved from its (x + y*2)*16 arithmetic.
 pub static CHROMA_DC_SCAN: [u8; 4] = [0, 16, 32, 48];
+
+/// `ff_h264_b_mb_type_info` (h264data.c:110) — rows encoded as
+/// [shape, count, l0p0, l0p1, l1p0, l1p1]: shape 0=16x16, 1=16x8,
+/// 2=8x16, 3=8x8 (row 22 only; row 0 = B_Direct_16x16, decoded in
+/// place); l0pN/l1pN = partition N uses list0/list1 (16x16 uses p0).
+pub static B_MB_TYPE_INFO: [u8; 23 * 6] = [
+    0, 1, 1, 0, 1, 0, // 0: B_Direct_16x16
+    0, 1, 1, 0, 0, 0, // 1: B_L0_16x16
+    0, 1, 0, 0, 1, 0, // 2: B_L1_16x16
+    0, 1, 1, 0, 1, 0, // 3: B_Bi_16x16
+    1, 2, 1, 1, 0, 0, // 4: B_L0_L0_16x8
+    2, 2, 1, 1, 0, 0, // 5: B_L0_L0_8x16
+    1, 2, 0, 0, 1, 1, // 6: B_L1_L1_16x8
+    2, 2, 0, 0, 1, 1, // 7: B_L1_L1_8x16
+    1, 2, 1, 0, 0, 1, // 8: B_L0_L1_16x8
+    2, 2, 1, 0, 0, 1, // 9: B_L0_L1_8x16
+    1, 2, 0, 1, 1, 0, // 10: B_L1_L0_16x8
+    2, 2, 0, 1, 1, 0, // 11: B_L1_L0_8x16
+    1, 2, 1, 1, 0, 1, // 12: B_L0_Bi_16x8
+    2, 2, 1, 1, 0, 1, // 13: B_L0_Bi_8x16
+    1, 2, 0, 1, 1, 1, // 14: B_L1_Bi_16x8
+    2, 2, 0, 1, 1, 1, // 15: B_L1_Bi_8x16
+    1, 2, 1, 1, 1, 0, // 16: B_Bi_L0_16x8
+    2, 2, 1, 1, 1, 0, // 17: B_Bi_L0_8x16
+    1, 2, 1, 0, 1, 1, // 18: B_Bi_L1_16x8
+    2, 2, 1, 0, 1, 1, // 19: B_Bi_L1_8x16
+    1, 2, 1, 1, 1, 1, // 20: B_Bi_Bi_16x8
+    2, 2, 1, 1, 1, 1, // 21: B_Bi_Bi_8x16
+    3, 4, 1, 1, 1, 1, // 22: B_8x8
+];
+
+/// `ff_h264_b_sub_mb_type_info` (h264data.c:136) — rows
+/// [shape, count, l0, l1]: shape 0=sub8x8, 1=sub8x4, 2=sub4x8,
+/// 3=sub4x4 (3-4 = B_Direct_8x8 rows, decoded in place).
+pub static B_SUB_MB_TYPE_INFO: [u8; 13 * 4] = [
+    0, 1, 1, 1, // 0: B_Direct_8x8
+    0, 1, 1, 0, // 1: B_L0_8x8
+    0, 1, 0, 1, // 2: B_L1_8x8
+    0, 1, 1, 1, // 3: B_Bi_8x8
+    1, 2, 1, 0, // 4: B_L0_8x4
+    2, 2, 1, 0, // 5: B_L0_4x8
+    1, 2, 0, 1, // 6: B_L1_8x4
+    2, 2, 0, 1, // 7: B_L1_4x8
+    1, 2, 1, 1, // 8: B_Bi_8x4
+    2, 2, 1, 1, // 9: B_Bi_4x8
+    0, 4, 1, 0, // 10: B_L0_4x4
+    0, 4, 0, 1, // 11: B_L1_4x4
+    0, 4, 1, 1, // 12: B_Bi_4x4
+];

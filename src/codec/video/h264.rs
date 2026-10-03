@@ -365,6 +365,9 @@ struct Pps {
     deblocking_filter_parameters_present: bool,
     constrained_intra_pred: bool,
     redundant_pic_cnt_present: bool,
+    /// weighted_pred_flag (P/SP slices) + weighted_bipred_idc (B).
+    weighted_pred: bool,
+    weighted_bipred_idc: u32,
     /// entropy_coding_mode_flag: CABAC slices (Phase B).
     cabac: bool,
     /// chroma_qp_index_offset[0/1] (the second from the PPS tail;
@@ -591,8 +594,8 @@ fn parse_pps(rbsp: &[u8], sps_ok: bool) -> Result<Pps> {
     if ref_count[0] > 32 || ref_count[1] > 32 {
         return Err(Error::InvalidData("reference overflow (pps)".into()));
     }
-    let _weighted_pred = gb.read_bit();
-    let _weighted_bipred = gb.read(2);
+    let weighted_pred = gb.read_bit() == 1;
+    let weighted_bipred_idc = gb.read(2);
     let init_qp = gb.se()? + 26;
     let _init_qs = gb.se()?;
     let chroma_qp_off = gb.se()?;
@@ -624,6 +627,8 @@ fn parse_pps(rbsp: &[u8], sps_ok: bool) -> Result<Pps> {
         deblocking_filter_parameters_present: deblocking_present,
         constrained_intra_pred,
         redundant_pic_cnt_present,
+        weighted_pred,
+        weighted_bipred_idc,
         cabac,
         chroma_qp_offset: [chroma_qp_off, chroma_qp_off2],
         dequant4_full: vec![[[0u32; 16]; 52]; 6],

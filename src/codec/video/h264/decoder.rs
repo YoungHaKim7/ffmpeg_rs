@@ -34,6 +34,50 @@ use super::{
     },
 };
 
+/// `H264PredWeightTable` (h264_ps.h) — explicit weights/offsets per
+/// list/ref plus the implicit-weights table for B (frame pictures use
+/// the [0] field-pair slot only).
+#[derive(Clone)]
+struct PredWeightTable {
+    use_weight: u8,
+    use_weight_chroma: u8,
+    luma_log2_denom: i32,
+    chroma_log2_denom: i32,
+    /// luma_weight[i][list][0/1] = weight, offset.
+    luma_w: [[i32; 32]; 2],
+    luma_o: [[i32; 32]; 2],
+    /// chroma_weight[i][list][cbcr][0/1].
+    chroma_w: [[[i32; 32]; 2]; 2],
+    chroma_o: [[[i32; 32]; 2]; 2],
+    /// implicit_weight[ref0][ref1] (B, weighted_bipred_idc == 2).
+    implicit: [[i32; 32]; 32],
+}
+
+impl Default for PredWeightTable {
+    fn default() -> Self {
+        PredWeightTable {
+            use_weight: 0,
+            use_weight_chroma: 0,
+            luma_log2_denom: 0,
+            chroma_log2_denom: 0,
+            luma_w: [[0; 32]; 2],
+            luma_o: [[0; 32]; 2],
+            chroma_w: [[[0; 32]; 2]; 2],
+            chroma_o: [[[0; 32]; 2]; 2],
+            implicit: [[32; 32]; 32],
+        }
+    }
+}
+
+/// A finished frame held for output reordering (C's delayed_pic entry:
+/// picture + poc + KEY/mmco_reset markers).
+struct DelayedFrame {
+    frame: Frame,
+    poc: i32,
+    key: bool,
+    mmco_reset: bool,
+}
+
 pub struct H264Decoder {
     pub(super) sps: Option<Sps>,
     pub(super) pps: Option<Pps>,
@@ -45,19 +89,47 @@ pub struct H264Decoder {
     /// Short-term reference DPB, newest first (sliding window of
     /// max_num_ref_frames; C's h264_refs.c without MMCO/long-term).
     pub(super) refs: Vec<Picture>,
-    /// RefPicList0 for the current slice: indices into `refs`.
-    pub(super) ref_list: Vec<usize>,
-    /// num_ref_idx_l0_active for the current slice (PPS default or the
-    /// slice-header override).
-    ref_count_l0: u32,
-    /// Parsed ref_pic_list_modification ops (idc, value), applied after
-    /// the previous picture enters the DPB.
-    pub(super) reorder_ops: Vec<(u32, u32)>,
+    /// RefPicList[2] for the current slice: indices into `refs` (list 1
+    /// built for B slices only).
+    pub(super) ref_lists: [Vec<usize>; 2],
+    /// num_ref_idx_active for the current slice (PPS default or the
+    /// slice-header override), per list.
+    ref_counts: [u32; 2],
+    /// list_count (1 for P, 2 for B).
+    list_count: usize,
+    /// direct_spatial_mv_pred_flag of the current B slice.
+    direct_spatial: bool,
+    /// Parsed ref_pic_list_modification ops per list (idc, value),
+    /// applied after the previous picture enters the DPB.
+    pub(super) reorder_ops0: Vec<(u32, u32)>,
+    pub(super) reorder_ops1: Vec<(u32, u32)>,
+    /// PredWeightTable (ff_h264_pred_weight_table) + implicit weights.
+    pwt: PredWeightTable,
     /// frame_num from the slice header being decoded.
     pub(super) slice_frame_num: u32,
     /// nal_ref_idc of the current picture (non-ref pictures stay out of
     /// the DPB).
     pub(super) cur_is_ref: bool,
+    /// Current picture is a B picture (reorder heuristic, C's
+    /// cur->f->pict_type == AV_PICTURE_TYPE_B).
+    pub(super) cur_is_b: bool,
+    /// nal_ref_idc of the current picture (POC type 1/2 arithmetic).
+    pub(super) cur_nal_ref_idc: u8,
+    // ---- POC (C's H264POCContext + sl->poc_* slice carriers) ----
+    poc_prev_frame_num: i32,
+    poc_prev_frame_num_offset: i32,
+    poc_prev_msb: i32,
+    poc_prev_lsb: i32,
+    poc_frame_num_offset: i32,
+    poc_msb: i32,
+    sl_poc_lsb: i32,
+    sl_delta_poc_bottom: i32,
+    sl_delta_poc: [i32; 2],
+    // ---- output reordering (C's delayed_pic + last_pocs + has_b_frames) ----
+    delayed: Vec<DelayedFrame>,
+    last_pocs: [i32; 16],
+    next_outputed_poc: i32,
+    has_b_frames: usize,
     /// P_8x8ref0 (mb_type 4): every sub-8x8 uses ref 0, no ref_idx.
     p8x8_ref0: bool,
     pub(super) got_mb: bool, // cur has decoded MBs (start-of-picture detection)
@@ -141,11 +213,32 @@ impl H264Decoder {
             eof: false,
             cur: None,
             refs: Vec::new(),
-            ref_list: Vec::new(),
-            ref_count_l0: 1,
-            reorder_ops: Vec::new(),
+            ref_lists: [Vec::new(), Vec::new()],
+            ref_counts: [1, 1],
+            list_count: 1,
+            direct_spatial: true,
+            reorder_ops0: Vec::new(),
+            reorder_ops1: Vec::new(),
+            pwt: PredWeightTable::default(),
             slice_frame_num: 0,
             cur_is_ref: true,
+            cur_is_b: false,
+            cur_nal_ref_idc: 0,
+            // C's POC init (h264dec.c:442-445 / 301-304): prev_poc_msb
+            // = 1<<16, prev_poc_lsb = prev_frame_num = -1, offsets 0.
+            poc_prev_frame_num: -1,
+            poc_prev_frame_num_offset: 0,
+            poc_prev_msb: 1 << 16,
+            poc_prev_lsb: -1,
+            poc_frame_num_offset: 0,
+            poc_msb: 0,
+            sl_poc_lsb: 0,
+            sl_delta_poc_bottom: 0,
+            sl_delta_poc: [0, 0],
+            delayed: Vec::new(),
+            last_pocs: [i32::MIN; 16],
+            next_outputed_poc: i32::MIN + 1,
+            has_b_frames: 0,
             p8x8_ref0: false,
             got_mb: false,
             frame_num: u32::MAX,
@@ -198,10 +291,20 @@ impl H264Decoder {
     pub fn flush(&mut self) {
         self.cur = None;
         self.refs.clear();
-        self.ref_list.clear();
+        self.ref_lists[0].clear();
+        self.ref_lists[1].clear();
         self.slice_table.clear();
         self.pending.clear();
+        self.delayed.clear();
         self.got_mb = false;
+        self.poc_prev_frame_num = -1;
+        self.poc_prev_frame_num_offset = 0;
+        self.poc_prev_msb = 1 << 16;
+        self.poc_prev_lsb = -1;
+        self.poc_frame_num_offset = 0;
+        self.last_pocs = [i32::MIN; 16];
+        self.next_outputed_poc = i32::MIN + 1;
+        self.has_b_frames = 0;
     }
 
     // ---------------- slice header ----------------
@@ -229,7 +332,7 @@ impl H264Decoder {
         let st = match GOLOMB_TO_PICT_TYPE[slice_type as usize] {
             1 => 2u8, // I
             2 => 0u8, // P
-            3 => return Err(Error::Unsupported("B slices".into())),
+            3 => 1u8, // B
             _ => return Err(Error::Unsupported("SP/SI slices".into())),
         };
         if nal.kind == 5 && st != 2 {
@@ -252,7 +355,10 @@ impl H264Decoder {
             );
         }
 
-        let poc_lsb_dbg = match sps.poc_type {
+        // POC slice fields (h264_slice.c:1816-1830; frame pictures):
+        // type 0: poc_lsb (+ delta_poc_bottom with pic_order_present);
+        // type 1: delta_poc[0] (+ [1]) unless always-zero.
+        let (poc_lsb_dbg, poc_lsb, dpb, dp0, dp1) = match sps.poc_type {
             0 => {
                 let v = gb.read(sps.log2_max_poc_lsb);
                 if std::env::var_os("H264_DUMP").is_some() {
@@ -261,10 +367,23 @@ impl H264Decoder {
                         pps.pic_order_present, gb.index
                     );
                 }
-                let _dpb = gb.se()?;
-                v
+                let d = if pps.pic_order_present { gb.se()? } else { 0 };
+                (v, v, d, 0, 0)
             }
-            _ => 0,
+            1 => {
+                let d0 = if sps.delta_pic_order_always_zero {
+                    0
+                } else {
+                    gb.se()?
+                };
+                let d1 = if sps.delta_pic_order_always_zero || !pps.pic_order_present {
+                    0
+                } else {
+                    gb.se()?
+                };
+                (0, 0, 0, d0, d1)
+            }
+            _ => (0, 0, 0, 0, 0),
         };
 
         if pps.redundant_pic_cnt_present {
@@ -272,9 +391,20 @@ impl H264Decoder {
         }
 
         self.slice_frame_num = frame_num;
-        self.ref_count_l0 = pps.ref_count[0];
-        self.reorder_ops.clear();
+        self.sl_poc_lsb = poc_lsb as i32;
+        self.sl_delta_poc_bottom = dpb;
+        self.sl_delta_poc = [dp0, dp1];
+        self.ref_counts = pps.ref_count;
+        self.reorder_ops0.clear();
+        self.reorder_ops1.clear();
+        self.list_count = 0;
+        self.direct_spatial = true;
         if self.slice_type_nos != 2 {
+            // direct_spatial_mv_pred_flag — B slices, before the ref
+            // counts (h264_slice.c:1833).
+            if self.slice_type_nos == 1 {
+                self.direct_spatial = gb.read_bit() == 1;
+            }
             // ff_h264_parse_ref_count (h264_parse.c:237): the l1 count
             // is only read for B slices.
             if gb.read_bit() == 1 {
@@ -282,32 +412,53 @@ impl H264Decoder {
                 if l0 > 32 {
                     return Err(Error::InvalidData("reference overflow".into()));
                 }
-                self.ref_count_l0 = l0;
+                self.ref_counts[0] = l0;
                 if self.slice_type_nos == 1 {
-                    let _l1 = gb.ue()?;
+                    let l1 = gb.ue()? + 1;
+                    if l1 > 32 {
+                        return Err(Error::InvalidData("reference overflow l1".into()));
+                    }
+                    self.ref_counts[1] = l1;
                 }
             }
+            self.list_count = if self.slice_type_nos == 1 { 2 } else { 1 };
             // ff_h264_decode_ref_pic_list_reordering (h264_refs.c:431):
-            // op/value pairs until op == 3. Single-ref DPB ⇒ reordering
-            // is a parse-only no-op (it cannot move the only picture).
-            if gb.read_bit() == 1 {
-                loop {
-                    let op = gb.ue()?;
-                    if op == 3 {
-                        break;
+            // op/value pairs until op == 3, per list.
+            for list in 0..self.list_count {
+                if gb.read_bit() == 1 {
+                    loop {
+                        let op = gb.ue()?;
+                        if op == 3 {
+                            break;
+                        }
+                        if op > 2 {
+                            return Err(Error::InvalidData(format!(
+                                "illegal modification_of_pic_nums_idc {op}"
+                            )));
+                        }
+                        let val = gb.ue()?;
+                        if op == 2 {
+                            return Err(Error::Unsupported(
+                                "long-term reference reordering".into(),
+                            ));
+                        }
+                        if list == 0 {
+                            self.reorder_ops0.push((op, val));
+                        } else {
+                            self.reorder_ops1.push((op, val));
+                        }
                     }
-                    if op > 2 {
-                        return Err(Error::InvalidData(format!(
-                            "illegal modification_of_pic_nums_idc {op}"
-                        )));
-                    }
-                    let val = gb.ue()?;
-                    if op == 2 {
-                        return Err(Error::Unsupported("long-term reference reordering".into()));
-                    }
-                    self.reorder_ops.push((op, val));
                 }
             }
+            // pred_weight_table (ff_h264_pred_weight_table, h264_parse.c:30):
+            // explicit weights for weighted P slices / B with idc 1.
+            let want_wt = (self.slice_type_nos == 0 && pps.weighted_pred)
+                || (self.slice_type_nos == 1 && pps.weighted_bipred_idc == 1);
+            if want_wt {
+                self.parse_pred_weight_table(&pps, gb)?;
+            }
+        } else {
+            self.list_count = 0;
         }
 
         if nal.ref_idc != 0 {
@@ -902,7 +1053,7 @@ impl H264Decoder {
             let raw = if f < 0 {
                 -1
             } else {
-                self.ref_list
+                self.ref_lists[0]
                     .iter()
                     .position(|&i| self.refs.get(i).is_some_and(|p| p.id as i8 == f))
                     .map_or(-1, |p| p as i8)
@@ -1307,7 +1458,7 @@ impl H264Decoder {
         if ri < 0 {
             return -1; // LIST_NOT_USED
         }
-        self.ref_list
+        self.ref_lists[0]
             .get(ri as usize)
             .and_then(|&k| self.refs.get(k))
             .map_or(-1, |pic| pic.id as i8)
@@ -1325,7 +1476,7 @@ impl H264Decoder {
         // ref, one inverted bit for two, ue otherwise. C reads ALL of an
         // MB's ref_idx before any mvd and fills ref_cache with them —
         // pred_motion of later partitions compares against these refs.
-        let rc = self.ref_count_l0;
+        let rc = self.ref_counts[0];
         let read_ref = |gb: &mut Gb| -> Result<i8> {
             match rc {
                 0 | 1 => Ok(0),
@@ -1951,7 +2102,7 @@ impl H264Decoder {
         if id < 0 {
             return id; // -1 unused / -2 unavailable — both fail > 0
         }
-        self.ref_list
+        self.ref_lists[0]
             .iter()
             .position(|&k| self.refs.get(k).is_some_and(|p| p.id as i8 == id))
             .map_or(-1, |p| p as i8)
@@ -2489,7 +2640,7 @@ impl H264Decoder {
                     }
                 }
             };
-            let rc = self.ref_count_l0;
+            let rc = self.ref_counts[0];
             let read_ref = |s: &mut Self, cab: &mut Cabac, n: usize| -> Result<i8> {
                 if rc <= 1 {
                     return Ok(0);
@@ -2640,8 +2791,7 @@ impl H264Decoder {
             // space) since the pred_motion unification — resolve the DPB
             // picture by id; negative = no reference (use list0[0]).
             let refs = &self.refs;
-            let fallback = self
-                .ref_list
+            let fallback = self.ref_lists[0]
                 .first()
                 .and_then(|&k| self.refs.get(k))
                 .map_or(0, |p| p.id);
@@ -3152,6 +3302,9 @@ impl H264Decoder {
         let mut pic = Picture::new(self.mb_width, self.mb_height);
         pic.id = self.next_pic_id;
         self.next_pic_id += 1;
+        pic.frame_num = self.slice_frame_num;
+        pic.key = is_idr;
+        pic.poc = self.compute_poc(is_idr);
         self.cur = Some(pic);
         self.slice_table = vec![0; self.mb_width * self.mb_height];
         self.got_mb = false;
@@ -3159,6 +3312,185 @@ impl H264Decoder {
         if is_idr {
             self.refs.clear(); // IDR clears the DPB
         }
+    }
+
+    /// `ff_h264_pred_weight_table` (h264_parse.c:30) — explicit
+    /// weights/offsets per list/ref; frame pictures, 420 chroma.
+    fn parse_pred_weight_table(&mut self, pps: &Pps, gb: &mut Gb) -> Result<()> {
+        let mut pwt = PredWeightTable::default();
+        pwt.use_weight = 0;
+        pwt.use_weight_chroma = 0;
+        pwt.luma_log2_denom = gb.ue()? as i32;
+        if pwt.luma_log2_denom > 7 {
+            return Err(Error::InvalidData("luma_log2_weight_denom".into()));
+        }
+        let luma_def = 1i32 << pwt.luma_log2_denom;
+        pwt.chroma_log2_denom = gb.ue()? as i32;
+        if pwt.chroma_log2_denom > 7 {
+            return Err(Error::InvalidData("chroma_log2_weight_denom".into()));
+        }
+        let chroma_def = 1i32 << pwt.chroma_log2_denom;
+        let mut luma_w_any = [false; 2];
+        let mut chroma_w_any = [false; 2];
+        for list in 0..2usize {
+            for i in 0..self.ref_counts[list] as usize {
+                if gb.read_bit() == 1 {
+                    let w = gb.se()?;
+                    let o = gb.se()?;
+                    if !(-128..=127).contains(&w) || !(-128..=127).contains(&o) {
+                        return Err(Error::InvalidData("weight out of range".into()));
+                    }
+                    pwt.luma_w[list][i] = w;
+                    pwt.luma_o[list][i] = o;
+                    if w != luma_def || o != 0 {
+                        luma_w_any[list] = true;
+                    }
+                } else {
+                    pwt.luma_w[list][i] = luma_def;
+                    pwt.luma_o[list][i] = 0;
+                }
+                for j in 0..2usize {
+                    if gb.read_bit() == 1 {
+                        let w = gb.se()?;
+                        let o = gb.se()?;
+                        if !(-128..=127).contains(&w) || !(-128..=127).contains(&o) {
+                            return Err(Error::InvalidData("chroma weight".into()));
+                        }
+                        pwt.chroma_w[list][j][i] = w;
+                        pwt.chroma_o[list][j][i] = o;
+                        if w != chroma_def || o != 0 {
+                            chroma_w_any[list] = true;
+                        }
+                    } else {
+                        pwt.chroma_w[list][j][i] = chroma_def;
+                        pwt.chroma_o[list][j][i] = 0;
+                    }
+                }
+            }
+            if self.slice_type_nos != 1 {
+                break; // P: list 0 only
+            }
+        }
+        pwt.use_weight_chroma = chroma_w_any.iter().any(|&b| b) as u8;
+        pwt.use_weight = (luma_w_any.iter().any(|&b| b) || pwt.use_weight_chroma != 0) as u8;
+        self.pwt = pwt;
+        let _ = pps;
+        Ok(())
+    }
+
+    /// `implicit_weight_table` (h264_slice.c:691), frame path: fills
+    /// pwt.implicit[ref0][ref1] and flags use_weight = 2 (implicit).
+    /// Call after build_ref_list (needs the POCs).
+    fn implicit_weight_table(&mut self) {
+        let cur_poc = self.cur.as_ref().map(|p| p.poc).unwrap_or(0);
+        let r0 = &self.ref_lists[0];
+        let r1 = &self.ref_lists[1];
+        // Single-picture trivial case (C's early out).
+        if self.ref_counts[0] == 1 && self.ref_counts[1] == 1 && !r0.is_empty() && !r1.is_empty() {
+            let p0 = self.refs[r0[0]].poc as i64;
+            let p1 = self.refs[r1[0]].poc as i64;
+            if p0 + p1 == 2 * cur_poc as i64 {
+                self.pwt.use_weight = 0;
+                self.pwt.use_weight_chroma = 0;
+                return;
+            }
+        }
+        self.pwt.use_weight = 2;
+        self.pwt.use_weight_chroma = 2;
+        self.pwt.luma_log2_denom = 5;
+        self.pwt.chroma_log2_denom = 5;
+        self.pwt.implicit = [[32; 32]; 32];
+        for (i0, &a) in r0.iter().enumerate() {
+            let poc0 = self.refs[a].poc;
+            for (i1, &b) in r1.iter().enumerate() {
+                let poc1 = self.refs[b].poc;
+                let mut w = 32i32;
+                let td = (poc1 - poc0).clamp(-128, 127);
+                if td != 0 {
+                    let tb = (cur_poc - poc0).clamp(-128, 127);
+                    let tx = (16384 + (td.abs() >> 1)) / td;
+                    let dsf = (tb * tx + 32) >> 8;
+                    if (-64..=128).contains(&dsf) {
+                        w = 64 - dsf;
+                    }
+                }
+                self.pwt.implicit[i0][i1] = w;
+            }
+        }
+    }
+
+    /// `ff_h264_init_poc` (h264_parse.c:280), frame-picture path. Uses
+    /// and updates the decoder's POC state; the caller snapshots
+    /// `poc_msb`/`lsb` for the prev_* updates at picture end (C does
+    /// them in ff_h264_field_end).
+    fn compute_poc(&mut self, _is_idr: bool) -> i32 {
+        let sps = self.sps.clone().unwrap();
+        let max_frame_num = 1i32 << sps.log2_max_frame_num;
+        let frame_num = self.slice_frame_num as i32;
+
+        let mut offset = self.poc_prev_frame_num_offset;
+        if frame_num < self.poc_prev_frame_num {
+            offset += max_frame_num;
+        }
+        self.poc_frame_num_offset = offset;
+
+        let field_poc0;
+        if sps.poc_type == 0 {
+            let max_poc_lsb = 1i32 << sps.log2_max_poc_lsb;
+            let mut prev_lsb = self.poc_prev_lsb;
+            if prev_lsb < 0 {
+                prev_lsb = self.sl_poc_lsb;
+            }
+            if self.sl_poc_lsb < prev_lsb && prev_lsb - self.sl_poc_lsb >= max_poc_lsb / 2 {
+                self.poc_msb = self.poc_prev_msb + max_poc_lsb;
+            } else if self.sl_poc_lsb > prev_lsb && prev_lsb - self.sl_poc_lsb < -max_poc_lsb / 2 {
+                self.poc_msb = self.poc_prev_msb - max_poc_lsb;
+            } else {
+                self.poc_msb = self.poc_prev_msb;
+            }
+            field_poc0 = self.poc_msb + self.sl_poc_lsb;
+            // field_poc[1] = field_poc[0] + delta_poc_bottom (frame);
+            // pic_poc = min of the two.
+            let f1 = field_poc0 + self.sl_delta_poc_bottom;
+            return field_poc0.min(f1);
+        } else if sps.poc_type == 1 {
+            let mut abs_frame_num = if !sps.offset_for_ref_frame.is_empty() {
+                offset + frame_num
+            } else {
+                0
+            };
+            let nal_ref_idc = self.cur_nal_ref_idc;
+            if nal_ref_idc == 0 && abs_frame_num > 0 {
+                abs_frame_num -= 1;
+            }
+            let cycle = sps.offset_for_ref_frame.len() as i32;
+            let expected_delta_per_cycle = sps
+                .offset_for_ref_frame
+                .iter()
+                .fold(0i64, |a, &v| a + v as i64);
+            let mut expected: i64 = 0;
+            if abs_frame_num > 0 {
+                let cycle_cnt = (abs_frame_num - 1) / cycle;
+                let in_cycle = (abs_frame_num - 1) % cycle;
+                expected = cycle_cnt as i64 * expected_delta_per_cycle;
+                for i in 0..=in_cycle {
+                    expected += sps.offset_for_ref_frame[i as usize] as i64;
+                }
+            }
+            if nal_ref_idc == 0 {
+                expected += sps.offset_for_non_ref_pic as i64;
+            }
+            let f0 = expected + self.sl_delta_poc[0] as i64;
+            let f1 = f0 + sps.offset_for_top_to_bottom as i64 + self.sl_delta_poc[1] as i64;
+            return (f0.min(f1)) as i32;
+        } else {
+            let mut poc = 2 * (offset + frame_num);
+            if self.cur_nal_ref_idc == 0 {
+                poc -= 1;
+            }
+            field_poc0 = poc;
+        }
+        field_poc0
     }
 
     fn decode_slice(&mut self, nal: &Nal, next_slice_idx: usize) -> Result<bool> {
@@ -3182,10 +3514,11 @@ impl H264Decoder {
         }
         if new_pic {
             self.finish_picture()?; // emit the finished picture first
+            self.cur_nal_ref_idc = nal.ref_idc;
+            self.cur_is_b = self.slice_type_nos == 1;
             self.start_new_picture(nal.kind == 5);
             self.cur_is_ref = nal.ref_idc != 0;
             self.frame_num = self.slice_frame_num;
-            self.cur.as_mut().unwrap().frame_num = self.slice_frame_num;
         }
         // One number per slice (C's current_slice / slice_table): MBs of
         // other slices are unavailable for prediction, and deblocking mode 2
@@ -3218,7 +3551,7 @@ impl H264Decoder {
                     end - start,
                     self.slice_type_nos,
                     self.cabac_init_idc,
-                    self.ref_count_l0
+                    self.ref_counts[0]
                 );
             }
             loop {
@@ -3311,6 +3644,8 @@ impl H264Decoder {
         self.refs.insert(0, pic);
         let pic_idx = 0usize;
         let pic = &self.refs[pic_idx];
+        let cur_poc = pic.poc;
+        let cur_key = pic.key;
 
         let sps = self.sps.as_ref().unwrap();
         let w = self.mb_width * 16;
@@ -3337,18 +3672,110 @@ impl H264Decoder {
         } else {
             self.refs.remove(pic_idx);
         }
-        self.pending.push_back(frame);
+        // Picture-end POC state (ff_h264_field_end, h264_slice.c:459-463):
+        // prev msb/lsb only for reference pictures, offsets always.
+        if self.cur_nal_ref_idc != 0 {
+            self.poc_prev_msb = self.poc_msb;
+            self.poc_prev_lsb = self.sl_poc_lsb;
+        }
+        self.poc_prev_frame_num_offset = self.poc_frame_num_offset;
+        self.poc_prev_frame_num = self.slice_frame_num as i32;
+        // Output reordering (h264_select_output_frame, h264_slice.c:1313).
+        self.select_output_frame(frame, cur_poc, cur_key);
         self.got_mb = false;
         Ok(())
     }
 
-    /// RefPicList0 init + modification for a P slice (h264_refs.c:
-    /// ff_h264_build_ref_list, short-term only). Default order is
-    /// descending PicNum (PicNum = FrameNumWrap: frame_num, minus
-    /// MaxFrameNum when it exceeds the current frame_num); the
-    /// modification ops then move the named picture to each index.
+    /// `h264_select_output_frame` — push the finished frame into the
+    /// delayed buffer and emit whatever is ready. `mmco_reset` is always
+    /// false here (explicit marking is Phase E).
+    fn select_output_frame(&mut self, frame: Frame, cur_poc: i32, cur_key: bool) {
+        let sps = self.sps.clone().unwrap();
+        if sps.bitstream_restriction {
+            self.has_b_frames = self.has_b_frames.max(sps.num_reorder_frames);
+        }
+
+        // last_pocs shift (C's running window of recent POCs).
+        let mut i = 0usize;
+        let mut out_of_order;
+        loop {
+            if i == self.last_pocs.len() || cur_poc < self.last_pocs[i] {
+                if i != 0 {
+                    self.last_pocs[i - 1] = cur_poc;
+                }
+                break;
+            } else if i != 0 {
+                self.last_pocs[i - 1] = self.last_pocs[i];
+            }
+            i += 1;
+        }
+        out_of_order = self.last_pocs.len() - i;
+        // C: B pictures or a POC gap > 2 raise the reorder need.
+        if self.cur_is_b
+            || (self.last_pocs[self.last_pocs.len() - 2] > i32::MIN
+                && self.last_pocs[self.last_pocs.len() - 1] as i64
+                    - self.last_pocs[self.last_pocs.len() - 2] as i64
+                    > 2)
+        {
+            out_of_order = out_of_order.max(1);
+        }
+        if out_of_order == self.last_pocs.len() {
+            // Invalid POC ordering — reset the window.
+            for p in self.last_pocs.iter_mut().skip(1) {
+                *p = i32::MIN;
+            }
+            self.last_pocs[0] = cur_poc;
+        } else if self.has_b_frames < out_of_order && !sps.bitstream_restriction {
+            self.has_b_frames = out_of_order;
+        }
+
+        self.delayed.push(DelayedFrame {
+            frame,
+            poc: cur_poc,
+            key: cur_key,
+            mmco_reset: false,
+        });
+        let pics = self.delayed.len();
+
+        // Pick the minimum-POC candidate (stopping at key/reset frames).
+        let mut out_idx = 0usize;
+        for j in 1..pics {
+            if self.delayed[j].key || self.delayed[j].mmco_reset {
+                break;
+            }
+            if self.delayed[j].poc < self.delayed[out_idx].poc {
+                out_idx = j;
+            }
+        }
+        if self.has_b_frames == 0 && (self.delayed[0].key || self.delayed[0].mmco_reset) {
+            self.next_outputed_poc = i32::MIN + 1;
+        }
+        let out_of_order = self.delayed[out_idx].poc < self.next_outputed_poc;
+
+        if out_of_order || pics > self.has_b_frames {
+            let out = self.delayed.remove(out_idx);
+            if !out_of_order {
+                if out_idx == 0 && self.delayed.first().is_some_and(|d| d.key || d.mmco_reset) {
+                    self.next_outputed_poc = i32::MIN + 1;
+                } else {
+                    self.next_outputed_poc = out.poc;
+                }
+            }
+            self.pending.push_back(out.frame);
+        }
+    }
+
+    /// RefPicList init + modification (h264_refs.c:
+    /// h264_initialise_ref_list + ff_h264_build_ref_list, short-term
+    /// only). P: descending PicNum. B: POC-sorted — list 0 = past
+    /// pictures nearest-first then future nearest-first; list 1 the
+    /// mirror image; if both lists come out identical and non-trivial,
+    /// list1[0]/[1] are swapped so list1[0] differs from list0[0]. The
+    /// per-list modification ops then move the named picture to each
+    /// index (PicNum-pred walk identical for both lists).
     fn build_ref_list(&mut self) -> Result<()> {
-        self.ref_list.clear();
+        self.ref_lists[0].clear();
+        self.ref_lists[1].clear();
         if self.slice_type_nos == 2 {
             return Ok(());
         }
@@ -3358,36 +3785,84 @@ impl H264Decoder {
             let f = f as i64;
             if f > cur_fn { f - max_fn } else { f }
         };
-        let mut list: Vec<usize> = (0..self.refs.len()).collect();
-        list.sort_by_key(|&i| std::cmp::Reverse(pic_num(self.refs[i].frame_num)));
-        let mut pred = cur_fn;
-        for (idx, &(op, val)) in self.reorder_ops.iter().enumerate() {
-            let abs_diff = val as i64 + 1;
-            if op == 0 {
-                pred -= abs_diff;
-                if pred < 0 {
-                    pred += max_fn;
+        let mut lists: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+        if self.slice_type_nos == 1 {
+            // B: add_sorted (h264_refs.c:103) — dir=1 picks the largest
+            // POC ≤ cur first (past, nearest first); dir=0 the smallest
+            // above cur (future, nearest first).
+            let cur_poc = self.cur.as_ref().map(|p| p.poc).unwrap_or(0);
+            for list in 0..2usize {
+                let mut sorted: Vec<usize> = Vec::new();
+                for dir in [1 ^ list, 0 ^ list] {
+                    loop {
+                        let mut best = if dir == 1 { i32::MIN } else { i32::MAX };
+                        let mut best_i = None;
+                        for (i, r) in self.refs.iter().enumerate() {
+                            let poc = r.poc;
+                            if ((poc > cur_poc) ^ (dir == 1)) == false {
+                                continue;
+                            }
+                            if (poc < best) ^ (dir == 1) == false {
+                                continue;
+                            }
+                            best = poc;
+                            best_i = Some(i);
+                        }
+                        match best_i {
+                            Some(i) => sorted.push(i),
+                            None => break,
+                        }
+                    }
                 }
-            } else {
-                pred += abs_diff;
-                if pred >= max_fn {
-                    pred -= max_fn;
-                }
+                lists[list] = sorted;
             }
-            let want = if pred > cur_fn { pred - max_fn } else { pred };
-            let Some(pos) = list
-                .iter()
-                .position(|&i| pic_num(self.refs[i].frame_num) == want)
-            else {
-                return Err(Error::InvalidData(
-                    "reference picture missing during reorder".into(),
-                ));
-            };
-            let r = list.remove(pos);
-            list.insert(idx.min(list.len()), r);
+            // C: identical non-trivial lists → swap list1[0]/[1].
+            let (l0, l1) = (&lists[0], &lists[1]);
+            if l0.len() == l1.len() && l1.len() > 1 && l0 == l1 {
+                lists[1].swap(0, 1);
+            }
+        } else {
+            lists[0] = (0..self.refs.len()).collect();
+            lists[0].sort_by_key(|&i| std::cmp::Reverse(pic_num(self.refs[i].frame_num)));
         }
-        list.truncate(self.ref_count_l0 as usize);
-        self.ref_list = list;
+
+        // Per-list modification (ff_h264_build_ref_list's pred walk).
+        for list in 0..self.list_count {
+            let ops = if list == 0 {
+                &self.reorder_ops0
+            } else {
+                &self.reorder_ops1
+            };
+            let mut list_v = lists[list].clone();
+            let mut pred = cur_fn;
+            for (idx, &(op, val)) in ops.iter().enumerate() {
+                let abs_diff = val as i64 + 1;
+                if op == 0 {
+                    pred -= abs_diff;
+                    if pred < 0 {
+                        pred += max_fn;
+                    }
+                } else {
+                    pred += abs_diff;
+                    if pred >= max_fn {
+                        pred -= max_fn;
+                    }
+                }
+                let want = if pred > cur_fn { pred - max_fn } else { pred };
+                let Some(pos) = list_v
+                    .iter()
+                    .position(|&i| pic_num(self.refs[i].frame_num) == want)
+                else {
+                    return Err(Error::InvalidData(
+                        "reference picture missing during reorder".into(),
+                    ));
+                };
+                let r = list_v.remove(pos);
+                list_v.insert(idx.min(list_v.len()), r);
+            }
+            list_v.truncate(self.ref_counts[list] as usize);
+            self.ref_lists[list] = list_v;
+        }
         Ok(())
     }
 }
@@ -3414,6 +3889,21 @@ impl Decoder for H264Decoder {
             // finish the trailing picture
             if self.got_mb {
                 self.finish_picture()?;
+            }
+            // EOF (send_next_delayed_frame): emit the reorder buffer in
+            // min-POC order (scan stops at key/reset frames).
+            while !self.delayed.is_empty() {
+                let mut out_idx = 0usize;
+                for j in 1..self.delayed.len() {
+                    if self.delayed[j].key || self.delayed[j].mmco_reset {
+                        break;
+                    }
+                    if self.delayed[j].poc < self.delayed[out_idx].poc {
+                        out_idx = j;
+                    }
+                }
+                let out = self.delayed.remove(out_idx);
+                self.pending.push_back(out.frame);
             }
             return Ok(());
         };
