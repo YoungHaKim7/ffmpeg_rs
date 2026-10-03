@@ -34,6 +34,11 @@ pub(crate) struct Picture {
     /// Unique id — the deblocking filter compares references by picture
     /// identity (C's `ref2frm`), not by per-slice ref_idx.
     pub id: u64,
+    /// ff_h264_direct_ref_list_init stores the slice's ref counts and
+    /// RefPicList "POCs" (4*frame_num + reference&3) so a future B
+    /// picture's temporal direct can map its colocated references.
+    pub ref_count_pic: [usize; 2],
+    pub ref_poc: [[i32; 32]; 2],
     /// Per-list per 8x8 (4 per MB): id of the referenced picture, -1 =
     /// none (C's ref2frm-mapped ref_pic).
     pub ref_pic: [Vec<i32>; 2],
@@ -45,6 +50,9 @@ pub(crate) struct Picture {
     pub(crate) part: Vec<u8>,
     pub(crate) chroma_pred: Vec<u8>,
     pub(crate) skip: Vec<bool>,
+    /// B_Direct MB marker (C's MB_TYPE_DIRECT2 flag — the direct-mode
+    /// mb_type ctx and the loopfilter read it).
+    pub(crate) direct: Vec<bool>,
     pub(crate) dbk: Vec<MbDeblock>,
 }
 
@@ -79,6 +87,8 @@ impl Picture {
             poc: 0,
             key: false,
             id: 0,
+            ref_count_pic: [0, 0],
+            ref_poc: [[0; 32]; 2],
             ref_pic: [
                 vec![-1; 4 * (mb_w * mb_h + 1)],
                 vec![-1; 4 * (mb_w * mb_h + 1)],
@@ -87,6 +97,7 @@ impl Picture {
             part: vec![PART_16X16; mb_w * mb_h + 1],
             chroma_pred: vec![0; mb_w * mb_h + 1],
             skip: vec![false; mb_w * mb_h + 1],
+            direct: vec![false; mb_w * mb_h + 1],
             dbk: vec![MbDeblock::default(); mb_w * mb_h + 1],
         }
     }

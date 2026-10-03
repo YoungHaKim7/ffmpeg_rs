@@ -128,6 +128,7 @@ const I4_DC_128_PRED: i8 = 11;
 const LEVEL_TAB_BITS: u32 = 8;
 
 /// MB partition shape (`ff_h264_p_mb_type_info` + the intra path).
+/// `B(n)` carries the `ff_h264_b_mb_type_info` row.
 #[derive(Debug)]
 enum Part {
     Intra(usize),
@@ -135,6 +136,7 @@ enum Part {
     P16x8,
     P8x16,
     P8x8,
+    B(usize),
 }
 
 #[derive(Clone, Copy)]
