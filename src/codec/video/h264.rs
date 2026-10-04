@@ -1935,9 +1935,19 @@ mod tests {
                     let _ = f.write_all(&out);
                 }
             }
-            // Bit-exact vs default ffmpeg (deblocking included).
+            // Bit-exact vs default ffmpeg (deblocking included), and the
+            // full frame count must match (an early error yields fewer
+            // frames — comparing only the decoded prefix would pass).
             if std::env::var_os("H264_DUMP").is_none() {
                 assert_eq!(maxd, 0, "frame {idx} differs from the ffmpeg reference");
+                let expect = _ref.len() / (w * h * 3 / 2);
+                assert_eq!(
+                    frames.len(),
+                    expect,
+                    "decoded {} frames, reference has {}",
+                    frames.len(),
+                    expect
+                );
             }
         }
     }

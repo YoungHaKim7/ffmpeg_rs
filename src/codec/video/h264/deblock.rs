@@ -251,15 +251,36 @@ fn edge(
 /// cols 4..7 = this MB.
 struct Caches {
     nnz: [u8; 40],
-    refs: [i32; 40],
-    mv: [[i16; 2]; 40],
+    refs: [[i32; 40]; 2],
+    mv: [[[i16; 2]; 40]; 2],
+    list_count: usize,
 }
 
 fn check_mv(c: &Caches, b: usize, bn: usize, mvy_limit: i32) -> i16 {
-    let mut v = c.refs[b] != c.refs[bn];
-    if !v && c.refs[b] != -1 {
-        v = ((c.mv[b][0] as i32 - c.mv[bn][0] as i32 + 3) as u32 >= 7)
-            | ((c.mv[b][1] as i32 - c.mv[bn][1] as i32).abs() >= mvy_limit);
+    let mvdiff = |list: usize| -> bool {
+        ((c.mv[list][b][0] as i32 - c.mv[list][bn][0] as i32 + 3) as u32 >= 7)
+            | ((c.mv[list][b][1] as i32 - c.mv[list][bn][1] as i32).abs() >= mvy_limit)
+    };
+    let mut v = c.refs[0][b] != c.refs[0][bn];
+    if !v && c.refs[0][b] != -1 {
+        v = mvdiff(0);
+    }
+    if c.list_count == 2 {
+        if !v {
+            v = (c.refs[1][b] != c.refs[1][bn]) | mvdiff(1);
+        }
+        if v {
+            // Different-picture fallback: same picture across lists
+            // (b_list0 vs bn_list1) still needs the MV comparison.
+            if c.refs[0][b] != c.refs[1][bn] || c.refs[1][b] != c.refs[0][bn] {
+                return 1;
+            }
+            let cross = |la: usize, lb: usize| -> bool {
+                ((c.mv[la][b][0] as i32 - c.mv[lb][bn][0] as i32 + 3) as u32 >= 7)
+                    | ((c.mv[la][b][1] as i32 - c.mv[lb][bn][1] as i32).abs() >= mvy_limit)
+            };
+            return (cross(0, 1) | cross(1, 0)) as i16;
+        }
     }
     v as i16
 }
@@ -327,34 +348,37 @@ fn filter_mb(pic: &mut Picture, mb_w: usize, mb_x: usize, mb_y: usize) {
     // Inter caches (fill_filter_caches_inter, list 0) + nnz.
     let mut c = Caches {
         nnz: [0; 40],
-        refs: [-1; 40],
-        mv: [[0, 0]; 40],
+        refs: [[-1; 40], [-1; 40]],
+        mv: [[[0, 0]; 40], [[0, 0]; 40]],
+        list_count: pic.list_count,
     };
     let b_stride = mb_w * 4 + 1;
     if !is_intra(mb_type) {
         let bxy = |x: usize, y: usize| 4 * x + 4 * y * b_stride;
-        if top_type == MB_INTER {
-            let t = top_xy.unwrap();
-            let b = bxy(mb_x, mb_y - 1) + 3 * b_stride;
-            for i in 0..4 {
-                c.mv[4 + i] = pic.mv[0][b + i];
-                c.refs[4 + i] = pic.ref_pic[0][4 * t + 2 + (i >> 1)];
+        for list in 0..c.list_count {
+            if top_type == MB_INTER {
+                let t = top_xy.unwrap();
+                let b = bxy(mb_x, mb_y - 1) + 3 * b_stride;
+                for i in 0..4 {
+                    c.mv[list][4 + i] = pic.mv[list][b + i];
+                    c.refs[list][4 + i] = pic.ref_pic[list][4 * t + 2 + (i >> 1)];
+                }
             }
-        }
-        if left_type == MB_INTER {
-            let l = left_xy.unwrap();
-            let b = bxy(mb_x - 1, mb_y) + 3;
-            for i in 0..4 {
-                c.mv[3 + 8 * (1 + i)] = pic.mv[0][b + i * b_stride];
-                c.refs[3 + 8 * (1 + i)] = pic.ref_pic[0][4 * l + 1 + 2 * (i >> 1)];
+            if left_type == MB_INTER {
+                let l = left_xy.unwrap();
+                let b = bxy(mb_x - 1, mb_y) + 3;
+                for i in 0..4 {
+                    c.mv[list][3 + 8 * (1 + i)] = pic.mv[list][b + i * b_stride];
+                    c.refs[list][3 + 8 * (1 + i)] = pic.ref_pic[list][4 * l + 1 + 2 * (i >> 1)];
+                }
             }
-        }
-        let b = bxy(mb_x, mb_y);
-        for r in 0..4 {
-            for col in 0..4 {
-                let k = 12 + 8 * r + col;
-                c.mv[k] = pic.mv[0][b + r * b_stride + col];
-                c.refs[k] = pic.ref_pic[0][4 * mb_xy + 2 * (r >> 1) + (col >> 1)];
+            let b = bxy(mb_x, mb_y);
+            for r in 0..4 {
+                for col in 0..4 {
+                    let k = 12 + 8 * r + col;
+                    c.mv[list][k] = pic.mv[list][b + r * b_stride + col];
+                    c.refs[list][k] = pic.ref_pic[list][4 * mb_xy + 2 * (r >> 1) + (col >> 1)];
+                }
             }
         }
         let nnz = &pic.nnz[mb_xy];

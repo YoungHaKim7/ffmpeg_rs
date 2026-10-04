@@ -53,6 +53,12 @@ pub(crate) struct Picture {
     /// B_Direct MB marker (C's MB_TYPE_DIRECT2 flag — the direct-mode
     /// mb_type ctx and the loopfilter read it).
     pub(crate) direct: Vec<bool>,
+    /// Per 8x8-quadrant direct flags (C's direct_table): all-true for
+    /// B_Direct_16x16, per-sub for B_8x8, else false.
+    pub(crate) direct8: Vec<[bool; 4]>,
+    /// list_count of the picture's slices (1 = P, 2 = B) — the loop
+    /// filter's check_mv reads list 1 only for B pictures.
+    pub(crate) list_count: usize,
     pub(crate) dbk: Vec<MbDeblock>,
 }
 
@@ -98,6 +104,8 @@ impl Picture {
             chroma_pred: vec![0; mb_w * mb_h + 1],
             skip: vec![false; mb_w * mb_h + 1],
             direct: vec![false; mb_w * mb_h + 1],
+            direct8: vec![[false; 4]; mb_w * mb_h + 1],
+            list_count: 1,
             dbk: vec![MbDeblock::default(); mb_w * mb_h + 1],
         }
     }

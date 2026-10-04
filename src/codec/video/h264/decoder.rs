@@ -95,13 +95,18 @@ pub struct H264Decoder {
     /// num_ref_idx_active for the current slice (PPS default or the
     /// slice-header override), per list.
     ref_counts: [u32; 2],
-    /// list_count (1 for P, 2 for B).
+    /// list_count (1 for P, 2 for B) — current slice, and the value the
+    /// next picture will carry (set from its first slice).
     list_count: usize,
+    next_list_count: usize,
     /// direct_spatial_mv_pred_flag of the current B slice.
     direct_spatial: bool,
     /// x264 build from SEI user_data_unregistered ("x264 - core rNNN") —
     /// gates the direct-mode zero-MV special cases (C's x264_build).
     x264_build: u32,
+    /// Per-block direct flags, scan8 layout (C's direct_cache) — the B
+    /// ref-decode ctx suppresses the >0 check next to direct blocks.
+    direct_cache: [bool; 15 * 8],
     /// ff_h264_direct_dist_scale_factor / fill_colmap state (frame
     /// path; temporal direct).
     dist_scale_factor: [i32; 32],
@@ -109,6 +114,11 @@ pub struct H264Decoder {
     /// First slice of the current picture stored its ref lists for a
     /// future colocated picture (ff_h264_direct_ref_list_init).
     stored_ref_lists: bool,
+    /// dec_ref_pic_marking ops (MMCO opcode, value) — parsed per slice,
+    /// executed at picture end. x264's sliding-window maintenance uses
+    /// op 1; op 5 clears the DPB (and flags the reorder reset).
+    mmco_ops: Vec<(u32, u32)>,
+    mmco_reset: bool,
     /// Parsed ref_pic_list_modification ops per list (idc, value),
     /// applied after the previous picture enters the DPB.
     pub(super) reorder_ops0: Vec<(u32, u32)>,
@@ -226,11 +236,15 @@ impl H264Decoder {
             ref_lists: [Vec::new(), Vec::new()],
             ref_counts: [1, 1],
             list_count: 1,
+            next_list_count: 1,
             direct_spatial: true,
             x264_build: 0,
+            direct_cache: [false; 15 * 8],
             dist_scale_factor: [256; 32],
             map_col_to_list0: [[0; 16]; 2],
             stored_ref_lists: false,
+            mmco_ops: Vec::new(),
+            mmco_reset: false,
             reorder_ops0: Vec::new(),
             reorder_ops1: Vec::new(),
             pwt: PredWeightTable::default(),
@@ -475,12 +489,42 @@ impl H264Decoder {
             self.list_count = 0;
         }
 
+        self.mmco_ops.clear();
         if nal.ref_idc != 0 {
             if nal.kind == 5 {
                 let _noop = gb.read_bit();
                 let _ltr = gb.read_bit();
             } else if gb.read_bit() == 1 {
-                return Err(Error::Unsupported("MMCO".into()));
+                // ff_h264_decode_ref_pic_marking (h264_refs.c:846):
+                // op/value pairs until op == 0.
+                loop {
+                    let op = gb.ue()?;
+                    if op == 0 {
+                        break;
+                    }
+                    if op > 6 {
+                        return Err(Error::InvalidData(format!("MMCO op {op}")));
+                    }
+                    // Operands (h264_refs.c:851-880): op 3 reads the
+                    // short-term pic-num diff AND long_term_frame_idx.
+                    let val = match op {
+                        1 | 2 | 4 | 6 => gb.ue()?,
+                        3 => {
+                            let d = gb.ue()?;
+                            let lt = gb.ue()?;
+                            if lt > 31 {
+                                return Err(Error::InvalidData("long_term_frame_idx".into()));
+                            }
+                            d
+                        }
+                        _ => 0,
+                    };
+                    if matches!(op, 2 | 4 | 6) {
+                        // Long-term-idx machinery beyond the x264 subset.
+                        return Err(Error::Unsupported(format!("MMCO op {op} (long-term)")));
+                    }
+                    self.mmco_ops.push((op, val));
+                }
             }
         }
         // cabac_init_idc (h264_slice.c:1876): P/B slices of a CABAC PPS,
@@ -856,8 +900,10 @@ impl H264Decoder {
             let left_xy = self.mb_x.saturating_sub(1) + self.mb_y * self.mb_width;
             let uses = |t: u32, xy: usize, list: usize| -> bool {
                 t == MB_INTER
-                    && (0..4).any(|k| pic.ref_index[list].get(4 * xy + k) == Some(&0)
-                        || pic.ref_index[list].get(4 * xy + k).is_some_and(|&r| r > 0))
+                    && (0..4).any(|k| {
+                        pic.ref_index[list].get(4 * xy + k) == Some(&0)
+                            || pic.ref_index[list].get(4 * xy + k).is_some_and(|&r| r > 0)
+                    })
             };
             let fill_edge = |t: u32| -> i8 { if t != MB_UNAVAIL { -1 } else { -2 } };
             for list in 0..self.list_count.max(1).min(2) {
@@ -885,11 +931,12 @@ impl H264Decoder {
                     self.ref_cache[list][tr] = fill_edge(self.n_topright);
                 }
                 let tl = SCAN8[0] - 8 - 1;
-                if uses(self.n_topleft, top_xy - 1, list) {
+                if uses(self.n_topleft, top_xy.saturating_sub(1), list) {
                     let bxy =
                         4 * (self.mb_x - 1) + 4 * (self.mb_y - 1) * b_stride + 3 + 3 * b_stride;
                     self.mv_cache[list][tl] = pic.mv[list][bxy];
-                    self.ref_cache[list][tl] = pic.ref_pic[list][4 * (top_xy - 1) + 3] as i8;
+                    self.ref_cache[list][tl] =
+                        pic.ref_pic[list][4 * top_xy.saturating_sub(1) + 3] as i8;
                 } else {
                     self.mv_cache[list][tl] = [0, 0];
                     self.ref_cache[list][tl] = fill_edge(self.n_topleft);
@@ -918,8 +965,7 @@ impl H264Decoder {
                 {
                     let top0 = SCAN8[0] - 8;
                     if uses(self.n_top, top_xy, list) {
-                        let bxy =
-                            4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
+                        let bxy = 4 * self.mb_x + 4 * (self.mb_y - 1) * b_stride + 3 * b_stride;
                         for c in 0..4 {
                             self.mvd_cache[list][top0 + c] = pic.mvd[list][bxy + c];
                         }
@@ -1109,32 +1155,38 @@ impl H264Decoder {
         let b_stride = self.mb_width * 4 + 1;
         let b_xy = 4 * self.mb_x + 4 * self.mb_y * b_stride;
         let pic = self.cur.as_mut().unwrap();
-        for r in 0..4 {
-            for c in 0..4 {
-                pic.mv[0][b_xy + r * b_stride + c] = self.mv_cache[0][SCAN8[0] + 8 * r + c];
-                // CABAC mvd table (write_back_motion_list, h264_mvpred.h:
-                // 106-117): C keeps only the MB's br 4x4 (bottom row +
-                // right column is all the borders ever read); the port's
-                // full-grid store covers the same cells.
-                pic.mvd[0][b_xy + r * b_stride + c] = self.mvd_cache[0][SCAN8[0] + 8 * r + c];
+        for list in 0..2usize {
+            for r in 0..4 {
+                for c in 0..4 {
+                    pic.mv[list][b_xy + r * b_stride + c] =
+                        self.mv_cache[list][SCAN8[0] + 8 * r + c];
+                    // CABAC mvd table (write_back_motion_list,
+                    // h264_mvpred.h:106-117): C keeps only the MB's br
+                    // 4x4 (bottom row + right column is all the borders
+                    // ever read); the port's full-grid store covers the
+                    // same cells.
+                    pic.mvd[list][b_xy + r * b_stride + c] =
+                        self.mvd_cache[list][SCAN8[0] + 8 * r + c];
+                }
             }
-        }
-        // ref_cache is in PICTURE-ID space (C's ref2frm). Store the id
-        // directly for the loop filter, and recover the RAW ref_idx (the
-        // position of that picture in RefPicList0) for ref_index —
-        // pred_pskip_motion compares ref_index against raw 0.
-        for (k, blk) in [0usize, 4, 8, 12].into_iter().enumerate() {
-            let f = self.ref_cache[0][SCAN8[blk]];
-            self.cur.as_mut().unwrap().ref_pic[0][4 * mb_xy + k] = f as i32;
-            let raw = if f < 0 {
-                -1
-            } else {
-                self.ref_lists[0]
-                    .iter()
-                    .position(|&i| self.refs.get(i).is_some_and(|p| p.id as i8 == f))
-                    .map_or(-1, |p| p as i8)
-            };
-            self.cur.as_mut().unwrap().ref_index[0][4 * mb_xy + k] = raw;
+            // ref_cache is in PICTURE-ID space (C's ref2frm). Store the
+            // id directly for the loop filter, and recover the RAW
+            // ref_idx (the position of that picture in RefPicList) for
+            // ref_index — pred_pskip_motion compares ref_index against
+            // raw 0.
+            for (k, blk) in [0usize, 4, 8, 12].into_iter().enumerate() {
+                let f = self.ref_cache[list][SCAN8[blk]];
+                pic.ref_pic[list][4 * mb_xy + k] = f as i32;
+                let raw = if f < 0 {
+                    -1
+                } else {
+                    self.ref_lists[list]
+                        .iter()
+                        .position(|&i| self.refs.get(i).is_some_and(|p| p.id as i8 == f))
+                        .map_or(-1, |p| p as i8)
+                };
+                pic.ref_index[list][4 * mb_xy + k] = raw;
+            }
         }
     }
 
@@ -1167,7 +1219,10 @@ impl H264Decoder {
         if tr != -2 {
             (tr, self.mv_cache[list][i - 8 + part_width])
         } else {
-            (self.ref_cache[list][i - 8 - 1], self.mv_cache[list][i - 8 - 1])
+            (
+                self.ref_cache[list][i - 8 - 1],
+                self.mv_cache[list][i - 8 - 1],
+            )
         }
     }
 
@@ -1399,7 +1454,7 @@ impl H264Decoder {
             );
         }
         match part {
-        Part::B(_) => unreachable!("CAVLC B gated"),
+            Part::B(_) => unreachable!("CAVLC B gated"),
             Part::Intra(row) => {
                 let row = row as usize;
                 let (mbt, cbp, pred) = (
@@ -1584,7 +1639,7 @@ impl H264Decoder {
             Ok((dx as i16, dy as i16))
         };
         match part {
-        Part::B(_) => unreachable!("CAVLC B gated"),
+            Part::B(_) => unreachable!("CAVLC B gated"),
             Part::P16x16 => {
                 let r0 = read_ref(gb)?;
                 let f0 = self.ref_frm(r0);
@@ -2052,6 +2107,7 @@ impl H264Decoder {
             self.cur_part = part;
             let pic = self.cur.as_mut().unwrap();
             pic.direct[mb_xy] = true;
+            pic.direct8[mb_xy] = [true; 4];
             // C zeroes the mvd caches for direct MBs.
             for r in 0..4 {
                 for c in 0..4 {
@@ -2104,7 +2160,11 @@ impl H264Decoder {
                     self.cur_part = part;
                 }
                 let pic = self.cur.as_mut().unwrap();
-                pic.direct[mb_xy] = true;
+                let mut d8 = pic.direct8[mb_xy];
+                for (i, &st) in sub_types.iter().enumerate() {
+                    d8[i] = st == 0 || direct_subs[i];
+                }
+                pic.direct8[mb_xy] = d8;
             }
             for i in 0..4usize {
                 let (bw, bh, pcount) = match sub_types[i] {
@@ -2246,7 +2306,16 @@ impl H264Decoder {
         }
     }
 
-    fn fill_mv_rect_l(&mut self, list: usize, x: usize, y: usize, w: usize, h: usize, mx: i16, my: i16) {
+    fn fill_mv_rect_l(
+        &mut self,
+        list: usize,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        mx: i16,
+        my: i16,
+    ) {
         for r in 0..h {
             for c in 0..w {
                 self.mv_cache[list][SCAN8[0] + 8 * (y + r) + (x + c)] = [mx, my];
@@ -2254,7 +2323,16 @@ impl H264Decoder {
         }
     }
 
-    fn fill_mvd_rect_l(&mut self, list: usize, x: usize, y: usize, w: usize, h: usize, px: u8, py: u8) {
+    fn fill_mvd_rect_l(
+        &mut self,
+        list: usize,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        px: u8,
+        py: u8,
+    ) {
         for r in 0..h {
             for c in 0..w {
                 self.mvd_cache[list][SCAN8[0] + 8 * (y + r) + (x + c)] = [px, py];
@@ -2467,10 +2545,12 @@ impl H264Decoder {
         let refa = self.id_to_raw(self.ref_cache[list][SCAN8[n] - 1], list);
         let refb = self.id_to_raw(self.ref_cache[list][SCAN8[n] - 8], list);
         let mut ctx = 0usize;
-        if refa > 0 {
+        let dir_a = self.slice_type_nos == 1 && self.direct_cache[SCAN8[n] - 1];
+        let dir_b = self.slice_type_nos == 1 && self.direct_cache[SCAN8[n] - 8];
+        if refa > 0 && !dir_a {
             ctx += 1;
         }
-        if refb > 0 {
+        if refb > 0 && !dir_b {
             ctx += 2;
         }
         let mut r = 0i8;
@@ -2902,7 +2982,10 @@ impl H264Decoder {
             {
                 let pic = self.cur.as_ref().unwrap();
                 let is_direct = |t: u32, xy: i64| -> bool {
-                    t == MB_INTER && xy >= 0 && (xy as usize) < pic.direct.len() && pic.direct[xy as usize]
+                    t == MB_INTER
+                        && xy >= 0
+                        && (xy as usize) < pic.direct.len()
+                        && pic.direct[xy as usize]
                 };
                 if !is_direct(self.n_left, mb_xy as i64 - 1) {
                     ctx += 1;
@@ -3190,55 +3273,261 @@ impl H264Decoder {
         }
 
         if self.mb_type == MB_INTER {
-            // MC per 4x4 block. ref_cache holds PICTURE IDS (C's ref2frm
-            // space) since the pred_motion unification — resolve the DPB
-            // picture by id; negative = no reference (use list0[0]).
+            // MC per 4x4 block, both lists (mc_part_std / mc_part_weighted
+            // in h264_mb.c:352-482). ref_cache holds PICTURE IDS (C's
+            // ref2frm space); negative = list unused for the block.
             let refs = &self.refs;
-            let fallback = self.ref_lists[0]
-                .first()
-                .and_then(|&k| self.refs.get(k))
-                .map_or(0, |p| p.id);
-            let pick = |ri: i8| -> Result<&Picture> {
-                let want = if ri < 0 { fallback } else { ri as u64 };
+            let pick = |ri: i8, list: usize| -> Result<&Picture> {
+                let fallback = self.ref_lists[list]
+                    .first()
+                    .and_then(|&k| self.refs.get(k))
+                    .map_or(0, |p| p.id as i8);
+                let want = if ri < 0 { fallback } else { ri };
                 refs.iter()
-                    .find(|p| p.id == want)
-                    .or_else(|| refs.first())
+                    .find(|p| p.id as i8 == want)
+                    .or_else(|| self.ref_lists[list].first().and_then(|&k| refs.get(k)))
                     .ok_or_else(|| {
                         Error::InvalidData("inter MB references a missing picture".into())
                     })
             };
-            let cur = self.cur.as_mut().unwrap();
+            // Weight helpers (FUNCS(weight/biweight_h264_pixels),
+            // h264dsp_template.c): the C offset pre-transforms are folded
+            // in per call.
+            let pwt = &self.pwt;
+            let weight_px = |v: u8, w: i32, o: i32, log2d: i32| -> u8 {
+                let mut off = o << log2d;
+                if log2d > 0 {
+                    off += 1 << (log2d - 1);
+                }
+                ((v as i32 * w + off) >> log2d).clamp(0, 255) as u8
+            };
+            let biweight_px = |a: u8, b: u8, w0: i32, w1: i32, o: i32, log2d: i32| -> u8 {
+                let off = ((o + 1) | 1) << log2d;
+                ((a as i32 * w0 + b as i32 * w1 + off) >> (log2d + 1)).clamp(0, 255) as u8
+            };
+            let use_weight = pwt.use_weight != 0;
             for i in 0..16usize {
-                let mv = self.mv_cache[0][SCAN8[i]];
-                let prev = pick(self.ref_cache[0][SCAN8[i]])?;
-                // scan8 (quadrant) order → pixel position, C's block_offset.
                 let grid = SCAN8[i];
                 let bc = ((grid & 7) - 4) as i32;
                 let br = ((grid >> 3) - 1) as i32;
                 let bx = self.mb_x as i32 * 16 + 4 * bc;
                 let by = self.mb_y as i32 * 16 + 4 * br;
-                // luma
+                let r0 = self.ref_cache[0][grid];
+                let r1 = if self.list_count == 2 {
+                    self.ref_cache[1][grid]
+                } else {
+                    -1
+                };
                 let mut luma = [0u8; 16];
-                mc_luma(&mut luma, 4, 4, 4, prev, bx, by, mv[0], mv[1]);
+                if r0 >= 0 {
+                    let prev = pick(r0, 0)?;
+                    mc_luma(
+                        &mut luma,
+                        4,
+                        4,
+                        4,
+                        prev,
+                        bx,
+                        by,
+                        self.mv_cache[0][grid][0],
+                        self.mv_cache[0][grid][1],
+                    );
+                }
+                if r1 >= 0 {
+                    let prev = pick(r1, 1)?;
+                    let mut luma1 = [0u8; 16];
+                    mc_luma(
+                        &mut luma1,
+                        4,
+                        4,
+                        4,
+                        prev,
+                        bx,
+                        by,
+                        self.mv_cache[1][grid][0],
+                        self.mv_cache[1][grid][1],
+                    );
+                    // Combine list0+list1.
+                    if use_weight {
+                        let (w0, w1, o, d) = if pwt.use_weight == 2 {
+                            (
+                                pwt.implicit[self.id_to_raw(r0, 0).max(0) as usize]
+                                    [self.id_to_raw(r1, 1).max(0) as usize],
+                                0,
+                                0,
+                                5,
+                            )
+                        } else {
+                            let rn0 = self.id_to_raw(r0, 0).max(0) as usize;
+                            let rn1 = self.id_to_raw(r1, 1).max(0) as usize;
+                            (
+                                pwt.luma_w[0][rn0],
+                                pwt.luma_w[1][rn1],
+                                pwt.luma_o[0][rn0] + pwt.luma_o[1][rn1],
+                                pwt.luma_log2_denom,
+                            )
+                        };
+                        let w1v = if pwt.use_weight == 2 { 64 - w0 } else { w1 };
+                        for k in 0..16 {
+                            luma[k] = biweight_px(luma[k], luma1[k], w0, w1v, o, d);
+                        }
+                    } else {
+                        for k in 0..16 {
+                            luma[k] = ((luma[k] as u32 + luma1[k] as u32 + 1) >> 1) as u8;
+                        }
+                    }
+                } else if r0 >= 0 && use_weight {
+                    let rn0 = self.id_to_raw(r0, 0).max(0) as usize;
+                    let (w, o) = (pwt.luma_w[0][rn0], pwt.luma_o[0][rn0]);
+                    for k in 0..16 {
+                        luma[k] = weight_px(luma[k], w, o, pwt.luma_log2_denom);
+                    }
+                }
                 for dr in 0..4usize {
                     for dc in 0..4usize {
-                        cur.y[y0
-                            + (4 * br + dr as i32) as usize * w
-                            + (4 * bc + dc as i32) as usize] = luma[dr * 4 + dc];
+                        let yy =
+                            y0 + (4 * br + dr as i32) as usize * w + (4 * bc + dc as i32) as usize;
+                        self.cur.as_mut().unwrap().y[yy] = luma[dr * 4 + dc];
                     }
                 }
             }
             for r in 0..4usize {
                 for c in 0..4usize {
                     // raster block (r, c) ↔ cache cell SCAN8[0] + 8r + c
-                    let mv = self.mv_cache[0][SCAN8[0] + 8 * r + c];
-                    let prev = pick(self.ref_cache[0][SCAN8[0] + 8 * r + c])?;
+                    let cell = SCAN8[0] + 8 * r + c;
                     let bx = self.mb_x as i32 * 16 + 4 * c as i32;
                     let by = self.mb_y as i32 * 16 + 4 * r as i32;
+                    let r0 = self.ref_cache[0][cell];
+                    let r1 = if self.list_count == 2 {
+                        self.ref_cache[1][cell]
+                    } else {
+                        -1
+                    };
                     let mut cb = [0u8; 16];
                     let mut cr = [0u8; 16];
-                    mc_chroma(&mut cb, 2, 2, 2, prev, &PlaneSel::Cb, bx, by, mv[0], mv[1]);
-                    mc_chroma(&mut cr, 2, 2, 2, prev, &PlaneSel::Cr, bx, by, mv[0], mv[1]);
+                    if r0 >= 0 {
+                        let prev = pick(r0, 0)?;
+                        mc_chroma(
+                            &mut cb,
+                            2,
+                            2,
+                            2,
+                            prev,
+                            &PlaneSel::Cb,
+                            bx,
+                            by,
+                            self.mv_cache[0][cell][0],
+                            self.mv_cache[0][cell][1],
+                        );
+                        mc_chroma(
+                            &mut cr,
+                            2,
+                            2,
+                            2,
+                            prev,
+                            &PlaneSel::Cr,
+                            bx,
+                            by,
+                            self.mv_cache[0][cell][0],
+                            self.mv_cache[0][cell][1],
+                        );
+                    }
+                    if r1 >= 0 {
+                        let prev = pick(r1, 1)?;
+                        let mut cb1 = [0u8; 16];
+                        let mut cr1 = [0u8; 16];
+                        mc_chroma(
+                            &mut cb1,
+                            2,
+                            2,
+                            2,
+                            prev,
+                            &PlaneSel::Cb,
+                            bx,
+                            by,
+                            self.mv_cache[1][cell][0],
+                            self.mv_cache[1][cell][1],
+                        );
+                        mc_chroma(
+                            &mut cr1,
+                            2,
+                            2,
+                            2,
+                            prev,
+                            &PlaneSel::Cr,
+                            bx,
+                            by,
+                            self.mv_cache[1][cell][0],
+                            self.mv_cache[1][cell][1],
+                        );
+                        if use_weight {
+                            let (w0, o, d) = if pwt.use_weight == 2 {
+                                (
+                                    pwt.implicit[self.id_to_raw(r0, 0).max(0) as usize]
+                                        [self.id_to_raw(r1, 1).max(0) as usize],
+                                    0,
+                                    5,
+                                )
+                            } else {
+                                let rn0 = self.id_to_raw(r0, 0).max(0) as usize;
+                                let rn1 = self.id_to_raw(r1, 1).max(0) as usize;
+                                (
+                                    pwt.chroma_w[0][0][rn0],
+                                    pwt.chroma_o[0][0][rn0] + pwt.chroma_o[1][0][rn1],
+                                    pwt.chroma_log2_denom,
+                                )
+                            };
+                            let w1v = if pwt.use_weight == 2 {
+                                64 - w0
+                            } else {
+                                pwt.chroma_w[1][0][self.id_to_raw(r1, 1).max(0) as usize]
+                            };
+                            for k in 0..4 {
+                                cb[k] = biweight_px(cb[k], cb1[k], w0, w1v, o, d);
+                            }
+                            // Cr pair
+                            let (w0c, oc) = if pwt.use_weight == 2 {
+                                (w0, 0)
+                            } else {
+                                let rn0 = self.id_to_raw(r0, 0).max(0) as usize;
+                                let rn1 = self.id_to_raw(r1, 1).max(0) as usize;
+                                (
+                                    pwt.chroma_w[0][1][rn0],
+                                    pwt.chroma_o[0][1][rn0] + pwt.chroma_o[1][1][rn1],
+                                )
+                            };
+                            let w1c = if pwt.use_weight == 2 {
+                                64 - w0c
+                            } else {
+                                pwt.chroma_w[1][1][self.id_to_raw(r1, 1).max(0) as usize]
+                            };
+                            for k in 0..4 {
+                                cr[k] =
+                                    biweight_px(cr[k], cr1[k], w0c, w1c, oc, pwt.chroma_log2_denom);
+                            }
+                        } else {
+                            for k in 0..4 {
+                                cb[k] = ((cb[k] as u32 + cb1[k] as u32 + 1) >> 1) as u8;
+                                cr[k] = ((cr[k] as u32 + cr1[k] as u32 + 1) >> 1) as u8;
+                            }
+                        }
+                    } else if r0 >= 0 && pwt.use_weight_chroma != 0 {
+                        let rn0 = self.id_to_raw(r0, 0).max(0) as usize;
+                        for k in 0..4 {
+                            cb[k] = weight_px(
+                                cb[k],
+                                pwt.chroma_w[0][0][rn0],
+                                pwt.chroma_o[0][0][rn0],
+                                pwt.chroma_log2_denom,
+                            );
+                            cr[k] = weight_px(
+                                cr[k],
+                                pwt.chroma_w[0][1][rn0],
+                                pwt.chroma_o[0][1][rn0],
+                                pwt.chroma_log2_denom,
+                            );
+                        }
+                    }
                     let cur = self.cur.as_mut().unwrap();
                     for dr in 0..2 {
                         for dc in 0..2 {
@@ -3713,6 +4002,10 @@ impl H264Decoder {
         self.got_mb = false;
         self.mb_skip_run = -1;
         self.stored_ref_lists = false;
+        self.mmco_reset = false;
+        if let Some(pic) = self.cur.as_mut() {
+            pic.list_count = self.next_list_count;
+        }
         if is_idr {
             self.refs.clear(); // IDR clears the DPB
         }
@@ -3753,8 +4046,9 @@ impl H264Decoder {
                     pwt.luma_w[list][i] = luma_def;
                     pwt.luma_o[list][i] = 0;
                 }
-                for j in 0..2usize {
-                    if gb.read_bit() == 1 {
+                if gb.read_bit() == 1 {
+                    // ONE chroma_weight_flag, two weight/offset pairs.
+                    for j in 0..2usize {
                         let w = gb.se()?;
                         let o = gb.se()?;
                         if !(-128..=127).contains(&w) || !(-128..=127).contains(&o) {
@@ -3765,7 +4059,9 @@ impl H264Decoder {
                         if w != chroma_def || o != 0 {
                             chroma_w_any[list] = true;
                         }
-                    } else {
+                    }
+                } else {
+                    for j in 0..2usize {
                         pwt.chroma_w[list][j][i] = chroma_def;
                         pwt.chroma_o[list][j][i] = 0;
                     }
@@ -3841,7 +4137,9 @@ impl H264Decoder {
                 payload_size += 255;
                 i += 1;
             }
-            let Some(sz) = rbsp.get(i).copied() else { break };
+            let Some(sz) = rbsp.get(i).copied() else {
+                break;
+            };
             payload_size += sz as usize;
             i += 1;
             let end5 = (i + 5).min(rbsp.len());
@@ -3881,7 +4179,12 @@ impl H264Decoder {
 
     /// `pred_spatial_direct_motion` (h264_direct.c:208), the
     /// frame-picture AFR/FR → AFR/FR path (no col-parity games).
-    fn pred_spatial_direct(&mut self, mb_xy: usize, is_b8x8: bool, _direct_subs: &mut [bool; 4]) -> u8 {
+    fn pred_spatial_direct(
+        &mut self,
+        mb_xy: usize,
+        is_b8x8: bool,
+        _direct_subs: &mut [bool; 4],
+    ) -> u8 {
         let mut refs = [0i32; 2];
         let mut mvs = [[0i16; 2]; 2];
         let mut uses = [false; 2];
@@ -3907,10 +4210,7 @@ impl H264Decoder {
                     + (top_ref == r as i32) as i32
                     + (refc == r as i32) as i32;
                 if match_count > 1 {
-                    mvs[list] = [
-                        mid_pred(a[0], b[0], c[0]),
-                        mid_pred(a[1], b[1], c[1]),
-                    ];
+                    mvs[list] = [mid_pred(a[0], b[0], c[0]), mid_pred(a[1], b[1], c[1])];
                 } else if left_ref == r as i32 {
                     mvs[list] = a;
                 } else if top_ref == r as i32 {
@@ -3942,8 +4242,8 @@ impl H264Decoder {
         // Colocated shape (single_col, frame): col part + direct_8x8.
         let col_idx = self.ref_lists[1][0];
         let col = &self.refs[col_idx];
-        let col_is_16x16ish = col.part[mb_xy] == PART_16X16
-            || matches!(col.mb_type[mb_xy], 1 | 2 | 3);
+        let col_is_16x16ish =
+            col.part[mb_xy] == PART_16X16 || matches!(col.mb_type[mb_xy], 1 | 2 | 3);
         let col_part16 = col.part[mb_xy];
         let shape = if !is_b8x8 && col_is_16x16ish {
             PART_16X16
@@ -4012,8 +4312,7 @@ impl H264Decoder {
                     }
                 }
                 if !col_mb_intra
-                    && (l1ref0 == 0
-                        || (l1ref0 < 0 && l1ref1 == 0 && self.x264_build > 33))
+                    && (l1ref0 == 0 || (l1ref0 < 0 && l1ref1 == 0 && self.x264_build > 33))
                 {
                     let use1 = l1ref0 != 0;
                     let l1mv = if !use1 { &col_mv1 } else { &col_mv0 };
@@ -4040,7 +4339,12 @@ impl H264Decoder {
     }
 
     /// `pred_temp_direct_motion` (h264_direct.c:496), frame path.
-    fn pred_temporal_direct(&mut self, mb_xy: usize, is_b8x8: bool, direct_subs: &mut [bool; 4]) -> u8 {
+    fn pred_temporal_direct(
+        &mut self,
+        mb_xy: usize,
+        is_b8x8: bool,
+        direct_subs: &mut [bool; 4],
+    ) -> u8 {
         let col_idx = self.ref_lists[1][0];
         let col = &self.refs[col_idx];
         let col_is_16x16ish =
@@ -4087,7 +4391,10 @@ impl H264Decoder {
                 let my = (scale as i32 * mv_col[1] as i32 + 128) >> 8;
                 refl0 = ref0;
                 mv0 = [mx as i16, my as i16];
-                mv1 = [(mx - mv_col[0] as i32) as i16, (my - mv_col[1] as i32) as i16];
+                mv1 = [
+                    (mx - mv_col[0] as i32) as i16,
+                    (my - mv_col[1] as i32) as i16,
+                ];
             }
             for r in 0..4 {
                 for c in 0..4 {
@@ -4141,8 +4448,7 @@ impl H264Decoder {
             let my = (scale as i32 * mv_col[1] as i32 + 128) >> 8;
             for r in 0..2 {
                 for c in 0..2 {
-                    self.mv_cache[0][SCAN8[i8 * 4] + 8 * r + c] =
-                        [mx as i16, my as i16];
+                    self.mv_cache[0][SCAN8[i8 * 4] + 8 * r + c] = [mx as i16, my as i16];
                     self.mv_cache[1][SCAN8[i8 * 4] + 8 * r + c] = [
                         (mx - mv_col[0] as i32) as i16,
                         (my - mv_col[1] as i32) as i16,
@@ -4171,8 +4477,7 @@ impl H264Decoder {
                 for list in 0..self.list_count {
                     for j in 0..counts[list] {
                         if let Some(&r) = self.ref_lists[list].get(j) {
-                            pic.ref_poc[list][j] =
-                                4 * self.refs[r].frame_num as i32 + 3;
+                            pic.ref_poc[list][j] = 4 * self.refs[r].frame_num as i32 + 3;
                         }
                     }
                 }
@@ -4325,6 +4630,7 @@ impl H264Decoder {
             self.finish_picture()?; // emit the finished picture first
             self.cur_nal_ref_idc = nal.ref_idc;
             self.cur_is_b = self.slice_type_nos == 1;
+            self.next_list_count = if self.cur_is_b { 2 } else { 1 };
             self.start_new_picture(nal.kind == 5);
             self.cur_is_ref = nal.ref_idc != 0;
             self.frame_num = self.slice_frame_num;
@@ -4453,8 +4759,38 @@ impl H264Decoder {
             .as_ref()
             .map(|s| s.ref_frame_count.max(1))
             .unwrap_or(1) as usize;
-        let keep = self.cur_is_ref;
+        let keep = self.cur_is_ref && !self.mmco_reset;
         self.refs.insert(0, pic);
+        // Explicit marking (MMCO ops 1/5) — the sliding window only
+        // applies without it (ff_h264_execute_ref_pic_marking).
+        let has_mmco5 = self.mmco_ops.iter().any(|&(op, _)| op == 5);
+        let max_fn = 1i64 << self.sps.as_ref().unwrap().log2_max_frame_num;
+        let cur_fn = self.frame_num as i64;
+        if !self.mmco_ops.is_empty() && !has_mmco5 {
+            // op 1: unmark the short-term picture `difference_of_pic_nums
+            // - 1` before the current (pred walk as in reordering);
+            // op 3: same walk, picture LEAVES the short-term DPB (the
+            // long-term store itself is Phase E).
+            let mut pred = cur_fn;
+            for &(op, val) in &self.mmco_ops {
+                if op != 1 && op != 3 {
+                    continue;
+                }
+                pred -= val as i64 + 1;
+                if pred < 0 {
+                    pred += max_fn;
+                }
+                let want = if pred > cur_fn { pred - max_fn } else { pred };
+                if let Some(pos) = self.refs.iter().position(|r| r.frame_num as i64 == want) {
+                    if pos != 0 {
+                        self.refs.remove(pos);
+                    }
+                }
+            }
+        }
+        if has_mmco5 {
+            self.mmco_reset = true;
+        }
         let pic_idx = 0usize;
         let pic = &self.refs[pic_idx];
         let cur_poc = pic.poc;
@@ -4480,9 +4816,9 @@ impl H264Decoder {
         }
         self.frame_count += 1;
         self.cur = None; // picture moved into the DPB above
-        if keep {
+        if keep && self.mmco_ops.is_empty() {
             self.refs.truncate(max_refs);
-        } else {
+        } else if !keep {
             self.refs.remove(pic_idx);
         }
         // Picture-end POC state (ff_h264_field_end, h264_slice.c:459-463):
@@ -4494,7 +4830,9 @@ impl H264Decoder {
         self.poc_prev_frame_num_offset = self.poc_frame_num_offset;
         self.poc_prev_frame_num = self.slice_frame_num as i32;
         // Output reordering (h264_select_output_frame, h264_slice.c:1313).
-        self.select_output_frame(frame, cur_poc, cur_key);
+        let mmco_reset = self.mmco_reset;
+        self.mmco_reset = false;
+        self.select_output_frame(frame, cur_poc, cur_key, mmco_reset);
         self.got_mb = false;
         Ok(())
     }
@@ -4502,7 +4840,7 @@ impl H264Decoder {
     /// `h264_select_output_frame` — push the finished frame into the
     /// delayed buffer and emit whatever is ready. `mmco_reset` is always
     /// false here (explicit marking is Phase E).
-    fn select_output_frame(&mut self, frame: Frame, cur_poc: i32, cur_key: bool) {
+    fn select_output_frame(&mut self, frame: Frame, cur_poc: i32, cur_key: bool, mmco_reset: bool) {
         let sps = self.sps.clone().unwrap();
         if sps.bitstream_restriction {
             self.has_b_frames = self.has_b_frames.max(sps.num_reorder_frames);
@@ -4542,11 +4880,15 @@ impl H264Decoder {
             self.has_b_frames = out_of_order;
         }
 
+        let reset = self.mmco_reset || mmco_reset;
+        if reset {
+            self.mmco_reset = false;
+        }
         self.delayed.push(DelayedFrame {
             frame,
             poc: cur_poc,
             key: cur_key,
-            mmco_reset: false,
+            mmco_reset: reset,
         });
         let pics = self.delayed.len();
 
@@ -4608,18 +4950,15 @@ impl H264Decoder {
                 let mut sorted: Vec<usize> = Vec::new();
                 for dir in [1 ^ list, 0 ^ list] {
                     loop {
+                        // C: ((poc > limit) ^ dir) && ((poc < best) ^ dir).
                         let mut best = if dir == 1 { i32::MIN } else { i32::MAX };
                         let mut best_i = None;
                         for (i, r) in self.refs.iter().enumerate() {
                             let poc = r.poc;
-                            if ((poc > cur_poc) ^ (dir == 1)) == false {
-                                continue;
+                            if (poc > cur_poc) != (dir == 1) && (poc < best) != (dir == 1) {
+                                best = poc;
+                                best_i = Some(i);
                             }
-                            if (poc < best) ^ (dir == 1) == false {
-                                continue;
-                            }
-                            best = poc;
-                            best_i = Some(i);
                         }
                         match best_i {
                             Some(i) => sorted.push(i),
