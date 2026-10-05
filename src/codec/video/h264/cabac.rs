@@ -40,6 +40,12 @@ fn mlps_state(i: usize) -> u8 {
     FF_H264_CABAC_TABLES[MLPS_STATE_OFF + i]
 }
 
+fn unlikely_log() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("H264_ENGLOG").is_some())
+}
+
 const CABAC_BITS: i32 = 16;
 const CABAC_MASK: i32 = (1 << CABAC_BITS) - 1;
 
@@ -96,6 +102,8 @@ impl Cabac {
     /// `get_cabac_inline` (cabac_functions.h:116) — one decision bin.
     #[inline]
     pub(super) fn get(&mut self, state: &mut u8) -> u32 {
+        let s0 = *state;
+        let log = unlikely_log();
         let s = *state as i32;
         let range_lps = lps_range(2 * (self.range as usize & 0xC0) + s as usize);
 
@@ -117,6 +125,9 @@ impl Cabac {
         self.low <<= shift;
         if self.low & CABAC_MASK == 0 {
             self.refill2();
+        }
+        if log {
+            eprintln!("G {} {}", s0, bit);
         }
         bit
     }

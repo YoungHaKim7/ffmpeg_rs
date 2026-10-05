@@ -2213,11 +2213,30 @@ impl H264Decoder {
                 pic.direct8[mb_xy] = d8;
             }
             for i in 0..4usize {
-                let (bw, bh, pcount) = match sub_types[i] {
-                    0 => (2usize, 2usize, 1usize),
-                    1 => (2, 1, 2),
-                    2 => (1, 2, 2),
-                    _ => (1, 1, 4),
+                // B sub shapes from ff_h264_b_sub_mb_type_info
+                // (B_SUB_MB_TYPE_INFO): shape 0=sub8x8, 1=sub8x4,
+                // 2=sub4x8, 3=sub4x4 — NOT the P mapping.
+                let (bw, bh, pcount) = match B_SUB_MB_TYPE_INFO[sub_types[i] * 4] {
+                    0 => (
+                        2usize,
+                        2usize,
+                        B_SUB_MB_TYPE_INFO[sub_types[i] * 4 + 1] as usize,
+                    ),
+                    1 => (
+                        2usize,
+                        1usize,
+                        B_SUB_MB_TYPE_INFO[sub_types[i] * 4 + 1] as usize,
+                    ),
+                    2 => (
+                        1usize,
+                        2usize,
+                        B_SUB_MB_TYPE_INFO[sub_types[i] * 4 + 1] as usize,
+                    ),
+                    _ => (
+                        1usize,
+                        1usize,
+                        B_SUB_MB_TYPE_INFO[sub_types[i] * 4 + 1] as usize,
+                    ),
                 };
                 for j in 0..pcount {
                     let block = 4 * i + bw * j;
@@ -2657,6 +2676,9 @@ impl H264Decoder {
         let idx = SCAN8[n];
         let amvd0 = self.mvd_cache[0][idx - 1][0] as i32 + self.mvd_cache[0][idx - 8][0] as i32;
         let amvd1 = self.mvd_cache[0][idx - 1][1] as i32 + self.mvd_cache[0][idx - 8][1] as i32;
+        if std::env::var_os("H264_ENGLOG").is_some() {
+            eprintln!("EL mvd n={n} list=0 amvd=({amvd0},{amvd1})");
+        }
         let (mxd, mpx) = self.cabac_mb_mvd(cab, 40, amvd0)?;
         let (myd, mpy) = self.cabac_mb_mvd(cab, 47, amvd1)?;
         Ok((mxd, myd, mpx, mpy))
