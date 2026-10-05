@@ -119,6 +119,11 @@ pub struct H264Decoder {
     /// op 1; op 5 clears the DPB (and flags the reorder reset).
     mmco_ops: Vec<(u32, u32)>,
     mmco_reset: bool,
+    /// default_ref (h264_refs.c:210): the previous list's [0] picture,
+    /// used to conceal missing references. Concealed entries are APPENDED
+    /// past the DPB window (refs[..refs_window] is the sliding-window set).
+    default_ref: [Option<Picture>; 2],
+    refs_window: usize,
     /// Parsed ref_pic_list_modification ops per list (idc, value),
     /// applied after the previous picture enters the DPB.
     pub(super) reorder_ops0: Vec<(u32, u32)>,
@@ -245,6 +250,8 @@ impl H264Decoder {
             stored_ref_lists: false,
             mmco_ops: Vec::new(),
             mmco_reset: false,
+            default_ref: [None, None],
+            refs_window: 0,
             reorder_ops0: Vec::new(),
             reorder_ops1: Vec::new(),
             pwt: PredWeightTable::default(),
@@ -319,6 +326,7 @@ impl H264Decoder {
     pub fn flush(&mut self) {
         self.cur = None;
         self.refs.clear();
+        self.refs_window = 0;
         self.ref_lists[0].clear();
         self.ref_lists[1].clear();
         self.slice_table.clear();
@@ -4949,19 +4957,25 @@ impl H264Decoder {
             for list in 0..2usize {
                 let mut sorted: Vec<usize> = Vec::new();
                 for dir in [1 ^ list, 0 ^ list] {
+                    // add_sorted (h264_refs.c:103): pick the best POC at
+                    // or beyond the running limit, then advance the limit
+                    // PAST the taken picture (poc - dir).
+                    let mut limit = cur_poc;
                     loop {
-                        // C: ((poc > limit) ^ dir) && ((poc < best) ^ dir).
                         let mut best = if dir == 1 { i32::MIN } else { i32::MAX };
                         let mut best_i = None;
                         for (i, r) in self.refs.iter().enumerate() {
                             let poc = r.poc;
-                            if (poc > cur_poc) != (dir == 1) && (poc < best) != (dir == 1) {
+                            if (poc > limit) != (dir == 1) && (poc < best) != (dir == 1) {
                                 best = poc;
                                 best_i = Some(i);
                             }
                         }
                         match best_i {
-                            Some(i) => sorted.push(i),
+                            Some(i) => {
+                                sorted.push(i);
+                                limit = best - dir as i32;
+                            }
                             None => break,
                         }
                     }
@@ -4978,16 +4992,25 @@ impl H264Decoder {
             lists[0].sort_by_key(|&i| std::cmp::Reverse(pic_num(self.refs[i].frame_num)));
         }
 
-        // Per-list modification (ff_h264_build_ref_list's pred walk).
+        // Per-list modification (ff_h264_build_ref_list, h264_refs.c:299+
+        // 309-389): C pads the list to ref_count with ZERO entries, then
+        // per op searches the slot RANGE [index, ref_count) for the pic
+        // and shifts; a picture not in the DPB zeroes the slot (missing)
+        // and a final pass fills missing slots with the cached
+        // default_ref (concealment — no error without AV_EF_EXPLODE).
         for list in 0..self.list_count {
             let ops = if list == 0 {
                 &self.reorder_ops0
             } else {
                 &self.reorder_ops1
             };
-            let mut list_v = lists[list].clone();
+            let rc = self.ref_counts[list] as usize;
+            // Option<usize>: None = missing (C's zeroed entry).
+            let mut list_v: Vec<Option<usize>> = lists[list].iter().copied().map(Some).collect();
+            list_v.resize(rc.max(list_v.len()), None);
+            list_v.truncate(rc);
             let mut pred = cur_fn;
-            for (idx, &(op, val)) in ops.iter().enumerate() {
+            for (index, &(op, val)) in ops.iter().enumerate() {
                 let abs_diff = val as i64 + 1;
                 if op == 0 {
                     pred -= abs_diff;
@@ -5001,19 +5024,72 @@ impl H264Decoder {
                     }
                 }
                 let want = if pred > cur_fn { pred - max_fn } else { pred };
-                let Some(pos) = list_v
-                    .iter()
-                    .position(|&i| pic_num(self.refs[i].frame_num) == want)
-                else {
-                    return Err(Error::InvalidData(
-                        "reference picture missing during reorder".into(),
-                    ));
-                };
-                let r = list_v.remove(pos);
-                list_v.insert(idx.min(list_v.len()), r);
+                // C searches short_ref for the PICTURE first (i < 0 →
+                // missing → zeroed slot), then moves the existing entry.
+                let in_dpb = self.refs.iter().any(|r| pic_num(r.frame_num) == want);
+                if !in_dpb {
+                    if std::env::var_os("H264_DUMP").is_some() {
+                        eprintln!("REORDER MISS list={list} fn={cur_fn} want={want} — concealed");
+                    }
+                    list_v[index] = None;
+                    continue;
+                }
+                // Search the list from index for the pic_id; not found
+                // (already before index) → shift from the END (C's
+                // loop falls through at ref_count-1).
+                let mut i = index;
+                while i < rc {
+                    match list_v[i] {
+                        Some(x) if pic_num(self.refs[x].frame_num) == want => break,
+                        _ => i += 1,
+                    }
+                }
+                while i > index {
+                    list_v[i] = list_v[i - 1];
+                    i -= 1;
+                }
+                if let Some(pos) = self.refs.iter().position(|r| pic_num(r.frame_num) == want) {
+                    list_v[index] = Some(pos);
+                }
             }
-            list_v.truncate(self.ref_counts[list] as usize);
-            self.ref_lists[list] = list_v;
+            // Final pass: missing slots get the cached default_ref
+            // (h264_refs.c:392-409); no default anywhere → hard error.
+            for slot in list_v.iter_mut() {
+                if slot.is_none() {
+                    let pic = match self.default_ref[list]
+                        .clone()
+                        .or_else(|| self.refs.first().cloned())
+                    {
+                        Some(p) => p,
+                        None => {
+                            return Err(Error::InvalidData(
+                                "missing reference picture with no default".into(),
+                            ));
+                        }
+                    };
+                    let id = pic.id;
+                    // Concealed entries live past the DPB window.
+                    match self.refs[self.refs_window..]
+                        .iter()
+                        .position(|r| r.id == id)
+                    {
+                        Some(off) => *slot = Some(self.refs_window + off),
+                        None => {
+                            self.refs.push(pic);
+                            *slot = Some(self.refs.len() - 1);
+                        }
+                    }
+                }
+            }
+            self.ref_lists[list] = list_v.into_iter().flatten().collect();
+        }
+        // default_ref[list] = ref_list[list][0] (h264_refs.c:210).
+        for list in 0..self.list_count {
+            if let Some(&first) = self.ref_lists[list].first() {
+                if first < self.refs_window {
+                    self.default_ref[list] = Some(self.refs[first].clone());
+                }
+            }
         }
         Ok(())
     }

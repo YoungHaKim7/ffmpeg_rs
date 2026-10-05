@@ -4,6 +4,7 @@
 
 use crate::codec::video::h264::{MbDeblock, PART_16X16};
 
+#[derive(Clone)]
 pub(crate) struct Picture {
     pub(crate) w: usize,
     pub(crate) h: usize,
