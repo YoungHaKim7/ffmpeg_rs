@@ -1831,8 +1831,33 @@ impl H264Decoder {
         }
     }
 
-    /// `decode_mb_skip` (h264_mvpred.h:950): P_Skip = zero-out + pskip mv.
+    /// `decode_mb_skip` (h264_mvpred.h:950): P_Skip = zero-out + pskip
+    /// mv; B_Skip = direct-mode prediction (the B branch).
     fn decode_mb_skip(&mut self, mb_xy: usize) {
+        if self.slice_type_nos == 1 {
+            // B: pred_direct_motion after fill_decode_neighbors (C calls
+            // fill_decode_caches only for spatial direct; the direct
+            // predictors read the caches, so fill both lists).
+            self.fill_decode_caches(MB_INTER);
+            self.mb_type = MB_INTER;
+            self.cbp = 0;
+            self.cur_skip = true;
+            self.chroma_pred_raw = 0;
+            for i in 0..48usize {
+                self.nnz_cache[SCAN8[i]] = 0;
+            }
+            let mut direct_subs = [false; 4];
+            let part = self.pred_direct_motion(mb_xy, false, &mut direct_subs);
+            self.cur_part = part;
+            let pic = self.cur.as_mut().unwrap();
+            pic.mb_type[mb_xy] = MB_INTER;
+            pic.direct[mb_xy] = true;
+            pic.direct8[mb_xy] = [true; 4];
+            pic.nnz[mb_xy] = [0; 48];
+            self.record_mb(mb_xy);
+            self.prev_mb_skipped = true;
+            return;
+        }
         self.fill_decode_caches(MB_INTER);
         // hl_decode_mb reads self.mb_type (C reads
         // cur_pic.mb_type[mb_xy]); set it or the stale intra type from
@@ -2068,7 +2093,11 @@ impl H264Decoder {
 
     #[inline]
     fn cab_get(&mut self, cab: &mut Cabac, state: usize) -> u32 {
-        cab.get(&mut self.cabac_state[state])
+        let b = cab.get(&mut self.cabac_state[state]);
+        if std::env::var_os("H264_BINLOG").is_some() {
+            eprintln!("BIN {state} {b}");
+        }
+        b
     }
 
     /// The B inter path of `ff_h264_decode_mb_cabac` (h264_cabac.c:1968+
@@ -2133,6 +2162,9 @@ impl H264Decoder {
             for st in sub_types.iter_mut() {
                 *st = self.cabac_b_mb_sub_type(cab)?;
             }
+            if std::env::var_os("H264_DUMP").is_some() {
+                eprintln!("  B8 mb={}:{} subs={:?}", self.mb_x, self.mb_y, sub_types);
+            }
             let mut refs8 = [[0i8; 2]; 4];
             for list in 0..2usize {
                 for i in 0..4usize {
@@ -2147,6 +2179,12 @@ impl H264Decoder {
                     let rc = self.ref_counts[list];
                     let raw = if rc > 1 {
                         let r = self.cabac_mb_ref(cab, list, 4 * i)?;
+                        if std::env::var_os("H264_DUMP").is_some() {
+                            eprintln!(
+                                "  B8ref mb={}:{} i={i} list={list} r={r}",
+                                self.mb_x, self.mb_y
+                            );
+                        }
                         if r as u32 >= rc {
                             return Err(Error::InvalidData(format!("reference {r} overflow")));
                         }
@@ -2953,7 +2991,7 @@ impl H264Decoder {
         self.cur_skip = false;
         self.chroma_pred_raw = 0;
 
-        // ---- mb_skip_flag (P slices) ----
+        // ---- mb_skip_flag (P/B slices) ----
         if self.slice_type_nos != 2 && self.cabac_mb_skip(cab) == 1 {
             if std::env::var_os("H264_DUMP").is_some() {
                 eprintln!("CMB {} {} SKIP", self.mb_x, self.mb_y);
@@ -2984,21 +3022,37 @@ impl H264Decoder {
                 Part::Intra(self.cabac_intra_mb_type(cab, 17, false)?)
             }
         } else if self.slice_type_nos == 1 {
-            // B (h264_cabac.c:1968-2002)
+            // B (h264_cabac.c:1968-2002): ctx = !IS_DIRECT(left-1) +
+            // 2*!IS_DIRECT(top-1) — C's "-1" makes an UNAVAILABLE
+            // neighbour (type 0 → -1, all bits set) read as DIRECT ⇒ it
+            // contributes 0; an available non-direct neighbour 1/2.
             let mb_xy = self.mb_x + self.mb_y * self.mb_width;
             let mut ctx = 0usize;
             {
                 let pic = self.cur.as_ref().unwrap();
-                let is_direct = |t: u32, xy: i64| -> bool {
-                    t == MB_INTER
-                        && xy >= 0
-                        && (xy as usize) < pic.direct.len()
-                        && pic.direct[xy as usize]
+                // Frame-picture neighbor coords (padding-column guard).
+                let left_xy = if self.mb_x > 0 { Some(mb_xy - 1) } else { None };
+                let top_xy = if self.mb_y > 0 {
+                    Some(mb_xy - self.mb_width)
+                } else {
+                    None
                 };
-                if !is_direct(self.n_left, mb_xy as i64 - 1) {
+                let non_direct = |t: u32, xy: Option<usize>| -> bool {
+                    match xy {
+                        Some(xy)
+                            if t != MB_UNAVAIL
+                                && xy < pic.direct.len()
+                                && !(t == MB_INTER && pic.direct[xy]) =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if non_direct(self.n_left, left_xy) {
                     ctx += 1;
                 }
-                if !is_direct(self.n_top, mb_xy as i64 - self.mb_width as i64) {
+                if non_direct(self.n_top, top_xy) {
                     ctx += 2;
                 }
             }
@@ -5037,12 +5091,15 @@ impl H264Decoder {
                 // Search the list from index for the pic_id; not found
                 // (already before index) → shift from the END (C's
                 // loop falls through at ref_count-1).
+                // C: for (i = index; i + 1 < ref_count; i++) if (match)
+                // break; — the body tests slots up to rc-2, i ends at
+                // rc-1 when nothing matched.
                 let mut i = index;
-                while i < rc {
-                    match list_v[i] {
-                        Some(x) if pic_num(self.refs[x].frame_num) == want => break,
-                        _ => i += 1,
+                while i + 1 < rc {
+                    if matches!(list_v[i], Some(x) if pic_num(self.refs[x].frame_num) == want) {
+                        break;
                     }
+                    i += 1;
                 }
                 while i > index {
                     list_v[i] = list_v[i - 1];
