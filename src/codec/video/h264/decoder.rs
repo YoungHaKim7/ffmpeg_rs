@@ -1202,8 +1202,12 @@ impl H264Decoder {
                 let raw = if f < 0 {
                     if std::env::var_os("H264_ENGLOG").is_some() {
                         eprintln!(
-                            "WB neg list={list} mb={}:{} blk={blk} lists={:?}",
-                            self.mb_x, self.mb_y, self.ref_lists[list]
+                            "WB neg list={list} mb={}:{} blk={blk} lists={:?} ids={:?} win={}",
+                            self.mb_x,
+                            self.mb_y,
+                            self.ref_lists[list],
+                            self.refs.iter().map(|r| r.id).collect::<Vec<_>>(),
+                            self.refs_window
                         );
                     }
                     -1
@@ -1881,7 +1885,7 @@ impl H264Decoder {
                 self.nnz_cache[SCAN8[i]] = 0;
             }
             let mut direct_subs = [false; 4];
-            let part = self.pred_direct_motion(mb_xy, false, &mut direct_subs);
+            let part = self.pred_direct_motion(mb_xy, false, &mut direct_subs, None);
             self.cur_part = part;
             // C's decode_mb_skip runs write_back_motion — the direct
             // caches must reach the picture or the NEXT MB's mvd/ref
@@ -2178,7 +2182,7 @@ impl H264Decoder {
         if b_type == 0 {
             // B_Direct_16x16: fill_decode_caches already ran with the
             // inter type; the direct prediction fills both lists.
-            let part = self.pred_direct_motion(mb_xy, false, &mut direct_subs);
+            let part = self.pred_direct_motion(mb_xy, false, &mut direct_subs, None);
             self.cur_part = part;
             let pic = self.cur.as_mut().unwrap();
             pic.direct[mb_xy] = true;
@@ -2231,6 +2235,12 @@ impl H264Decoder {
                         0
                     };
                     refs8[i][list] = self.ref_frm_l(raw, list);
+                    if std::env::var_os("H264_ENGLOG").is_some() {
+                        eprintln!(
+                            "B8SEED mb={}:{} i={i} list={list} raw={raw} f={} sub={} rc={rc}",
+                            self.mb_x, self.mb_y, refs8[i][list], sub_types[i]
+                        );
+                    }
                     self.set_ref_rect(list, 2 * (i & 1), 2 * (i >> 1), 2, 2, refs8[i][list]);
                 }
             }
@@ -2239,7 +2249,8 @@ impl H264Decoder {
             // IS_DIRECT sub check inside pred_direct).
             let any_direct = sub_types.iter().any(|&t| t == 0);
             if any_direct {
-                let part = self.pred_direct_motion(mb_xy, true, &mut direct_subs);
+                let st = sub_types;
+                let part = self.pred_direct_motion(mb_xy, true, &mut direct_subs, Some(&st));
                 if part != PART_8X8 {
                     self.cur_part = part;
                 }
@@ -4318,11 +4329,12 @@ impl H264Decoder {
         mb_xy: usize,
         is_b8x8: bool,
         direct_subs: &mut [bool; 4],
+        sub_is_direct: Option<&[usize; 4]>,
     ) -> u8 {
         if self.direct_spatial {
-            self.pred_spatial_direct(mb_xy, is_b8x8, direct_subs)
+            self.pred_spatial_direct(mb_xy, is_b8x8, direct_subs, sub_is_direct)
         } else {
-            self.pred_temporal_direct(mb_xy, is_b8x8, direct_subs)
+            self.pred_temporal_direct(mb_xy, is_b8x8, direct_subs, sub_is_direct)
         }
     }
 
@@ -4333,6 +4345,7 @@ impl H264Decoder {
         mb_xy: usize,
         is_b8x8: bool,
         _direct_subs: &mut [bool; 4],
+        sub_is_direct: Option<&[usize; 4]>,
     ) -> u8 {
         let mut refs = [0i32; 2];
         let mut mvs = [[0i16; 2]; 2];
@@ -4454,8 +4467,13 @@ impl H264Decoder {
                 }
             }
         } else {
-            // Per-8x8 quadrants with col_zero_flag.
+            // Per-8x8 quadrants with col_zero_flag. C skips non-direct
+            // quadrants (h264_direct.c:376) — their refs were seeded by
+            // the caller; this loop must not clobber them.
             for i8 in 0..4usize {
+                if is_b8x8 && sub_is_direct.is_some_and(|st| st[i8] != 0) {
+                    continue;
+                }
                 let x8 = i8 & 1;
                 let y8 = i8 >> 1;
                 let l1ref0 = col_ri0[4 * mb_xy + i8] as i32;
@@ -4507,6 +4525,7 @@ impl H264Decoder {
         mb_xy: usize,
         is_b8x8: bool,
         direct_subs: &mut [bool; 4],
+        sub_is_direct: Option<&[usize; 4]>,
     ) -> u8 {
         let col_idx = self.ref_lists[1][0];
         let col = &self.refs[col_idx];
@@ -4576,6 +4595,9 @@ impl H264Decoder {
         for i8 in 0..4usize {
             let x8 = i8 & 1;
             let y8 = i8 >> 1;
+            if is_b8x8 && sub_is_direct.is_some_and(|st| st[i8] != 0) {
+                continue;
+            }
             if is_b8x8 && !direct_subs[i8] {
                 continue;
             }
@@ -4990,9 +5012,18 @@ impl H264Decoder {
         self.frame_count += 1;
         self.cur = None; // picture moved into the DPB above
         if keep && self.mmco_ops.is_empty() {
-            self.refs.truncate(max_refs);
+            // Sliding window over the FIRST window entries; concealed
+            // default refs appended past the window must survive (C
+            // keeps them in default_ref, outside short_ref).
+            if self.refs.len() > max_refs {
+                let tail = self.refs.split_off(max_refs);
+                self.refs.truncate(max_refs);
+                self.refs.extend(tail);
+            }
+            self.refs_window = self.refs_window.min(max_refs);
         } else if !keep {
             self.refs.remove(pic_idx);
+            self.refs_window = self.refs_window.saturating_sub(1);
         }
         // Picture-end POC state (ff_h264_field_end, h264_slice.c:459-463):
         // prev msb/lsb only for reference pictures, offsets always.
