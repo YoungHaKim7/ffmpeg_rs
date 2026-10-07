@@ -990,17 +990,6 @@ impl H264Decoder {
                                 + i * b_stride;
                             self.mvd_cache[list][3 + 8 * (1 + i)] = pic.mvd[list][bxy];
                         } else {
-                            if std::env::var_os("H264_ENGLOG").is_some() {
-                                eprintln!(
-                                    "MVDFILL0 mb={}:{} list={list} nL={} ri={:?}",
-                                    self.mb_x,
-                                    self.mb_y,
-                                    self.n_left,
-                                    (0..4)
-                                        .map(|k| pic.ref_index[list].get(4 * left_xy + k).copied())
-                                        .collect::<Vec<_>>()
-                                );
-                            }
                             self.mvd_cache[list][3 + 8 * (1 + i)] = [0, 0];
                         }
                     }
@@ -1200,36 +1189,12 @@ impl H264Decoder {
                 let f = self.ref_cache[list][SCAN8[blk]];
                 pic.ref_pic[list][4 * mb_xy + k] = f as i32;
                 let raw = if f < 0 {
-                    if std::env::var_os("H264_ENGLOG").is_some() {
-                        eprintln!(
-                            "WB neg list={list} mb={}:{} blk={blk} lists={:?} ids={:?} win={}",
-                            self.mb_x,
-                            self.mb_y,
-                            self.ref_lists[list],
-                            self.refs.iter().map(|r| r.id).collect::<Vec<_>>(),
-                            self.refs_window
-                        );
-                    }
                     -1
                 } else {
-                    match self.ref_lists[list]
+                    self.ref_lists[list]
                         .iter()
                         .position(|&i| self.refs.get(i).is_some_and(|p| p.id as i8 == f))
-                    {
-                        Some(p) => p as i8,
-                        None => {
-                            if std::env::var_os("H264_ENGLOG").is_some() {
-                                eprintln!(
-                                    "WB miss list={list} mb={}:{} f={f} lists={:?} ids={:?}",
-                                    self.mb_x,
-                                    self.mb_y,
-                                    self.ref_lists[list],
-                                    self.refs.iter().map(|r| r.id).collect::<Vec<_>>()
-                                );
-                            }
-                            -1
-                        }
-                    }
+                        .map_or(-1, |p| p as i8)
                 };
                 pic.ref_index[list][4 * mb_xy + k] = raw;
             }
@@ -2235,12 +2200,6 @@ impl H264Decoder {
                         0
                     };
                     refs8[i][list] = self.ref_frm_l(raw, list);
-                    if std::env::var_os("H264_ENGLOG").is_some() {
-                        eprintln!(
-                            "B8SEED mb={}:{} i={i} list={list} raw={raw} f={} sub={} rc={rc}",
-                            self.mb_x, self.mb_y, refs8[i][list], sub_types[i]
-                        );
-                    }
                     self.set_ref_rect(list, 2 * (i & 1), 2 * (i >> 1), 2, 2, refs8[i][list]);
                 }
             }
@@ -2719,9 +2678,6 @@ impl H264Decoder {
             }
         }
         let abs = mvd.min(70) as u8;
-        if std::env::var_os("H264_ENGLOG").is_some() {
-            eprintln!("EL mvdval base={ctxbase} mvd={mvd}");
-        }
         Ok((cab.bypass_sign(-mvd), abs))
     }
 
